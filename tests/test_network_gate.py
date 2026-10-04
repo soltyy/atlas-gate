@@ -149,3 +149,29 @@ async def test_sse_and_control_mirrors(network):
     for suffix, body in (("tools", {"tools": []}), ("interrupt", {}), ("steer", {"text": "hint"})):
         reply = await client.post(f"/harness/agent/sessions/{sid}/{suffix}", json=body)
         assert reply.status_code not in (404, 500), reply.text
+
+
+@pytest.mark.asyncio
+async def test_stop_after_route_disabled_and_quota_before_send(network, monkeypatch):
+    from datetime import datetime, timezone
+    from atlas_gate.gate.errors import GateError
+    client, app, routers, settings, creds, other = network
+    sid = await create(client)
+    state = app.state.gate
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    original = state.nodes.request
+    async def unavailable(*args, **kwargs):
+        raise GateError(503, "node_unavailable", "discovery failed before POST")
+    monkeypatch.setattr(state.nodes, "request", unavailable)
+    refused = await client.post(f"/harness/agent/sessions/{sid}/prompt?mode=async", json={"id": "refused", "text": "hello"})
+    assert refused.status_code == 503
+    assert state.store.agent_turns("first", day) == 0
+    monkeypatch.setattr(state.nodes, "request", original)
+    accepted = await client.post(f"/harness/agent/sessions/{sid}/prompt?mode=async", json={"id": "active", "text": "call:echo"})
+    assert accepted.status_code == 202
+    await events(client, sid, "active")
+    state.orgs["test-org"].route("claude-sub").enabled = False
+    stopped = await client.post(f"/harness/agent/sessions/{sid}/interrupt", json={})
+    assert stopped.status_code == 200, stopped.text
+    terminal = await events(client, sid, "active", True)
+    assert next(e for e in terminal if e["type"] == "result")["subtype"] == "interrupted"

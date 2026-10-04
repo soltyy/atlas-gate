@@ -38,3 +38,11 @@ SSE клиента через async producer/polling; атомарная дед�
 
 Исходный встроенный Gate в Router временно остаётся совместимым до миграции.
 Работающий AtlasRouter и профиль организации не переключены этим этапом.
+
+Проверка первого этапа: Gate — 12 passed в контуре с двумя HTTP Router/stub;
+отдельно 9 passed без SDK и 3 сетевых skip. UI — 41 passed, typecheck/build;
+wheel собран и проверен на отсутствие SDK/Router зависимостей. Router —
+221 passed, 28 opt-in skip. Покрыты выбор менее занятого узла, конкурентные
+create, одинаковые local IDs, владение, Gate restart, compact/resume, SSE,
+возврат квоты при отказе до POST и interrupt после отключения маршрута.
+Реальные подписки и EDT в этой приёмке не запускались.

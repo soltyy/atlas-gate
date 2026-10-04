@@ -45,11 +45,12 @@ def _selection(state, device, model=None, route_id=None):
     return str(selected["route_id"]), str(selected["model"])
 
 
-def _policy(state, device, binding, request):
-    _selection(state, device, binding["model"], binding["route"])
-    for role in json.loads(binding["roles"]):
-        if role.get("model") not in (None, "", "inherit"):
-            _selection(state, device, role["model"], binding["route"])
+def _policy(state, device, binding, request, require_model=True):
+    if require_model:
+        _selection(state, device, binding["model"], binding["route"])
+        for role in json.loads(binding["roles"]):
+            if role.get("model") not in (None, "", "inherit"):
+                _selection(state, device, role["model"], binding["route"])
     check_data_class(state, device, request, binding["route"])
     node = state.nodes.config.get(binding["node_id"])
     if node is None or not node.enabled or device.org not in node.orgs or binding["route"] not in node.routes:
@@ -132,7 +133,13 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if not state.store.agent_turns_reserve(device.user_id, day, org_of(state, device).quota.agent_turns_per_day):
         raise GateError(402, "quota_exceeded", "дневной лимит исчерпан")
-    response = await state.nodes.request(binding["node_id"], "POST", _path(binding, "/prompt"), content=body.model_dump_json().encode(), params={"mode": "async"}, expected_boot=binding["boot_id"])
+    try:
+        response = await state.nodes.request(binding["node_id"], "POST", _path(binding, "/prompt"), content=body.model_dump_json().encode(), params={"mode": "async"}, expected_boot=binding["boot_id"])
+    except GateError as failed:
+        if failed.code == "node_unavailable":
+            # Такой отказ происходит до отправки POST; сетевой lost ACK остаётся unknown.
+            state.store.agent_turns_release(device.user_id, day)
+        raise
     if response.status_code >= 400:
         state.store.agent_turns_release(device.user_id, day)
         return _response(response)
@@ -163,7 +170,7 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
 async def _delegate(request, device, sid, method, suffix):
     state = gate(request)
     binding = state.routing.get(sid, device)
-    _policy(state, device, binding, request)
+    _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"))
     response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=await request.body(), params=request.query_params, expected_boot=binding["boot_id"])
     return _response(response)
 
@@ -212,7 +219,7 @@ async def agent_turn(sid: str, turn_id: str, request: Request, device: Device = 
 async def agent_events(sid: str, turn_id: str, request: Request, device: Device = Depends(require_device)):
     state = gate(request)
     binding = state.routing.get(sid, device)
-    _policy(state, device, binding, request)
+    _policy(state, device, binding, request, require_model=False)
     try:
         after, wait = int(request.query_params.get("after", 0)), int(request.query_params.get("wait", 0))
         if after < 0 or wait < 0:
