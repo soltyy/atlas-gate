@@ -52,6 +52,15 @@ export interface Reloaded {
   warnings: Record<string, string[]>
 }
 
+export interface RouterNode {
+  node_id: string; enabled: boolean; revoked: boolean; transport: string
+  orgs: string[]; routes: string[]; account_group: string; account_turn_capacity: number; cooldown_seconds: number
+  credential: { expires: number; revoked: number } | null
+  status: { backend: string; ready: boolean; draining: boolean; sessions: number; capacity: number; activeTurns: number; reservedUnits: number; turnCapacity: number; activeSubagents: number; quota: { status: string } | null } | null
+  bindings: { id: string; device_id: string; route: string; status: string }[]
+}
+export interface NodeEnrollment { id: string; node_id: string; fingerprint: string; expires: number }
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -71,6 +80,12 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const gateApi = {
+  nodes: () => call<{ nodes: RouterNode[] }>('GET', '/harness/admin/nodes'),
+  nodeEnrollments: () => call<{ enrollments: NodeEnrollment[] }>('GET', '/harness/admin/node-enrollments'),
+  nodeInvite: (id: string) => call<{ invitation: string; expiresIn: number }>('POST', `/harness/admin/nodes/${encodeURIComponent(id)}/invite`),
+  nodeApprove: (id: string) => call<{ ok: boolean }>('POST', `/harness/admin/node-enrollments/${encodeURIComponent(id)}/approve`),
+  nodeRevoke: (id: string) => call<{ ok: boolean }>('POST', `/harness/admin/nodes/${encodeURIComponent(id)}/revoke`),
+  nodeDrain: (id: string, enabled: boolean) => call<{ draining: boolean }>('POST', `/harness/admin/nodes/${encodeURIComponent(id)}/drain`, { enabled }),
   enrollments: () => call<{ enrollments: Enrollment[]; orgs: string[] }>('GET', '/harness/admin/enrollments?status=pending'),
   devices: () => call<{ devices: Device[] }>('GET', '/harness/admin/devices'),
   approve: (user_code: string, org: string, user: { id: string; email: string; name: string }) =>

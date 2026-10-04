@@ -5,8 +5,9 @@
 import { onMounted, reactive, ref } from 'vue'
 import { adminToken, gateApi, setAdminToken, type Device, type Enrollment } from './api'
 import OrgsSection from './orgs/OrgsSection.vue'
+import NodesSection from './NodesSection.vue'
 
-const section = ref<'devices' | 'orgs'>('devices')
+const section = ref<'devices' | 'orgs' | 'nodes'>('devices')
 
 const enrollments = ref<Enrollment[]>([])
 const orgs = ref<string[]>([])
@@ -90,6 +91,7 @@ onMounted(() => void refresh())
         Устройства <span v-if="enrollments.length" class="badge warn">{{ enrollments.length }}</span>
       </button>
       <button type="button" :class="{ active: section === 'orgs' }" data-section="orgs" @click="section = 'orgs'">Организации</button>
+      <button type="button" :class="{ active: section === 'nodes' }" data-section="nodes" @click="section = 'nodes'">Router</button>
     </nav>
     <span class="spacer" />
     <details class="access">
@@ -99,12 +101,13 @@ onMounted(() => void refresh())
         <input id="gate-token" v-model="token" type="password" autocomplete="off" size="24" />
         <button type="submit" class="small primary">Применить</button>
       </form>
-      <p class="muted hint">Нужен, только если админка открыта не с машины роутера.</p>
+      <p class="muted hint">Ключ администратора Gate обязателен и на локальной машине.</p>
     </details>
   </header>
   <main v-if="section === 'orgs'">
     <OrgsSection />
   </main>
+  <main v-else-if="section === 'nodes'"><NodesSection /></main>
   <main v-else>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="notice" class="note">{{ notice }}</p>

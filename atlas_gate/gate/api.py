@@ -70,12 +70,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             state.ready.set()
 
     task = asyncio.create_task(first_reload(), name="atlas-gate-reload")
+    async def recovery():
+        from .agent import _watch
+        await state.ready.wait()
+        watched = set()
+        synchronized = 0
+        while True:
+            await state.routing.reconcile()
+            await state.operations.reconcile(state.nodes)
+            if time.monotonic() - synchronized > 30:
+                await state.routing.sync_bindings()
+                synchronized = time.monotonic()
+            rows = state.store._all("SELECT o.*, b.id binding_id FROM router_operations o JOIN router_bindings b ON b.id=o.session_id LEFT JOIN router_usage_receipts r ON r.session_id=o.session_id AND r.turn_id=o.turn_id WHERE o.state='complete' AND o.status<400 AND o.turn_id IS NOT NULL AND o.accounted=0 AND r.turn_id IS NULL")
+            from .state import Device
+            for row in rows:
+                key = (row["session_id"], row["turn_id"])
+                if key in watched:
+                    continue
+                binding = state.store._one("SELECT * FROM router_bindings WHERE id=?", (row["session_id"],))
+                dev = state.store.device(row["device_id"])
+                if not binding or not dev:
+                    continue
+                device = Device(dev["device_id"], dev["org"], dev["user_id"], dev["user_email"], dev["user_name"], dev)
+                watched.add(key)
+                watcher = asyncio.create_task(_watch(state, binding, row["turn_id"], device))
+                state.watchers.add(watcher)
+                watcher.add_done_callback(state.watchers.discard)
+                watcher.add_done_callback(lambda done, key=key: watched.discard(key))
+            await asyncio.sleep(2)
+    recovery_task = asyncio.create_task(recovery(), name="atlas-gate-recovery")
+    state.recovery_task = recovery_task
     log.info("гейт включён: БД %s, ключ подписи kid %s…, ключи провайдеров %s", state.settings.ATLAS_GATE_DB,
              state.key.kid[:12], state.settings.ATLAS_GATE_KEYS_FILE)
     try:
         yield
     finally:
         task.cancel()
+        recovery_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await recovery_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
         await state.close()
@@ -279,8 +312,10 @@ async def revoke_device(state: GateState, device_id: str) -> dict[str, Any]:
     bindings = state.store._all("SELECT * FROM router_bindings WHERE device_id=? AND status='ready'", (device_id,))
     from urllib.parse import quote
     for binding in bindings:
+        state.store._exec("UPDATE router_bindings SET status='closing' WHERE id=?", (binding["id"],))
         try:
-            response = await state.nodes.request(binding["node_id"], "DELETE", "/v1/sessions/" + quote(binding["local_id"], safe=""), expected_boot=binding["boot_id"])
+            binding = await state.routing.recover_boot(binding)
+            response = await state.nodes.request(binding["node_id"], "DELETE", "/v1/sessions/" + quote(binding["local_id"], safe=""), expected_boot=binding["boot_id"], request_id="revoke:" + device_id + ":" + binding["id"])
             if response.status_code < 400 or response.status_code == 404:
                 state.store._exec("UPDATE router_bindings SET status='closed' WHERE id=?", (binding["id"],))
                 closed += 1
@@ -485,9 +520,23 @@ async def admin_nodes(request: Request) -> Any:
     await state.nodes.refresh()
     return {"nodes": [{"node_id": n.node_id, "enabled": n.enabled, "orgs": n.orgs,
                         "routes": n.routes, "account_group": n.account_group,
+                        "transport": n.transport, "revoked": state.nodes.revoked(n.node_id),
+                        "account_turn_capacity": n.account_turn_capacity,
+                        "cooldown_seconds": max(0, state.nodes.cooldown.get(n.account_group, 0) - time.monotonic()),
+                        "credential": state.store._one("SELECT expires,revoked FROM node_credentials WHERE node_id=?", (n.node_id,)),
                         "status": state.nodes.snapshots.get(n.node_id),
-                        "bindings": state.store._all("SELECT id,device_id,route,status FROM router_bindings WHERE node_id=? AND status IN ('ready','creating','unknown')", (n.node_id,))}
+                          "bindings": state.store._all("SELECT id,device_id,route,status FROM router_bindings WHERE node_id=? AND status IN ('ready','creating','unknown','closing')", (n.node_id,))}
                        for n in state.nodes.config.values()]}
+
+
+@router.post("/harness/admin/nodes/{node_id}/drain", dependencies=admin)
+async def admin_node_drain(node_id: str, request: Request) -> Any:
+    from .agent import _response
+    body = await request.json()
+    if not isinstance(body.get("enabled"), bool):
+        raise GateError(422, "invalid_request", "enabled должен быть boolean")
+    return _response(await gate(request).nodes.request(node_id, "POST", "/v1/node/drain",
+        content=json.dumps({"enabled": body["enabled"]}).encode(), request_id="drain:" + str(uuid.uuid4())))
 
 
 @router.post("/harness/admin/reload", dependencies=admin, response_model=GateReloaded)

@@ -62,14 +62,25 @@ def _path(binding, suffix=""):
 
 
 async def _events(state, binding, turn, device, after=0, wait=0):
+    binding = await state.routing.recover_boot(binding)
     response = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn, safe='')}/events"), params={"after": after, "wait": wait}, expected_boot=binding["boot_id"])
+    if response.status_code == 410:
+        receipt = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn, safe='')}/receipt"), expected_boot=binding["boot_id"])
+        if receipt.status_code == 200:
+            terminal = receipt.json()
+            if terminal.get("type") == "result":
+                state.routing.usage(binding, turn, terminal, device)
+            state.store._exec("UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?", (binding["id"], turn))
     if response.status_code >= 400:
         return response, None
     doc = response.json()
     doc["events"] = [state.routing.translate(binding, ev) for ev in doc.get("events", [])]
     for ev in doc["events"]:
+        state.nodes.observe_event(binding["node_id"], ev)
         if ev.get("type") == "result":
             state.routing.usage(binding, turn, ev, device)
+    if doc.get("done"):
+        state.store._exec("UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?", (binding["id"], turn))
     return response, doc
 
 
@@ -117,7 +128,7 @@ async def agent_session_create(body: GateAgentSessionCreate, request: Request, d
         if role.model and role.model != "inherit":
             _selection(state, device, role.model, route)
     check_data_class(state, device, request, route)
-    status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE)
+    status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE, request.headers.get("idempotency-key"))
     import httpx
     return _response(httpx.Response(status, content=raw))
 
@@ -127,21 +138,36 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     state = gate(request)
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request)
+    binding = await state.routing.recover_boot(binding)
     mode = request.query_params.get("mode", "sse")
     if mode not in ("", "sse", "async"):
         raise GateError(422, "invalid_request", "неизвестный mode")
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not state.store.agent_turns_reserve(device.user_id, day, org_of(state, device).quota.agent_turns_per_day):
-        raise GateError(402, "quota_exceeded", "дневной лимит исчерпан")
-    try:
-        response = await state.nodes.request(binding["node_id"], "POST", _path(binding, "/prompt"), content=body.model_dump_json().encode(), params={"mode": "async"}, expected_boot=binding["boot_id"])
-    except GateError as failed:
-        if failed.code == "node_unavailable":
-            # Такой отказ происходит до отправки POST; сетевой lost ACK остаётся unknown.
-            state.store.agent_turns_release(device.user_id, day)
-        raise
+    await state.nodes.refresh()
+    operation, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/prompt"), body.model_dump(),
+        request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes)
+    if not fresh:
+        if operation["state"] != "complete":
+            await state.operations.reconcile(state.nodes)
+            operation = state.store._one("SELECT * FROM router_operations WHERE id=?", (operation["id"],))
+        if operation["state"] != "complete":
+            raise GateError(409, "command_outcome_unknown", "ход требует сверки; повторное исполнение запрещено")
+        import httpx
+        response = httpx.Response(operation["status"], content=operation["response"].encode())
+        if response.status_code >= 400 or mode == "async":
+            return _response(response)
+    else:
+        try:
+            response = await state.nodes.request(binding["node_id"], "POST", _path(binding, "/prompt"), content=body.model_dump_json().encode(), params={"mode": "async"}, expected_boot=binding["boot_id"], request_id=operation["id"])
+        except GateError as failed:
+            if failed.code == "node_unavailable":
+                import httpx
+                state.operations.complete(operation["id"], httpx.Response(503, json={"error": {"code": failed.code, "message": failed.message}}))
+            else:
+                state.operations.unknown(operation["id"])
+            raise
+        state.operations.complete(operation["id"], response)
     if response.status_code >= 400:
-        state.store.agent_turns_release(device.user_id, day)
         return _response(response)
     task = asyncio.create_task(_watch(state, binding, body.id, device))
     state.watchers.add(task)
@@ -171,7 +197,32 @@ async def _delegate(request, device, sid, method, suffix):
     state = gate(request)
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"))
-    response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=await request.body(), params=request.query_params, expected_boot=binding["boot_id"])
+    binding = await state.routing.recover_boot(binding)
+    raw = await request.body()
+    request_id = request.headers.get("idempotency-key")
+    if not request_id and suffix == "/tool_result":
+        request_id = "tool-result:" + sid + ":" + str(json.loads(raw).get("callId", ""))
+    op = None
+    if method != "GET":
+        if suffix == "/compact":
+            await state.nodes.refresh()
+        op, fresh = state.operations.begin(device, binding, method, _path(binding, suffix), json.loads(raw) if raw else {}, request_id, nodes=state.nodes)
+        if not fresh:
+            if op["state"] != "complete":
+                await state.operations.reconcile(state.nodes)
+                op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
+            if op["state"] == "complete":
+                import httpx
+                return _response(httpx.Response(op["status"], content=op["response"].encode()))
+            raise GateError(409, "command_outcome_unknown", "управляющая команда требует сверки")
+    try:
+        response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=raw, params=request.query_params, expected_boot=binding["boot_id"], request_id=op["id"] if op else None)
+    except GateError:
+        if op:
+            state.operations.unknown(op["id"])
+        raise
+    if op:
+        state.operations.complete(op["id"], response)
     return _response(response)
 
 
@@ -233,8 +284,12 @@ async def agent_events(sid: str, turn_id: str, request: Request, device: Device 
 @router.delete("/harness/agent/sessions/{sid}")
 async def agent_delete(sid: str, request: Request, device: Device = Depends(require_device)):
     state = gate(request)
-    binding = state.routing.get(sid, device)
-    response = await state.nodes.request(binding["node_id"], "DELETE", _path(binding), expected_boot=binding["boot_id"])
+    binding = state.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=? AND status IN ('ready','closed')", (sid, device.device_id, device.org))
+    if not binding:
+        raise GateError(404, "not_found", "сессия не найдена")
+    if binding["status"] == "closed":
+        return JSONResponse({"ok": True})
+    response = await _delegate(request, device, sid, "DELETE", "")
     if response.status_code < 400 or response.status_code == 404:
         state.store._exec("UPDATE router_bindings SET status='closed' WHERE id=?", (sid,))
-    return _response(response)
+    return response

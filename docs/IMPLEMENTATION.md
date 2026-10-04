@@ -1,48 +1,40 @@
-# Начальный этап разделения, 04.10.2026
+# Реализация разделения, 05.10.2026
 
-Связанные задачи: [Gate #1](https://github.com/soltyy/atlas-gate/issues/1),
-[Gate #2](https://github.com/soltyy/atlas-gate/issues/2),
-[Router #22](https://github.com/soltyy/atlas-router/issues/22).
+Gate — самостоятельный SDK-free пакет; Router хранит вход аккаунта и SDK историю.
+Реализованы публичные SID/SDK aliases с device/org/node/boot affinity, выбор готового
+свободного узла, атомарные резервы ходов/compact/субагентов и общая account_group.
+Discovery не выполняет prompt; подтверждённая подписочная квота участвует в выборе.
 
-Реализованы самостоятельный Python-пакет и CLI Gate без SDK зависимостей;
-перенесённые control plane/provider proxy/подпись/админка; HTTP RouterClient;
-администраторский файл endpoint с ограничениями org/route/account;
-дисковые bindings и Gate SDK resume aliases; выбор готового совместимого узла
-по active/capacity, затем занятости SDK sessions; резерв concurrent create;
-SSE клиента через async producer/polling; атомарная дедупликация usage результата.
-Нагрузка SDK сессий ограничивается capacity, даже когда ход не выполняется.
+Router имеет постоянный журнал команд/событий и usage receipts. Gate сверяет
+неизвестные ответы, восстанавливает watchers и учёт после restart. Повторное чтение
+не дублирует расход. SSE клиента собирается из async polling Router. Инструменты,
+interrupt, steer, task stop, native compact/context/resume проходят HTTP зеркало.
+История не заменяется пустой сессией при неподтверждённом SDK resume.
 
-Это первый проверяемый этап, а не завершённая production миграция. Остаются:
+Добавлены CSR approval, локальные Ed25519 ключи, одноразовые signed proofs, отдельный
+mTLS ingress, продление/revoke сертификатов, исходящий NAT connector с дисковой
+очередью и безопасным повтором ACK. Узел не назначает себе org/route права.
+Отзыв устройства блокирует доступ немедленно; закрытие недоступной SDK сессии
+повторяется после восстановления связи. Сверка освобождает места idle sessions.
+Админка показывает узлы/нагрузку/cooldown/drain/регистрацию. Есть миграция и
+подготовщик Windows-службы с проверкой WinSW hash и без секретов в XML.
 
-- [Router #23](https://github.com/soltyy/atlas-router/issues/23): durable
-  create/prompt/control IDs, журнал событий и восстановление SDK после crash;
-  без него сетевой запрос с неизвестным исходом не повторяется на другом узле.
-  Запись unknown блокирует новые create устройства до сверки. Нет автоматического
-  reconcile и дедупликации повторных клиентских POST с новым request ID.
-- [Gate #2](https://github.com/soltyy/atlas-gate/issues/2): распределённое
-  резервирование ходов/субагентов и общих лимитов аккаунта, полноценная готовность
-  пулов/health в админке, account quota telemetry. Первичный cooldown HTTP 429
-  общий для account_group; ограничения SDK из событий ещё требуют интеграции.
-  Подписочная квота с неизвестным остатком не оценивается как свободная.
-- [Gate #3](https://github.com/soltyy/atlas-gate/issues/3): mTLS/регистрация,
-  отзыв/ротация сертификатов, NAT connector, Windows installer, миграция и rollback.
-  Сейчас предварительно утверждённые endpoint с индивидуальным секретом и
-  проверяемым TLS либо loopback; за пределами изолированного контура вводить
-  только после реализации удостоверений и эксплуатационной приёмки.
-- Вход/revoke устройства останавливает доступ, но отключённый Router требует
-  последующей сверки закрытия его SDK-сессий. Gate watchers не восстанавливаются
-  автоматически после рестарта; usage можно дочитать через client events.
-- Полная real Claude/Codex и EDT-приёмка, события heartbeat, история retention,
-  durable quotas/pending turn reconciliation и поколение владения — впереди.
-  Несколько активных Gate и перенос бесед между SDK узлами не реализованы.
+Тикеты: Gate [#1](https://github.com/soltyy/atlas-gate/issues/1),
+[#2](https://github.com/soltyy/atlas-gate/issues/2),
+[#3](https://github.com/soltyy/atlas-gate/issues/3),
+[#5](https://github.com/soltyy/atlas-gate/issues/5),
+[#6](https://github.com/soltyy/atlas-gate/issues/6),
+[#7](https://github.com/soltyy/atlas-gate/issues/7),
+[#8](https://github.com/soltyy/atlas-gate/issues/8);
+Router [#22](https://github.com/soltyy/atlas-router/issues/22),
+[#23](https://github.com/soltyy/atlas-router/issues/23),
+[#25](https://github.com/soltyy/atlas-router/issues/25).
 
-Исходный встроенный Gate в Router временно остаётся совместимым до миграции.
-Работающий AtlasRouter и профиль организации не переключены этим этапом.
+Кандидат Router 0.7.0 / Gate 0.1.0. Production остаётся Router 0.6.0 со встроенным
+Gate до приёмки миграции. Один активный Gate на одну БД; Router может быть много,
+включая cohost. Автоматического переноса SDK истории между аккаунтами нет.
+Неизвестный исход инструмента после crash сообщается явно.
 
-Проверка первого этапа: Gate — 12 passed в контуре с двумя HTTP Router/stub;
-отдельно 9 passed без SDK и 3 сетевых skip. UI — 41 passed, typecheck/build;
-wheel собран и проверен на отсутствие SDK/Router зависимостей. Router —
-221 passed, 28 opt-in skip. Покрыты выбор менее занятого узла, конкурентные
-create, одинаковые local IDs, владение, Gate restart, compact/resume, SSE,
-возврат квоты при отказе до POST и interrupt после отключения маршрута.
-Реальные подписки и EDT в этой приёмке не запускались.
+Следующие документы содержат конкретные процедуры и пределы проверки:
+[рекон](RECON-STAGES.md), [установка](DEPLOYMENT.md), [миграция](MIGRATION.md),
+[HA ADR](HA-ADR.md), [приёмка](ACCEPTANCE.md).

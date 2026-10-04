@@ -11,6 +11,7 @@ device_secret хранится зашифрованным (`crypto.Keyring`).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -114,13 +115,31 @@ CREATE INDEX IF NOT EXISTS usage_user_ts ON usage(user_id, ts);
 
 class Store:
     def __init__(self, path: str) -> None:
+        self._owner = None
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self._owner = open(path + ".lock", "a+b")
+            self._owner.seek(0)
+            self._owner.write(b"0")
+            self._owner.flush()
+            self._owner.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self._owner.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BaseException:
+                self._owner.close()
+                raise
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
             self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=FULL")
+            self._db.execute("PRAGMA busy_timeout=5000")
             self._db.executescript(SCHEMA)
             row = self._db.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
@@ -136,6 +155,8 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+            if self._owner:
+                self._owner.close()
 
     def _one(self, sql: str, args: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         with self._lock:

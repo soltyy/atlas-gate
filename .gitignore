@@ -12,3 +12,8 @@ dist/
 node_modules/
 *.tsbuildinfo
 !.env.example
+/service/AtlasGate.exe
+/service/AtlasGate.xml
+/service/logs/
+/service/*.wrapper.log
+/node-identity/

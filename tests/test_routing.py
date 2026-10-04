@@ -28,6 +28,17 @@ class FakeNodes:
         return httpx.Response(200, json={"id": "same-local-id", "tools": 0})
 
 
+@pytest.mark.asyncio
+async def test_known_subscription_headroom_breaks_equal_load_tie(tmp_path):
+    store, nodes = Store(str(tmp_path / "test.db")), FakeNodes(capacity=4)
+    nodes.snapshots["a"]["quota"] = {"windows": [{"usedPercent": 90, "resetsAt": time.time() + 1000}]}
+    nodes.snapshots["b"]["quota"] = {"windows": [{"usedPercent": 20, "resetsAt": time.time() + 1000}]}
+    routing = Routing(store, nodes)
+    _, response = await routing.create(device("d"), "sub", "claude", {}, 10)
+    assert routing.get(json.loads(response)["id"], device("d"))["node_id"] == "b"
+    store.close()
+
+
 def device(name):
     return SimpleNamespace(device_id=name, org="org", user_id=name)
 
@@ -113,7 +124,7 @@ async def test_catalog_survives_outage_but_respects_org(tmp_path, monkeypatch):
     store = Store(str(tmp_path / "test.db"))
     nodes = Nodes(str(path), store)
     await nodes.clients["a"].aclose()
-    nodes.clients["a"] = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"nodeId": "a", "bootId": "boot", "protocolVersion": 1, "models": [{"value": "claude"}], "capacity": 1})), base_url="http://node")
+    nodes.clients["a"] = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"nodeId": "a", "bootId": "boot", "protocolVersion": 1, "models": [{"value": "claude"}], "capacity": 1, "capabilities": ["durable_commands", "durable_events"]})), base_url="http://node")
     assert await nodes.probe("a")
     assert nodes.model_ids("org", ["sub"]) == {"claude"}
     assert nodes.model_ids("other", ["sub"]) == set()

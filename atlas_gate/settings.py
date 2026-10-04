@@ -55,3 +55,9 @@ class Settings(BaseSettings):
 
     # Список одобренных endpoint: ключи берутся из env по имени, не из org/profile.
     ATLAS_GATE_NODES_FILE: str = "gate/nodes.json"
+    ATLAS_GATE_NODE_ENV_FILE: str = "gate/node-secrets.env"
+    ATLAS_GATE_NODE_PKI_DIR: str = "gate/node-pki"
+    ATLAS_GATE_NODE_TLS_PORT: int = 0
+    ATLAS_GATE_NODE_TLS_CERT: str = ""
+    ATLAS_GATE_NODE_TLS_KEY: str = ""
+    ATLAS_GATE_NODE_TLS_CA: str = ""

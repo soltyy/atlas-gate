@@ -19,6 +19,9 @@ from .profile import build_body, publish
 from .store import Store
 from .nodes import Nodes
 from .routing import Routing
+from .operations import Operations
+from .node_channel import Channel
+from .node_identity import NodeIdentity
 
 log = logging.getLogger("atlas_gate")
 
@@ -56,11 +59,14 @@ class GateState:
         self.settings: Settings = app.state.settings
         s = self.settings
         self.store = Store(s.ATLAS_GATE_DB)
-        self.nodes = Nodes(s.ATLAS_GATE_NODES_FILE, self.store)
+        self.channel = Channel(self.store)
+        self.nodes = Nodes(s.ATLAS_GATE_NODES_FILE, self.store, self.channel)
         self.routing = Routing(self.store, self.nodes)
+        self.operations = Operations(self.store)
         self.watchers: set[asyncio.Task] = set()
         self._closed = False
         self.key = SigningKey.load_or_create(s.ATLAS_GATE_KEY_PATH)
+        self.identity = NodeIdentity(self.store, self.nodes, s.ATLAS_GATE_NODE_PKI_DIR, "atlas-gate:" + self.key.kid)
         secret = s.ATLAS_GATE_KEYRING_SECRET
         if not secret and s.ATLAS_GATE_TEST:
             log.warning("ATLAS_GATE_KEYRING_SECRET пуст — тестовый контур шифрует постоянным тестовым секретом")
@@ -96,6 +102,10 @@ class GateState:
         if self._closed:
             return
         self._closed = True
+        recovery_task = getattr(self, "recovery_task", None)
+        if recovery_task is not None and recovery_task is not asyncio.current_task():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
         for task in self.watchers:
             task.cancel()
         await asyncio.gather(*self.watchers, return_exceptions=True)

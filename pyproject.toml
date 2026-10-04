@@ -8,6 +8,8 @@ dependencies = ["fastapi>=0.115", "httpx>=0.28.1", "pydantic-settings>=2.15.0", 
 
 [project.scripts]
 atlas-gate = "atlas_gate.main:main"
+atlas-gate-pki = "atlas_gate.node_pki:main"
+atlas-gate-migrate = "atlas_gate.migrate:main"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
