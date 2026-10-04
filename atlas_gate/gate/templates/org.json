@@ -1,0 +1,77 @@
+{
+  "id": "template",
+  "name": "{name}",
+  "routes": [
+    {
+      "id": "claude-sub",
+      "kind": "router-agent",
+      "protocol": "atlas-agent"
+    }
+  ],
+  "models": [],
+  "pricing": [],
+  "policy": {
+    "data_classes": [
+      "public",
+      "internal",
+      "personal",
+      "client-confidential"
+    ],
+    "routes_by_class": {},
+    "tool_policies": [
+      {
+        "tool": "read",
+        "mode": "auto",
+        "max_data_class": "internal",
+        "escalatable": false
+      },
+      {
+        "tool": "write",
+        "mode": "ask",
+        "max_data_class": "internal",
+        "escalatable": true
+      },
+      {
+        "tool": "edit",
+        "mode": "ask",
+        "max_data_class": "internal",
+        "escalatable": true
+      },
+      {
+        "tool": "shell",
+        "mode": "deny",
+        "max_data_class": "public",
+        "escalatable": false
+      }
+    ],
+    "default_data_class": "internal"
+  },
+  "agents": [
+    {
+      "id": "assistant",
+      "version": "1",
+      "name": "Ассистент",
+      "system_prompt": "Ты — ассистент сотрудника {name} внутри Atlas Harness. Отвечай по-русски, кратко и по делу. Для работы с файлами используй доступные инструменты; изменения в файлах делай только после явной просьбы.",
+      "model": "",
+      "allowed_routes": [
+        "claude-sub"
+      ],
+      "tools_allowlist": [
+        "*",
+        "read",
+        "write",
+        "edit",
+        "shell"
+      ],
+      "mcp_ids": [],
+      "settings": {},
+      "default": true
+    }
+  ],
+  "mcp": [],
+  "quota": {
+    "limit": 50.0,
+    "currency": "USD",
+    "agent_turns_per_day": null
+  }
+}
