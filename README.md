@@ -17,6 +17,7 @@ Account groups разделяют подписочные аккаунты; об�
 resume/tools/interrupt/compact/events идут на сохранённый node.
 
 - [Реализация и задачи](docs/IMPLEMENTATION.md)
+- [Открытый каталог и настройки харнеса](docs/HARNESS-DISCOVERY.md)
 - [Рекон и первичные источники](docs/RECON-STAGES.md)
 - [Установка, cohost, mTLS и NAT](docs/DEPLOYMENT.md)
 - [Оба продукта на новом сервере](docs/PARALLEL-DEPLOYMENT.md)

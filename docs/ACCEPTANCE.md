@@ -59,3 +59,18 @@ Router без замены значениями профиля: 200000, 1000000,
 После изменений также повторён живой независимый Gate + Codex Router:
 1 passed (78.94 s). Клиентский инструмент, native compact, restart обеих служб,
 возобновление прежнего public/native SID и продолжение контекста прошли.
+
+## Discovery/settings — Gate #9, 05.10.2026
+
+Полная Gate suite с двумя настоящими HTTP Router: 33 passed, 1 live opt-in
+skipped (35.92 s). Отдельный SDK-free venv: 20 passed, 14 integration/live
+skipped (10.13 s). Семь новых HTTP проверок discovery/settings охватывают
+публичный каталог, разные варианты моделей, отсутствие внутренних данных,
+enrollment, JSON/JWS равенство, isolation организаций, ETag/reload/restart,
+отказы invalid/expired/revoked/archived и Bearer security в OpenAPI.
+Дополнительный сетевой тест применяет settings для выбора модели/агента,
+создания сессии и prompt/context через Gate и Router.
+
+Контракт: [HARNESS-DISCOVERY](HARNESS-DISCOVERY.md). Это кандидат реализации;
+production Gate и установленная EDT не обновлялись. Новая ручка не подменяет
+SDK context статическим configured window и не переносит SDK в Gate.

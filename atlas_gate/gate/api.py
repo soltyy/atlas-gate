@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import FileResponse, Response
+from fastapi.security import HTTPBearer
 
 from .. import __version__
 from ..auth import require_token
@@ -44,6 +45,7 @@ from .schemas import (
     GateTokens,
 )
 from .state import Device, GateState
+from .discovery import Discovery, HarnessSettings, public_catalog, client_settings, json_snapshot
 from .upstream import check_quota, month_bounds, pick_route, proxy, with_usage_option
 
 log = logging.getLogger("atlas_gate")
@@ -140,7 +142,7 @@ def _token_from(request: Request) -> str | None:
 
 
 # Архивная организация (#7): устройствам закрыты профиль, LLM-прокси и ход на подписке.
-ARCHIVED_BLOCKS = ("/harness/profile", "/harness/llm/", "/harness/agent/")
+ARCHIVED_BLOCKS = ("/harness/profile", "/harness/settings", "/harness/llm/", "/harness/agent/")
 
 
 async def require_device(request: Request) -> Device:
@@ -336,6 +338,30 @@ async def device_revoke(device_id: str, request: Request) -> Any:
 
 
 # --- профиль, квота, обновление ----------------------------------------------------------------
+
+
+@router.get('/harness/discovery', response_model=Discovery, responses={304: {'description': 'каталог не изменился'}})
+async def discovery(request: Request):
+    """Без авторизации: все настроенные модели и контракт подключения, без настроек организаций."""
+    state = await ready_gate(request)
+    if not state.ready.is_set():
+        raise GateError(503, 'not_ready', 'каталог Gate ещё не загружен')
+    return json_snapshot(request, public_catalog(state))
+
+
+@router.get('/harness/settings', response_model=HarnessSettings,
+            dependencies=[Depends(HTTPBearer(auto_error=False, scheme_name='DeviceToken'))],
+            responses={304: {'description': 'настройки не изменились'}})
+async def settings(request: Request, device: Device = Depends(require_device)):
+    """Полный клиентский JSON профиль своей организации, с исходной JWS подписью."""
+    state = await ready_gate(request)
+    org = org_of(state, device)
+    if org.archived:
+        raise GateError(403, 'org_archived', 'организация в архиве — настройки недоступны')
+    row = state.store.profile(device.org)
+    if row is None:
+        raise GateError(503, 'profile_invalid', 'профиль организации ещё не подписан')
+    return json_snapshot(request, client_settings(state, row), private=True)
 
 
 @router.get("/harness/profile", responses={200: {"content": {"application/jose": {}}, "description": "JWS EdDSA"},

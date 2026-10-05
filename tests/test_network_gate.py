@@ -197,6 +197,33 @@ async def events(client, sid, turn, terminal=False):
 
 
 @pytest.mark.asyncio
+async def test_harness_discovers_settings_and_uses_the_configured_router_model(network):
+    from atlas_gate.gate.crypto import verify_profile
+    client, app, routers, settings, creds, other = network
+    discovery = await client.get('/harness/discovery', headers={'Authorization':''})
+    assert discovery.status_code == 200, discovery.text
+    doc = discovery.json()
+    response = await client.get(doc['endpoints']['settings'])
+    assert response.status_code == 200, response.text
+    config = response.json()
+    profile = verify_profile(config['profile_jws'], creds['profile_signing_key'])
+    assert config['profile'] == profile
+    routes = {r['id']:r for r in profile['routes']}
+    model = next(m for m in profile['models'] if m['enabled'] and routes[m['route_id']]['kind']=='router-agent')
+    agent = next(a for a in profile['agents'] if a['default'])
+    created = await client.post(config['endpoints']['agent_sessions'], json={
+        'model':model['model'], 'system':agent['system_prompt'], 'tools':[]})
+    assert created.status_code == 200, created.text
+    sid = created.json()['id']
+    accepted = await client.post(f'/harness/agent/sessions/{sid}/prompt?mode=async', json={'id':'discovery','text':'hello'})
+    assert accepted.status_code == 202, accepted.text
+    result = next(e for e in await events(client, sid, 'discovery', True) if e['type']=='result')
+    assert result['ok']
+    context = config['endpoints']['agent_context'].format(session_id=sid)
+    assert (await client.get(context)).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_http_tools_affinity_usage_and_gate_restart(network):
     client, app, routers, settings, creds, other = network
     profile = await client.get("/harness/profile")

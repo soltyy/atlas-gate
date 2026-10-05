@@ -38,3 +38,10 @@ Gate до приёмки миграции. Один активный Gate на �
 Следующие документы содержат конкретные процедуры и пределы проверки:
 [рекон](RECON-STAGES.md), [установка](DEPLOYMENT.md), [миграция](MIGRATION.md),
 [HA ADR](HA-ADR.md), [приёмка](ACCEPTANCE.md).
+
+Клиентский discovery ([Gate #9](https://github.com/soltyy/atlas-gate/issues/9)):
+GET /harness/discovery без авторизации публикует общий настроенный каталог
+моделей и контракт подключения. GET /harness/settings с device token отдаёт
+полный JSON подписанного профиля своей организации, JWS и версию; прежний
+/harness/profile совместим. Обе ручки поддерживают ETag/304, settings остаётся
+private. [Контракт и алгоритм харнеса](HARNESS-DISCOVERY.md).
