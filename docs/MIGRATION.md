@@ -1,5 +1,10 @@
 # Миграция встроенного Gate
 
+Для первоначального развёртывания на другом сервере используется отдельный новый
+контур без production drain и без копирования активного Store:
+[PARALLEL-DEPLOYMENT.md](PARALLEL-DEPLOYMENT.md). Процедура ниже относится к будущему
+согласованному переносу данных и клиентов после приёмки нового сервера.
+
 Сохранить SQLite через backup API, signing key, org JSON/history, защищённый
 keyring secret и provider env. Последние два переносит оператор отдельно без
 печати в manifest. Сохранить Router journal и SDK home/history под тем же

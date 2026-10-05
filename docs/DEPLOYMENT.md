@@ -1,5 +1,8 @@
 # Размещение
 
+Текущий согласованный вариант — оба продукта на новом сервере без изменений
+действующего production: [PARALLEL-DEPLOYMENT.md](PARALLEL-DEPLOYMENT.md).
+
 Gate 8766 и Router 8765 могут работать на одной машине: разные службы, конфигурации
 и runtime каталоги. Дополнительные Router имеют разные порты, NODE_ID, NODE_DB
 и SDK home/profile. Внешние установки используют HTTPS или исходящий connector.

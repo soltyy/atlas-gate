@@ -19,6 +19,7 @@ resume/tools/interrupt/compact/events идут на сохранённый node.
 - [Реализация и задачи](docs/IMPLEMENTATION.md)
 - [Рекон и первичные источники](docs/RECON-STAGES.md)
 - [Установка, cohost, mTLS и NAT](docs/DEPLOYMENT.md)
+- [Оба продукта на новом сервере](docs/PARALLEL-DEPLOYMENT.md)
 - [Миграция и rollback](docs/MIGRATION.md)
 - [Один активный Gate / восстановление](docs/HA-ADR.md)
 - [Приёмка и ограничения выпуска](docs/ACCEPTANCE.md)
