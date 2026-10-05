@@ -55,3 +55,7 @@ Router без замены значениями профиля: 200000, 1000000,
 Подробности: [Router audit](https://github.com/soltyy/atlas-router/blob/codex/router-node-contract/docs/CONTEXT-WINDOW-AUDIT.md),
 [Router #27](https://github.com/soltyy/atlas-router/issues/27),
 [EDT #154](https://github.com/soltyy/edt-llm-agent-extension/issues/154).
+
+После изменений также повторён живой независимый Gate + Codex Router:
+1 passed (78.94 s). Клиентский инструмент, native compact, restart обеих служб,
+возобновление прежнего public/native SID и продолжение контекста прошли.
