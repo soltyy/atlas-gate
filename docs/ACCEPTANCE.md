@@ -38,3 +38,20 @@ strict resume, capacity/subagent enforcement и immediate interrupt.
 
 Тикеты остаются открыты до выпуска/эксплуатационной приёмки. Подготовленные
 source/wheel артефакты — кандидаты; публикация production релиза не заявляется.
+
+## Повторная проверка контекста 05.10.2026
+
+После Router #27: полная Router suite 240 passed, 29 opt-in skipped (257.76 s).
+Gate через два HTTP Router: 25 passed, 1 live skipped (43.93 s); отдельный Gate
+venv без SDK: 13 passed, 13 integration/live skipped (6.58 s). Сетевой набор
+исполняется Python из Router venv с PYTHONPATH на Gate и ATLAS_TEST_ROUTER_ROOT;
+SDK зависимости нужны тестовым Router, независимому Gate они не добавлены.
+
+Четыре новых HTTP проверки подтверждают передачу контекста от привязанного
+Router без замены значениями профиля: 200000, 1000000, 258400 и 828400.
+Это сценарные окна. Живой Router Codex SDK 0.160.0 / ChatGPT / gpt-6.1-sol
+проверен отдельно: context=5917/258400 и тот же снимок после restart/resume
+(1 passed, 10.25 s). Расширенный режим 872000 каталога не включался.
+Подробности: [Router audit](https://github.com/soltyy/atlas-router/blob/codex/router-node-contract/docs/CONTEXT-WINDOW-AUDIT.md),
+[Router #27](https://github.com/soltyy/atlas-router/issues/27),
+[EDT #154](https://github.com/soltyy/edt-llm-agent-extension/issues/154).

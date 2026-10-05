@@ -87,6 +87,24 @@ async def create(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('window', [200000, 1000000, 258400, 828400])
+async def test_context_comes_from_the_bound_router_not_the_profile(network, monkeypatch, window):
+    client, app, routers, settings, creds, other = network
+    sid = await create(client)
+    binding = app.state.gate.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+    owner = routers[0 if binding['node_id'] == 'a' else 1]
+    session = owner.state.registry.get(binding['local_id']).session
+    snapshot = {'totalTokens': 50000, 'maxTokens': window,
+                'percentage': 50000 / window * 100, 'model': 'runtime-model'}
+    async def context():
+        return snapshot
+    monkeypatch.setattr(session, 'context_usage', context)
+    response = await client.get(f'/harness/agent/sessions/{sid}/context')
+    assert response.status_code == 200, response.text
+    assert response.json() == snapshot
+
+
+@pytest.mark.asyncio
 async def test_idle_close_releases_device_slot_and_offline_revoke_retries(network, monkeypatch):
     from atlas_gate.gate.api import revoke_device
     from atlas_gate.gate.errors import GateError
