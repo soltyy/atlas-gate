@@ -93,3 +93,18 @@ device tokens/signing trust Windows Gate здесь не действуют.
 Откат нового контура: остановить только три atlas units, убрать его proxy из
 доступа тестовых клиентов. Старые Windows production Router/EDT и их Store
 не менялись; массовый перевод устройств/DNS старого Gate не выполнялся.
+
+
+## Единые показатели моделей — 06.10.2026 (#13)
+
+Gate runtime `38bb0706ad64a1577d0555ee2495401b5235cb49`, подписанный профиль v12.
+SHA-256 source ZIP: `64e03da78a1bcb8304743aa38631f2e45e900290a77cf15e2877d7f53094366c`.
+Backup: `/var/backups/atlas/20261006T101854Z`; integrity всех трёх SQLite — ok.
+Для всех 12 моделей проверены подпись и равенство discovery/settings/admin,
+наличие шести положительных пределов вложений, контекст и nullable max_output.
+Отчёт: `/var/lib/atlas-gate/model-contract-acceptance.json` (без секретов).
+UI «Агенты» проверен на Claude opus и Codex gpt-6.1-sol через SSH admin proxy.
+Router MainPID/ActiveEnterTimestamp до и после совпадают; старая Windows служба
+и работающая EDT не менялись. У Gate сохранились конфигурация и signing key.
+Серверная/сетевая suite: 42 passed, 5 skipped; UI 44 passed, typecheck/build.
+Связанный клиентский PR: https://github.com/soltyy/edt-llm-agent-extension/pull/158.
