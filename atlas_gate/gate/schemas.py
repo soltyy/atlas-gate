@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -150,4 +150,8 @@ class GateAgentSessionCreate(BaseModel):
     tools: list[ToolDefinition] = Field(default_factory=list)
     model: str | None = None
     resumeSessionId: str | None = None
+    # #12: scope проходит на прежний binding, без импорта SDK.
+    documentAccess: Literal['client-authorized-v1'] | None = None
+    documentIds: list[Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]] = Field(default_factory=list, max_length=500)
+
     agents: list[AgentSpec] = Field(default_factory=list)
