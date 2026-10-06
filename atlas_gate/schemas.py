@@ -1,6 +1,6 @@
 """Формы запросов и ответов HTTP-протокола (имена полей — как их ждёт харнес, camelCase)."""
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +51,10 @@ class SessionCreate(BaseModel):
     # (файла нет) — сессия открывается ПУСТОЙ, а ответ честно говорит об этом полями
     # `resumed`/`resumeError`: молча подсунуть беспамятную сессию значит соврать.
     resumeSessionId: str | None = None
+    # #12: scope проходит на прежний binding, без импорта SDK.
+    documentAccess: Literal['client-authorized-v1'] | None = None
+    documentIds: list[Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]] = Field(default_factory=list, max_length=500)
+
     # СУБАГЕНТЫ ХАРНЕСА (issue #135): модель порождает их встроенным `Agent`; инструменты каждого —
     # подмножество `tools`. Пусто — субагентов нет, `Agent` погашен вместе со встроенными.
     agents: list[AgentSpec] = Field(default_factory=list)

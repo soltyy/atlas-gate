@@ -67,3 +67,18 @@ SDK-free Gate suite запускается отдельным venv без Router
 
 Candidate не развёрнут в production. Установленный Harness не получает этот
 фикс автоматически: нужны Router/Gate candidate и атомарные клиентские задачи.
+
+## Client-authorized scope (ATT-129-GATE-ACL, #12)
+
+SessionCreate передаёт `documentAccess: "client-authorized-v1"`, `documentIds`
+(не более 500 sha256-original) Router без изменения через direct и connector.
+Bound capabilities дополнены nullable `documentAuthorization`: true только при
+явной поддержке Router, false — явный отказ, отсутствующее поле — unknown.
+Route projection требует true на всех кандидатах; false доминирует, unknown
+не превращается в true. Поле не меняет подписанный JWS профиля.
+
+Каждый SDK atlas_document вызывает client tool attachment_authorize с новым
+callId; ответ Harness проверяет principal/workspace/ancestor chain и целостность
+оригинала. HTTP каталог/страницы дополнительно требуют текущей проверки Harness
+перед обращением и прежних Gate ownership/binding проверок. Known ID не право.
+Проверка wire: scoped/legacy × direct/connector × SSE/async — 8 сценариев.

@@ -16,6 +16,7 @@ def node_attachments(info):
     if any(type(value.get(k)) is not int or value[k] <= 0 for k in LIMITS):
         return None
     return dict(schemaVersion=1, source='router-reported',
+                documentAuthorization=value.get('documentAuthorization') if isinstance(value.get('documentAuthorization'), bool) else None,
                 **{k: value[k] for k in FLAGS+LIMITS})
 
 
@@ -26,7 +27,9 @@ def route_attachments(state, org, route, model):
     values = [node_attachments(state.nodes.snapshots.get(n.node_id)) for n in candidates]
     if not values or any(v is None for v in values):
         return None  # неизвестный/недоступный узел не становится обещанием поддержки PDF
-    return dict(schemaVersion=1, source='router-reported',
+    authorization = [v.get('documentAuthorization') for v in values]
+    known = False if any(v is False for v in authorization) else True if all(v is True for v in authorization) else None
+    return dict(schemaVersion=1, source='router-reported', documentAuthorization=known,
                 **{k: all(v[k] for v in values) for k in FLAGS},
                 **{k: min(v[k] for v in values) for k in LIMITS})
 

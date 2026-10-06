@@ -65,9 +65,10 @@ async def codex_network(monkeypatch,network):
     for b in backends: await b.close()
 
 
+@pytest.mark.parametrize('scoped',[False, True])
 @pytest.mark.parametrize('transport',['direct','connector'])
 @pytest.mark.parametrize('mode',['sse','async'])
-async def test_codex_pdf_all_gate_transports(codex_network,transport,mode):
+async def test_codex_pdf_all_gate_transports(codex_network,transport,mode,scoped):
     client,app,routers,settings,creds,other=codex_network
     state=app.state.gate
     workers=[]; connections=[]
@@ -88,7 +89,26 @@ async def test_codex_pdf_all_gate_transports(codex_network,transport,mode):
                         state.channel.complete(n,work['id'],result['status'],base64.b64decode(result['body']))
             workers.append(asyncio.create_task(pump()))
     try:
-        sid=await create(client)
+        data=(Path(__file__).parent/'fixtures'/'mixed.pdf').read_bytes()+b'\n%'+b'X'*920000
+        if scoped:
+            import hashlib
+            docid=hashlib.sha256(data).hexdigest()
+            reply=await client.post('/harness/agent/sessions',json={
+                'system':'test','model':'stub-fast','documentAccess':'client-authorized-v1','documentIds':[docid],
+                'tools':[{'name':'attachment_authorize','description':'permission', 'parameters':{
+                    'type':'object','properties':{'document_ids':{'type':'array','items':{'type':'string'}}},
+                    'required':['document_ids']}}]})
+            assert reply.status_code==200,reply.text
+            sid=reply.json()['id']
+        else:
+            sid=await create(client)
+        answered=set()
+        async def authorize(event):
+            if event['type']=='tool_call' and event['name']=='attachment_authorize' and event['callId'] not in answered:
+                answered.add(event['callId'])
+                reply=await client.post(prefix+'/tool_result',json={'callId':event['callId'],
+                    'content':json.dumps({'authorized_document_ids':event['input']['document_ids']})})
+                assert reply.status_code==200,reply.text
         prefix='/harness/agent/sessions/'+sid
         data=(Path(__file__).parent/'fixtures'/'mixed.pdf').read_bytes()+b'\n%'+b'X'*920000
         payload={'id':'pdf','text':'read','attachments':[{'kind':'pdf','filename':'mixed.pdf','data':base64.b64encode(data).decode()}]}
@@ -97,6 +117,7 @@ async def test_codex_pdf_all_gate_transports(codex_network,transport,mode):
             assert reply.status_code==202,reply.text
             for _ in range(300):
                 events=(await client.get(prefix+'/turns/pdf/events',params={'wait':200})).json()
+                for event in events['events']: await authorize(event)
                 if events['done']: break
                 await asyncio.sleep(.05)
             events=events['events']
@@ -105,8 +126,12 @@ async def test_codex_pdf_all_gate_transports(codex_network,transport,mode):
             async with client.stream('POST',prefix+'/prompt',json=payload) as response:
                 assert response.status_code==200
                 async for line in response.aiter_lines():
-                    if line.startswith('data: '): events.append(json.loads(line[6:]))
+                    if line.startswith('data: '):
+                        event=json.loads(line[6:]); events.append(event); await authorize(event)
         assert any(e['type']=='result' and e['ok'] for e in events),events
+        if scoped:
+            assert len(answered)==3
+            assert (await client.get(prefix+'/attachments')).json()['attachments']['documentAuthorization'] is True
         docs=(await client.get(prefix+'/documents')).json()['documents']
         assert len(docs)==1
         image=await client.get(prefix+'/documents/'+docs[0]['id'],params={'operation':'image','page':2})
