@@ -5,10 +5,11 @@
 import { computed, reactive, ref, watch } from 'vue'
 import FieldErr from './FieldErr.vue'
 import ToolPicker from './ToolPicker.vue'
-import type { Agent, OrgConfig } from './types'
+import ModelMetrics from './ModelMetrics.vue'
+import type { Agent, OrgConfig, EditorContext } from './types'
 import { ALL_TOOLS, allTools, clone, toolCatalog } from './util'
 
-const props = defineProps<{ org: OrgConfig; errors: Record<string, string>; saved: Set<string> }>()
+const props = defineProps<{ org: OrgConfig; errors: Record<string, string>; saved: Set<string>; ctx?: EditorContext }>()
 
 const key = (a: Agent) => `${a.id}@${a.version}`
 const ids = computed(() => [...new Set(props.org.agents.map((a) => a.id))])
@@ -70,6 +71,13 @@ function indexOf(a: Agent | undefined): number {
 const modelGroups = computed(() =>
   props.org.routes.map((r) => ({ route: r.id, models: props.org.models.filter((m) => m.route_id === r.id) }))
     .filter((g) => g.models.length))
+
+const selectedModels = computed(() => props.org.models.filter(m => {
+  const a = current.value
+  return a && m.enabled && props.org.routes.some(r => r.id === m.route_id && r.enabled) &&
+    (!a.model || a.model === 'inherit' || m.model === a.model) &&
+    (!a.allowed_routes.length || a.allowed_routes.includes(m.route_id))
+}))
 
 function routeOfModel(model: string): string | undefined {
   return props.org.models.find((m) => m.model === model)?.route_id
@@ -211,6 +219,9 @@ function hasErrors(id: string): boolean {
           </label>
         </div>
       </div>
+
+      <ModelMetrics v-for="m in selectedModels" :key="`${m.route_id}/${m.model}`" :model="m"
+        :contract="ctx?.model_contracts?.[m.route_id]?.[m.model]" />
 
       <ToolPicker :model-value="current.tools_allowlist" :catalog="catalog" @update:model-value="set('tools_allowlist', $event)" />
 

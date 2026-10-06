@@ -181,7 +181,10 @@ class GateState:
                 down = {r.id for r in org.routes
                         if r.kind == "gateway" and (not r.enabled or not self.route_keyed.get((org.id, r.id)))}
                 org_agent_ids = self.nodes.model_ids(org.id, [r.id for r in org.routes if r.kind == "router-agent"])
-                body, warn = build_body(org, self.public_url, down, org_agent_ids if agent_ids is not None else None)
+                from .attachments import route_attachments
+                caps = {(m.route_id, m.model): route_attachments(self, org.id, m.route_id, m.model)
+                        for m in org.models if (r := org.route(m.route_id)) and r.kind == 'router-agent'}
+                body, warn = build_body(org, self.public_url, down, org_agent_ids if agent_ids is not None else None, caps)
                 for w in warn:
                     log.warning("профиль %s: %s", org.id, w)
                 row = publish(self.store, self.key, org.id, body, dump(org))

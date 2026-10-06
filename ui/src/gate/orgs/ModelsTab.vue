@@ -3,6 +3,7 @@
 // галочки из списка моделей подписки роутера (/v1/models): отмеченная модель попадает в конфигурацию.
 import { computed } from 'vue'
 import FieldErr from './FieldErr.vue'
+import ModelMetrics from './ModelMetrics.vue'
 import type { EditorContext, ModelEntry, OrgConfig, Route } from './types'
 import { fmtNum } from './util'
 
@@ -105,6 +106,10 @@ function idxOf(r: Route, model: string): number {
           </tr>
         </tbody>
       </table>
+      <details><summary>Все показатели моделей маршрута</summary>
+        <ModelMetrics v-for="{ m, i } in modelsOf(r)" :key="i" :model="m"
+          :contract="ctx.model_contracts?.[r.id]?.[m.model]" />
+      </details>
     </template>
 
     <template v-else>

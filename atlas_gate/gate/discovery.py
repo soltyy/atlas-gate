@@ -5,21 +5,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .. import __version__
 from .crypto import canonical_json, sha256_hex, verify_profile
-from .orgs import Agent, Audit, BuiltinTools, Mcp, ModelEntry, Overrides, Policy, Pricing, Quota
-from .attachments import route_attachments
+from .orgs import Agent, Audit, BuiltinTools, Mcp, Overrides, Policy, Pricing, Quota
+from .model_contracts import ModelContract, ProfileModel, published_model
 
 
-class PublicModel(BaseModel):
+class PublicModel(ModelContract):
     catalog_id: str
-    model: str
-    display_name: str
     kind: Literal['gateway', 'router-agent', 'local']
     protocol: Literal['openai', 'anthropic', 'atlas-agent']
-    context_window: int | None
-    max_output: int | None
-    enabled: bool
-    limits_source: Literal['configured'] = 'configured'
-    attachments: dict[str, Any] | None = None
 
 
 class Connection(BaseModel):
@@ -69,7 +62,7 @@ class ClientProfile(BaseModel):
     recommended_app_version: str
     update_channel_url: str
     routes: list[ProfileRoute]
-    models: list[ModelEntry]
+    models: list[ProfileModel]
     pricing: list[Pricing]
     policy: Policy
     agents: list[Agent]
@@ -122,11 +115,9 @@ def public_catalog(state):
             if route is None:
                 continue
             # Явная проекция: нет org/node/route IDs, адресов апстримов и key_env.
-            fields = dict(model=model.model, display_name=model.display_name or model.model,
-                          kind=route.kind, protocol=route.protocol,
-                          context_window=model.context_window if model.context_window > 0 else None,
-                          max_output=model.max_output if model.max_output > 0 else None)
-            fields['attachments'] = route_attachments(state, org.id, route.id, model.model) if route.kind=='router-agent' else None
+            fields = published_model(state, org, model)
+            fields.pop('enabled')
+            fields.update(kind=route.kind, protocol=route.protocol)
             identity = sha256_hex(canonical_json(fields))
             enabled = model.enabled and route.enabled
             if identity in variants:
@@ -144,7 +135,7 @@ def client_settings(state, row):
     attachment_routes = {}
     for route in profile['routes']:
         if route['kind']=='router-agent':
-            attachment_routes[route['id']] = {m['model']: route_attachments(state, profile['org']['id'], route['id'], m['model'])
+            attachment_routes[route['id']] = {m['model']: m.get('attachments')
                 for m in profile['models'] if m['route_id']==route['id']}
     return HarnessSettings(endpoints=endpoints(), limits=limits(state), profile=profile,
                            profile_jws=row['jws'], profile_signing_key=key, attachment_routes=attachment_routes)

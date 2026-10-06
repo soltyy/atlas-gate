@@ -48,6 +48,7 @@ const ctx = computed<EditorContext>(() => ({
   upstreams: details.value?.upstreams ?? {},
   subscription_models: details.value?.subscription_models ?? [],
   subscription_models_by_route: details.value?.subscription_models_by_route,
+  model_contracts: details.value?.model_contracts,
   route_usage: details.value?.route_usage ?? {},
 }))
 const savedRoutes = computed(() => new Set((original.value?.routes ?? []).map((r) => r.id)))
@@ -285,7 +286,7 @@ void load()
           <ModelsTab v-else-if="tab === 'models'" :org="draft" :errors="errors" :ctx="ctx" />
           <PricingTab v-else-if="tab === 'pricing'" :org="draft" :errors="errors" />
           <PolicyTab v-else-if="tab === 'policy'" :org="draft" :errors="errors" />
-          <AgentsTab v-else-if="tab === 'agents'" :org="draft" :errors="errors" :saved="savedAgents" />
+          <AgentsTab v-else-if="tab === 'agents'" :org="draft" :errors="errors" :saved="savedAgents" :ctx="ctx" />
           <McpTab v-else-if="tab === 'mcp'" :org="draft" :errors="errors" :ctx="ctx" />
           <GeneralTab v-else :org="draft" :errors="errors" />
         </template>

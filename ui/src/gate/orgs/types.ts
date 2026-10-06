@@ -26,6 +26,15 @@ export interface ModelEntry {
   enabled: boolean
 }
 
+export interface ModelContract {
+  model: string
+  display_name: string
+  context_window: number | null
+  max_output: number | null
+  limits_source: string
+  attachments: Record<string, number | boolean | string> | null
+}
+
 export interface Pricing {
   route_id: string
   model: string
@@ -134,6 +143,7 @@ export interface OrgDetails {
   secrets: Record<string, boolean>
   subscription_models: string[]
   subscription_models_by_route?: Record<string, { value: string; name: string }[]>
+  model_contracts?: Record<string, Record<string, ModelContract>>
   upstreams: Record<string, string>
   /** Можно ли удалить сохранённый маршрут: нет вызовов и устройств с его моделями (GW-ADMIN-03). */
   route_usage?: Record<string, RouteUsage>
@@ -170,5 +180,6 @@ export interface EditorContext {
   upstreams: Record<string, string>
   subscription_models: string[]
   subscription_models_by_route?: Record<string, { value: string; name: string }[]>
+  model_contracts?: Record<string, Record<string, ModelContract>>
   route_usage: Record<string, RouteUsage>
 }

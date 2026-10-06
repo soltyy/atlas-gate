@@ -162,6 +162,7 @@ async def test_attachment_capabilities_use_node_model_value(configured):
         maxTextChars=1_000_000, maxPdfPages=500, maxPagePixels=4_000_000)
     state.nodes.snapshots['test'] = {'attachments': caps}
     state.nodes.catalog['test'] = [{'value': 'gpt-6.1-sol'}]
+    await state.reload()
     doc = (await http.get('/harness/discovery')).json()
     first = next(m for m in doc['models'] if m['model']=='gpt-6.1-sol' and m['context_window']==272000)
     assert first['attachments']['documentPages'] and not first['attachments']['pdfNative']
@@ -169,3 +170,18 @@ async def test_attachment_capabilities_use_node_model_value(configured):
     settings = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
     assert settings['attachment_routes']['private-route']['gpt-6.1-sol']['agentDocumentTools']
     assert settings['profile'] == verify_profile(settings['profile_jws'], credentials['profile_signing_key'])
+    managed = next(m for m in settings['profile']['models'] if m['model']=='gpt-6.1-sol')
+    assert managed['attachments'] == first['attachments'] == settings['attachment_routes']['private-route']['gpt-6.1-sol']
+    admin = (await http.get('/harness/admin/orgs/first', headers={'X-Atlas-Token':'test-admin-secret'})).json()
+    assert admin['model_contracts']['private-route']['gpt-6.1-sol']['attachments'] == managed['attachments']
+    etag = settings['profile_jws']
+    state.nodes.snapshots['test']['attachments'] = dict(caps, maxFiles=2)
+    # A runtime refresh cannot mutate already signed capabilities or their public projection.
+    unchanged = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
+    assert unchanged['profile_jws'] == etag
+    assert unchanged['attachment_routes']['private-route']['gpt-6.1-sol']['maxFiles'] == 8
+    assert next(m for m in (await http.get('/harness/discovery')).json()['models'] if m['context_window']==272000)['attachments']['maxFiles']==8
+    await state.reload()
+    changed = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
+    assert changed['profile_jws'] != etag
+    assert changed['profile']['models'][0]['attachments']['maxFiles'] == 2

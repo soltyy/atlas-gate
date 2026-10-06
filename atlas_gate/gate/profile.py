@@ -16,6 +16,7 @@ from typing import Any
 from .crypto import SigningKey, canonical_json, sha256_hex
 from .orgs import OrgConfig
 from .store import Store
+from .model_contracts import project_model
 
 log = logging.getLogger("atlas_gate")
 
@@ -23,7 +24,7 @@ TTL_SECONDS = 604800
 
 
 def build_body(org: OrgConfig, public_url: str, down_routes: set[str],
-               agent_ids: set[str] | None) -> tuple[dict[str, Any], list[str]]:
+               agent_ids: set[str] | None, attachment_caps=None) -> tuple[dict[str, Any], list[str]]:
     """Тело профиля без метаданных версии.
 
     Маршруты клиенту — только id, kind, protocol, base_url (гейт) и region; адрес апстрима, имя переменной
@@ -53,7 +54,7 @@ def build_body(org: OrgConfig, public_url: str, down_routes: set[str],
         elif m.model not in agent_ids:
             warnings.append(f"модель {m.model} ({m.route_id}) не отдана: её нет у роутера")
             continue
-        models.append(m.model_dump())
+        models.append(dict(route_id=m.route_id, **project_model(m, (attachment_caps or {}).get((m.route_id, m.model)))))
     kept = {(m["route_id"], m["model"]) for m in models}
     pricing = [p.model_dump() for p in org.pricing if (p.route_id, p.model) in kept]
     body = {

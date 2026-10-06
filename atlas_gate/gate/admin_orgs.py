@@ -31,6 +31,7 @@ from ..auth import require_token
 from .api import gate, ready_gate, router
 from .errors import GateError
 from .orgs import ORG_ID, OrgConfig, dump, from_template, org_file
+from .model_contracts import published_model
 
 log = logging.getLogger("atlas_gate")
 admin = [Depends(require_token)]
@@ -193,6 +194,8 @@ async def org_get(org_id: str, request: Request) -> Any:
             "subscription_models": sorted(listed or []), "upstreams": dict(state.upstreams),
             "subscription_models_by_route": {r.id: state.nodes.route_catalog(org.id, r.id)
                                              for r in org.routes if r.kind == "router-agent"},
+            "model_contracts": {r.id: {m.model: published_model(state, org, m) for m in org.models if m.route_id == r.id}
+                                for r in org.routes},
             "route_usage": route_usage(state, org),
             "warnings": state.warnings.get(org_id, [])}
     return JSONResponse(body, headers={"ETag": etag})
