@@ -135,3 +135,36 @@ async def test_catalog_survives_outage_but_respects_org(tmp_path, monkeypatch):
     assert not restarted.snapshots
     await restarted.close()
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_history_fallback_keeps_original_node_affinity(tmp_path):
+    store, nodes = Store(str(tmp_path / 'fallback.db')), FakeNodes(capacity=4)
+    nodes.snapshots['a']['quota'] = {'windows':[{'usedPercent':0}]}
+    nodes.snapshots['b']['quota'] = {'windows':[{'usedPercent':80}]}
+    routing = Routing(store, nodes)
+    try:
+        _, body = await routing.create(device('d'), 'sub', 'claude', {}, 10)
+        first = routing.get(json.loads(body)['id'], device('d'))
+        assert first['node_id'] == 'a'
+        store._exec("UPDATE router_bindings SET sdk_id='native-sdk',status='closed' WHERE id=?", (first['id'],))
+        nodes.snapshots['a']['quota']['windows'][0]['usedPercent'] = 80
+        nodes.snapshots['b']['quota']['windows'][0]['usedPercent'] = 0
+        sent=[]
+        original=nodes.request
+        async def request(node_id, method, path, **kwargs):
+            sent.append((node_id,json.loads(kwargs['content'])))
+            response = await original(node_id,method,path,**kwargs)
+            return httpx.Response(response.status_code, json={**response.json(), "id": "fallback-local-id"})
+        nodes.request=request
+        _, body=await routing.create(device('d'),'sub','claude',
+            {'resumeSessionId':first['sdk_alias'],'allowHistoryFallback':True},10)
+        second=routing.get(json.loads(body)['id'],device('d'))
+        assert second['node_id'] == 'a'  # b свободнее, но migration не разрешён.
+        assert sent == [('a', {'model':'claude','resumeSessionId':'native-sdk','allowHistoryFallback':True})]
+        with pytest.raises(GateError) as denied:
+            await routing.create(device('other'),'sub','claude',
+                {'resumeSessionId':first['sdk_alias'],'allowHistoryFallback':True},10)
+        assert denied.value.status == 404
+    finally:
+        store.close()

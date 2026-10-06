@@ -150,6 +150,8 @@ class GateAgentSessionCreate(BaseModel):
     tools: list[ToolDefinition] = Field(default_factory=list)
     model: str | None = None
     resumeSessionId: str | None = None
+    # Только на том же закреплённом node/account: Harness восстановит recap и scoped originals.
+    allowHistoryFallback: bool = False
     # #12: scope проходит на прежний binding, без импорта SDK.
     documentAccess: Literal['client-authorized-v1'] | None = None
     documentIds: list[Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]] = Field(default_factory=list, max_length=500)
