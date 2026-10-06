@@ -28,6 +28,8 @@ function supported(value: unknown) {
       <dt>PDF нативно</dt><dd>{{ supported(caps?.pdfNative) }}</dd>
       <dt>Страницы PDF</dt><dd>{{ supported(caps?.documentPages) }}</dd>
       <dt>Инструменты документа</dt><dd>{{ supported(caps?.agentDocumentTools) }}</dd>
+      <dt>Управление ответом</dt><dd>{{ contract?.output_policy === 'sdk-default' ? 'Авто — управляет SDK' : contract?.output_policy === 'harness-budget' ? 'Бюджет харнеса' : 'неизвестно' }}</dd>
+      <dt>Бюджет запроса, токенов</dt><dd>{{ contract?.output_policy === 'sdk-default' ? 'Выбирает SDK' : positive(contract?.output_budget) }}</dd>
     </dl>
     <p class="muted">Источник лимитов: {{ contract?.limits_source ?? 'конфигурация организации' }}.
       Источник вложений: {{ caps?.source ?? 'неизвестно' }}. Текущий расход контекста сообщает SDK сессии.</p>

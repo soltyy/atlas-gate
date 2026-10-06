@@ -185,3 +185,15 @@ async def test_attachment_capabilities_use_node_model_value(configured):
     changed = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
     assert changed['profile_jws'] != etag
     assert changed['profile']['models'][0]['attachments']['maxFiles'] == 2
+
+
+def test_output_policy_separates_sdk_control_from_api_request_budget():
+    from atlas_gate.gate.model_contracts import project_model
+    from atlas_gate.gate.orgs import ModelEntry
+    model = ModelEntry(route_id='sub', model='example', context_window=258400)
+    sub = project_model(model, kind='router-agent')
+    assert sub['max_output'] is None and sub['output_policy'] == 'sdk-default' and sub['output_budget'] is None
+    api = project_model(model, kind='gateway')
+    assert api['max_output'] is None and api['output_policy'] == 'harness-budget' and api['output_budget'] == 4096
+    model.max_output = 1000000
+    assert project_model(model, kind='gateway')['output_budget'] == 258400

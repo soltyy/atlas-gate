@@ -54,7 +54,7 @@ def build_body(org: OrgConfig, public_url: str, down_routes: set[str],
         elif m.model not in agent_ids:
             warnings.append(f"модель {m.model} ({m.route_id}) не отдана: её нет у роутера")
             continue
-        models.append(dict(route_id=m.route_id, **project_model(m, (attachment_caps or {}).get((m.route_id, m.model)))))
+        models.append(dict(route_id=m.route_id, **project_model(m, (attachment_caps or {}).get((m.route_id, m.model)), route.kind if route else "gateway")))
     kept = {(m["route_id"], m["model"]) for m in models}
     pricing = [p.model_dump() for p in org.pricing if (p.route_id, p.model) in kept]
     body = {

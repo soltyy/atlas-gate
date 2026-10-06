@@ -32,6 +32,8 @@ export interface ModelContract {
   context_window: number | null
   max_output: number | null
   limits_source: string
+  output_policy?: 'sdk-default' | 'harness-budget' | null
+  output_budget?: number | null
   attachments: Record<string, number | boolean | string> | null
 }
 

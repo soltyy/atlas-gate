@@ -11,14 +11,14 @@ describe('единые показатели в карточке агента', (
       agents: [{ id: 'assistant', version: '1', model: 'same', allowed_routes: ['a'], name: 'Assistant', tools_allowlist: [], mcp_ids: [], settings: {} }],
       mcp: [], policy: { tool_policies: [] } } as unknown as OrgConfig
     const ctx = { model_contracts: { a: { same: { model: 'same', display_name: 'A', context_window: 258400, max_output: null,
-      limits_source: 'configured', attachments: { source: 'router-reported', maxFiles: 8, maxRawBytes: 15728640,
+      limits_source: 'configured', output_policy: 'sdk-default', output_budget: null, attachments: { source: 'router-reported', maxFiles: 8, maxRawBytes: 15728640,
         maxTotalBytes: 20971520, maxTextChars: 1000000, maxPdfPages: 500, maxPagePixels: 4000000, image: true, pdfNative: false,
         documentPages: true, agentDocumentTools: true } } } } } as unknown as EditorContext
     const w = mount(AgentsTab, { props: { org, ctx, errors: {}, saved: new Set(['assistant@1']) } })
     const metrics = w.find('[data-model-metrics="a/same"]')
     expect(w.find('[data-model-metrics="b/same"]').exists()).toBe(false)
     for (const label of ['Окно, токенов', 'Макс. ответ, токенов', 'Файлов за ход', 'Байт на файл', 'Байт суммарно',
-      'Символов текста', 'Страниц PDF', 'Пикселей страницы', 'router-reported', 'неизвестно']) expect(metrics.text()).toContain(label)
+      'Символов текста', 'Страниц PDF', 'Пикселей страницы', 'router-reported', 'неизвестно', 'Авто — управляет SDK', 'Выбирает SDK']) expect(metrics.text()).toContain(label)
     expect(metrics.findAll('dd').map(x => x.text().replace(/\u00a0/g, ' ')).slice(0, 8)).toEqual(['258 400', 'неизвестно', '8', '15 728 640', '20 971 520', '1 000 000', '500', '4 000 000'])
     org.models[0].context_window = 900000
     await w.setProps({ org: { ...org, models: org.models.map(m => ({ ...m })) } })
