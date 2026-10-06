@@ -1,0 +1,214 @@
+{
+  "id": "test-org",
+  "name": "Тестовая организация Atlas",
+  "routes": [
+    {
+      "id": "scripted-openai",
+      "kind": "gateway",
+      "protocol": "openai",
+      "region": "test",
+      "zdr": true,
+      "max_data_class": "client-confidential",
+      "upstream_url": "${ATLAS_TEST_OPENAI_UPSTREAM:-http://127.0.0.1:4011/v1}",
+      "key_env": "SCRIPTED_OPENAI_KEY",
+      "timeout_s": 30
+    },
+    {
+      "id": "scripted-anthropic",
+      "kind": "gateway",
+      "protocol": "anthropic",
+      "region": "test",
+      "zdr": true,
+      "max_data_class": "personal",
+      "upstream_url": "${ATLAS_TEST_ANTHROPIC_UPSTREAM:-http://127.0.0.1:4012/v1}",
+      "key_env": "SCRIPTED_ANTHROPIC_KEY",
+      "timeout_s": 30
+    },
+    {
+      "id": "claude-sub",
+      "kind": "router-agent",
+      "protocol": "atlas-agent",
+      "zdr": false,
+      "max_data_class": "internal"
+    }
+  ],
+  "models": [
+    {
+      "route_id": "scripted-openai",
+      "model": "scripted-openai",
+      "display_name": "Scripted OpenAI",
+      "context_window": 128000,
+      "max_output": 8192
+    },
+    {
+      "route_id": "scripted-anthropic",
+      "model": "scripted-anthropic",
+      "display_name": "Scripted Anthropic",
+      "context_window": 200000,
+      "max_output": 8192
+    },
+    {
+      "route_id": "claude-sub",
+      "model": "stub-fast",
+      "display_name": "Claude (подписка, stub)",
+      "context_window": 1000000,
+      "max_output": 64000
+    }
+  ],
+  "pricing": [
+    {
+      "route_id": "scripted-openai",
+      "model": "scripted-openai",
+      "currency": "USD",
+      "input_uncached": 1.0,
+      "input_cached": 0.1,
+      "output": 4.0,
+      "pricing_version": "test-1"
+    },
+    {
+      "route_id": "scripted-anthropic",
+      "model": "scripted-anthropic",
+      "currency": "USD",
+      "input_uncached": 3.0,
+      "input_cached": 0.3,
+      "output": 15.0,
+      "pricing_version": "test-1"
+    },
+    {
+      "route_id": "claude-sub",
+      "model": "stub-fast",
+      "currency": "USD",
+      "input_uncached": 0,
+      "input_cached": 0,
+      "output": 0,
+      "pricing_version": "test-1",
+      "subscription": true
+    }
+  ],
+  "policy": {
+    "data_classes": [
+      "public",
+      "internal",
+      "personal",
+      "client-confidential"
+    ],
+    "routes_by_class": {
+      "public": [
+        "scripted-openai",
+        "scripted-anthropic",
+        "claude-sub"
+      ],
+      "internal": [
+        "scripted-openai",
+        "scripted-anthropic",
+        "claude-sub"
+      ],
+      "personal": [
+        "scripted-openai",
+        "scripted-anthropic"
+      ],
+      "client-confidential": [
+        "scripted-openai"
+      ]
+    },
+    "tool_policies": [
+      {
+        "tool": "read",
+        "mode": "auto",
+        "max_data_class": "client-confidential",
+        "escalatable": false
+      },
+      {
+        "tool": "write",
+        "mode": "ask",
+        "max_data_class": "internal",
+        "escalatable": true
+      },
+      {
+        "tool": "shell",
+        "mode": "deny",
+        "max_data_class": "public",
+        "escalatable": false
+      }
+    ],
+    "default_data_class": "internal"
+  },
+  "agents": [
+    {
+      "id": "analyst",
+      "version": "1",
+      "name": "Аналитик",
+      "system_prompt": "Ты — аналитик. Отвечай кратко.",
+      "model": "scripted-openai",
+      "allowed_routes": [
+        "scripted-openai"
+      ],
+      "tools_allowlist": [
+        "read"
+      ],
+      "mcp_ids": [
+        "kb"
+      ],
+      "settings": {
+        "temperature": 0.2
+      },
+      "default": true
+    }
+  ],
+  "mcp": [
+    {
+      "id": "kb",
+      "name": "База знаний",
+      "transport": "http",
+      "url": "https://kb.test.invalid/mcp",
+      "headers_ref": null,
+      "required": false,
+      "tools_allowlist": [
+        "search"
+      ],
+      "ref_fields": {
+        "search": [
+          "id"
+        ]
+      },
+      "display_fields": {
+        "search": [
+          "title"
+        ]
+      }
+    }
+  ],
+  "builtin_tools": {
+    "read": "allow",
+    "write": "allow",
+    "edit": "allow",
+    "shell": "deny"
+  },
+  "overrides": {
+    "allow_personal_agents": true,
+    "allow_local_mcp": false,
+    "allow_local_routes": false,
+    "allow_data_class_raise": false,
+    "allow_workspace_root": true
+  },
+  "feature_flags": {
+    "scripted": true
+  },
+  "min_app_version": "0.1.0",
+  "recommended_app_version": "0.1.0",
+  "update_channel_url": "https://updates.test.invalid/harness/stable",
+  "update_manifest": {
+    "version": "0.1.0",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "url": "https://updates.test.invalid/harness/0.1.0/AtlasHarness-0.1.0.exe",
+    "notes_url": "https://updates.test.invalid/harness/0.1.0/notes"
+  },
+  "quota": {
+    "limit": 10.0,
+    "currency": "USD",
+    "agent_turns_per_day": 50
+  },
+  "audit": {
+    "include_messages": false
+  }
+}
