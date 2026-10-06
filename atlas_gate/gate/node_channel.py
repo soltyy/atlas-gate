@@ -53,6 +53,8 @@ class Channel:
         while True:
             if authorized and not authorized():
                 raise GateError(401, "unauthorized", "удостоверение Router отозвано")
+            if disconnected and await disconnected():
+                return None  # Закрытый long-poll не должен удержать новый work до expiry lease.
             now = time.time()
             with self.store._lock:
                 db = self.store._db
@@ -70,8 +72,6 @@ class Channel:
             if row:
                 return dict(json.loads(row["request"]), id=row["id"], method=row["method"], path=row["path"], deadline=row["deadline"])
             if time.monotonic() >= end:
-                return None
-            if disconnected and await disconnected():
                 return None
             await asyncio.sleep(0.05)
 
