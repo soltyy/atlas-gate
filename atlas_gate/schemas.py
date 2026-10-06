@@ -160,6 +160,10 @@ class ToolsUpdated(BaseModel):
     refused: list[str] = Field(default_factory=list)
 
 
+class DocumentUploadRequest(PromptRequest):
+    text: Literal[""] = ""
+
+
 class ToolResultRequest(BaseModel):
     callId: str
     content: str = ""

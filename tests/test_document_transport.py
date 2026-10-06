@@ -141,3 +141,48 @@ async def test_codex_pdf_all_gate_transports(codex_network,transport,mode,scoped
         for task in workers: task.cancel()
         await asyncio.gather(*workers,return_exceptions=True)
         for connection in connections: await connection.aclose()
+
+
+@pytest.mark.parametrize('transport',['direct','connector'])
+async def test_scoped_cache_restore_no_paid_turn(codex_network,transport):
+    import hashlib
+    client,app,routers,settings,creds,other=codex_network
+    data=(Path(__file__).parent/'fixtures'/'mixed.pdf').read_bytes()
+    docid=hashlib.sha256(data).hexdigest()
+    workers=[]; connections=[]
+    state=app.state.gate
+    if transport=='connector':
+        from atlas_gate.gate.node_channel import ChannelClient
+        from atlas_router.connector import Connector
+        for node_id,node in state.nodes.config.items():
+            connector=object.__new__(Connector); connector.identity={'nodeId':node_id}
+            connector.router=httpx.AsyncClient(base_url=node.url,headers={'X-Atlas-Token':'test-router'})
+            connections.append(connector.router)
+            await state.nodes.clients[node_id].aclose()
+            state.nodes.clients[node_id]=ChannelClient(state.channel,node_id)
+            async def pump(n=node_id,c=connector):
+                while True:
+                    work=await state.channel.poll(n,wait=.1)
+                    if work:
+                        result=await c.execute(work)
+                        state.channel.complete(n,work['id'],result['status'],base64.b64decode(result['body']))
+            workers.append(asyncio.create_task(pump()))
+    try:
+        created=await client.post('/harness/agent/sessions',json={'system':'test','model':'stub-fast',
+            'documentAccess':'client-authorized-v1','documentIds':[docid]})
+        assert created.status_code==200,created.text
+        prefix='/harness/agent/sessions/'+created.json()['id']
+        assert (await client.get(prefix+'/attachments')).json()['attachments']['documentUpload'] is True
+        body={'id':'restore-cache','attachments':[{'kind':'pdf','filename':'mixed.pdf','data':base64.b64encode(data).decode()}]}
+        for _ in range(2):
+            response=await client.post(prefix+'/documents',json=body,headers={'Idempotency-Key':'same-restore'})
+            assert response.status_code==200,response.text
+            assert response.json()['documents'][0]['id']==docid
+        denied=await client.post(prefix+'/documents',json=body,headers={'Authorization':'Bearer '+other['device_token']})
+        assert denied.status_code==404
+        assert (await client.get(prefix+'/documents')).json()['documents'][0]['id']==docid
+        assert sum(entry.turns for r in routers for entry in r.state.registry._entries.values())==0
+    finally:
+        for task in workers: task.cancel()
+        await asyncio.gather(*workers,return_exceptions=True)
+        for connection in connections: await connection.aclose()

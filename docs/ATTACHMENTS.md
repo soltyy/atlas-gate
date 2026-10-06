@@ -89,3 +89,10 @@ callId; ответ Harness проверяет principal/workspace/ancestor chain
 verification сохраняется. Операторские cert/key на диске автоматически не меняются:
 при cutover нужны отдельная новая issuance и проверка пары, затем переключение.
 Настоящий Python3.14 mTLS reconnect/revocation сценарий проходит без роста timeout.
+
+## Document restore upload (#18, ATT-129-GATE-RESTORE)
+
+POST sessions/{sid}/documents с `{id, attachments: […]}` проходит прежние owner,
+binding, data-class и v1 preflight проверки, затем direct/connector. Повтор использует
+Idempotency-Key; операция не создаёт paid turn. Nullable documentUpload находится
+в bound/route projection отдельно от JWS. SDK/PDF parser в Gate отсутствуют.

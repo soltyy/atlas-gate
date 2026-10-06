@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import Depends, Request
 from fastapi.responses import Response, JSONResponse
 from sse_starlette.sse import EventSourceResponse
-from ..schemas import CompactRequest, PromptRequest, SteerRequest, ToolResultRequest, ToolsUpdate
+from ..schemas import CompactRequest, DocumentUploadRequest, PromptRequest, SteerRequest, ToolResultRequest, ToolsUpdate
 from .api import check_data_class, gate, org_of, ready_gate, require_device, router
 from .errors import GateError, STATUS_CODES
 from .schemas import GateAgentSessionCreate
@@ -265,6 +265,15 @@ async def agent_attachments(sid: str, request: Request, device: Device = Depends
     _policy(state, device, binding, request)
     info = await state.nodes.probe(binding['node_id'])
     return {'attachments': node_attachments(info)}
+
+
+@router.post('/harness/agent/sessions/{sid}/documents')
+async def agent_upload_documents(sid: str, body: DocumentUploadRequest, request: Request, device: Device = Depends(require_device)):
+    state = gate(request)
+    binding = state.routing.get(sid, device)
+    _policy(state, device, binding, request, require_model=False)
+    validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
+    return await _delegate(request, device, sid, 'POST', '/documents')
 
 
 @router.get('/harness/agent/sessions/{sid}/documents')
