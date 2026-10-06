@@ -13,6 +13,7 @@ from .api import check_data_class, gate, org_of, ready_gate, require_device, rou
 from .errors import GateError, STATUS_CODES
 from .schemas import GateAgentSessionCreate
 from .state import Device
+from .attachments import node_attachments, validate_prompt
 
 log = logging.getLogger("atlas_gate")
 
@@ -144,6 +145,7 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
         raise GateError(422, "invalid_request", "неизвестный mode")
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     await state.nodes.refresh()
+    validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     operation, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/prompt"), body.model_dump(),
         request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes)
     if not fresh:
@@ -254,6 +256,30 @@ async def agent_compact(sid: str, request: Request, body: CompactRequest | None 
 @router.get("/harness/agent/sessions/{sid}/context")
 async def agent_context(sid: str, request: Request, device: Device = Depends(require_device)):
     return await _delegate(request, device, sid, "GET", "/context")
+
+
+@router.get('/harness/agent/sessions/{sid}/attachments')
+async def agent_attachments(sid: str, request: Request, device: Device = Depends(require_device)):
+    state = await ready_gate(request)
+    binding = state.routing.get(sid, device)
+    _policy(state, device, binding, request)
+    info = await state.nodes.probe(binding['node_id'])
+    return {'attachments': node_attachments(info)}
+
+
+@router.get('/harness/agent/sessions/{sid}/documents')
+async def agent_documents(sid: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'GET', '/documents')
+
+
+@router.get('/harness/agent/sessions/{sid}/documents/{document_id}')
+async def agent_document_page(sid: str, document_id: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'GET', '/documents/'+quote(document_id, safe=''))
+
+
+@router.delete('/harness/agent/sessions/{sid}/documents/{document_id}')
+async def agent_delete_document(sid: str, document_id: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'DELETE', '/documents/'+quote(document_id, safe=''))
 
 
 @router.post("/harness/agent/sessions/{sid}/tasks/{task_id}/stop")

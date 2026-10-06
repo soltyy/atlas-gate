@@ -25,6 +25,7 @@ resume/tools/interrupt/compact/events идут на сохранённый node.
 - [Один активный Gate / восстановление](docs/HA-ADR.md)
 - [Приёмка и ограничения выпуска](docs/ACCEPTANCE.md)
 - [Концепция](docs/GATE-ROUTER-CONCEPT.md)
+- [Вложения: возможности маршрутов, закрепление и инструменты страниц](docs/ATTACHMENTS.md)
 
 Разработка: `uv run pytest`, `uv build`; в ui — `npm ci`, `npm test`,
 `npm run build` (включает typecheck). Для HTTP интеграции задать ATLAS_TEST_ROUTER_ROOT

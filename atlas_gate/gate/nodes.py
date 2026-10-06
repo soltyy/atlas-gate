@@ -58,18 +58,18 @@ class Nodes:
             raise ValueError("повторяющийся node_id")
         groups = {}
         for n in nodes:
-            if n.transport == "connector":
-                if channel is None:
-                    raise ValueError("connector требует дисковый канал Gate")
-                from .node_channel import ChannelClient
-                self.clients[n.node_id] = ChannelClient(channel, n.node_id)
-                continue
             if n.account_group in groups and groups[n.account_group] != n.account_turn_capacity:
                 raise ValueError("account_turn_capacity должен совпадать у общего account_group")
             groups[n.account_group] = n.account_turn_capacity
         self.config = {n.node_id: n for n in nodes}
         self.clients = {}
         for n in nodes:
+            if n.transport == 'connector':
+                if channel is None:
+                    raise ValueError('connector требует дисковый канал Gate')
+                from .node_channel import ChannelClient
+                self.clients[n.node_id] = ChannelClient(channel, n.node_id)
+                continue
             token = os.environ.get(n.token_env)
             if not token:
                 raise ValueError(f"нет секрета endpoint {n.node_id}: {n.token_env}")

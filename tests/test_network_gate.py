@@ -15,6 +15,8 @@ from atlas_gate.settings import Settings
 
 @contextlib.asynccontextmanager
 async def serve(app, **options):
+    from sse_starlette.sse import AppStatus
+    AppStatus.should_exit = False
     options.setdefault("timeout_graceful_shutdown", 5)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -50,6 +52,7 @@ async def network(tmp_path, monkeypatch):
     async with contextlib.AsyncExitStack() as stack:
         for name in ("a", "b"):
             app = router_app(RouterSettings(_env_file=None, ATLAS_BACKEND="stub", ATLAS_GATE_ENABLED=False,
+                             ATLAS_DOCUMENTS_DIR=str(tmp_path / (name+'-docs')),
                              ATLAS_TRUST_LOCAL=False, ATLAS_TOKEN="test-router", ATLAS_NODE_ID=name, ATLAS_NODE_CAPACITY=4,
                              ATLAS_NODE_DB=str(tmp_path / (name + "-node.db"))))
             apps.append(app)
@@ -84,6 +87,42 @@ async def create(client):
     response = await client.post("/harness/agent/sessions", json={"system": "test", "model": "stub-fast", "tools": [{"name": "echo", "description": "echo", "parameters": {"type": "object"}}]})
     assert response.status_code == 200, response.text
     return response.json()["id"]
+
+
+async def test_documents_bound_owner_retry_and_foreign_device(network, monkeypatch):
+    import base64
+    client, app, routers, settings, creds, other = network
+    sid = await create(client)
+    binding = app.state.gate.store._one('SELECT * FROM router_bindings WHERE id=?',(sid,))
+    owner = routers[0 if binding['node_id']=='a' else 1]
+    # SDK сценарный, PDF worker и вся HTTP/Gate проводка настоящие.
+    monkeypatch.setattr(owner.state.backend, 'name', 'claude')
+    data=(Path(__file__).parent/'fixtures'/'mixed.pdf').read_bytes()+b'\n%'+b'X'*920000
+    payload={'id':'pdf', 'text':'read', 'attachments':[{'kind':'pdf','filename':'mixed.pdf',
+        'data':base64.b64encode(data).decode(), 'sizeBytes':1}]}
+    prefix='/harness/agent/sessions/'+sid
+    first=await client.post(prefix+'/prompt?mode=async',json=payload)
+    assert first.status_code==202, first.text
+    for _ in range(100):
+        result=(await client.get(prefix+'/turns/pdf/events',params={'wait':200})).json()
+        if result['done']: break
+    assert result['state']=='done',result
+    duplicate=await client.post(prefix+'/prompt?mode=async',json=payload)
+    assert duplicate.status_code==202
+    docs=(await client.get(prefix+'/documents')).json()['documents']
+    assert len(docs)==1 and docs[0]['pageCount']==2
+    doc=docs[0]['id']
+    page=await client.get(prefix+'/documents/'+doc,params={'operation':'image','page':2})
+    assert page.status_code==200 and page.json()['image']['mediaType']=='image/jpeg'
+    capability=await client.get(prefix+'/attachments')
+    assert capability.json()['attachments']['pdfNative'] is True
+    assert 'nodeId' not in capability.text
+    assert len(owner.state.documents.list(str(owner.state.registry.get(binding['local_id']).session.session_id or binding['local_id'])))==1
+    foreign=await client.get(prefix+'/documents/'+doc,headers={'Authorization':'Bearer '+other['device_token']})
+    assert foreign.status_code in (403,404)
+    bad=await client.post(prefix+'/prompt?mode=async',json={'id':'bad-pdf','text':'', 'attachments':[{'kind':'pdf','data':'oops'}]})
+    assert bad.status_code==422 and bad.json()['error']['code']=='attachment_invalid'
+    assert app.state.gate.store._one("SELECT COUNT(*) n FROM router_operations WHERE turn_id='bad-pdf'")['n']==0
 
 
 @pytest.mark.asyncio
@@ -412,9 +451,16 @@ async def test_outbound_connector_enrollment_replay_tools_and_revocation(network
                 assert accepted.status_code == 202, accepted.text
                 await events(client, s2, "tls", True)
                 await client.post("/harness/admin/nodes/a/revoke", headers=admin)
-                with pytest.raises(httpx.HTTPStatusError) as denied:
-                    await original_call("GET", "/node/work")
-                assert denied.value.response.status_code == 401
+                # run() также видит revoke и закрывает свой HTTP pool: отдельный
+                # запрос не должен гоняться с этим close при проверке статуса.
+                rejected = Connector(root, router_url, "test-router", ca_file=str(root / "node-ca.pem"), mtls=True, node_gate=tls_url)
+                try:
+                    with pytest.raises(httpx.HTTPStatusError) as denied:
+                        await rejected.call("GET", "/node/work")
+                    assert denied.value.response.status_code == 401
+                finally:
+                    await rejected.gate.aclose()
+                    await rejected.router.aclose()
             finally:
                 running.cancel()
                 await asyncio.gather(running, return_exceptions=True)

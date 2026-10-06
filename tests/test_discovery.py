@@ -150,3 +150,22 @@ async def test_settings_and_etag_survive_gate_restart(configured):
         assert after.json() == before.json()
         assert after.headers['etag'] == before.headers['etag']
         assert (await client.get('/harness/discovery')).headers['etag'] == public_before.headers['etag']
+
+
+async def test_attachment_capabilities_use_node_model_value(configured):
+    from atlas_gate.gate.nodes import Node
+    http, state, _ = configured
+    state.nodes.config = {'test': Node(node_id='test', url='http://127.0.0.1:1', token_env='TEST',
+        orgs=['first'], routes=['private-route'], account_group='test')}
+    caps = dict(schemaVersion=1, text=True, image=True, pdfNative=False, documentPages=True,
+        agentDocumentTools=True, maxFiles=8, maxRawBytes=15*1024*1024, maxTotalBytes=20*1024*1024,
+        maxTextChars=1_000_000, maxPdfPages=500, maxPagePixels=4_000_000)
+    state.nodes.snapshots['test'] = {'attachments': caps}
+    state.nodes.catalog['test'] = [{'value': 'gpt-6.1-sol'}]
+    doc = (await http.get('/harness/discovery')).json()
+    first = next(m for m in doc['models'] if m['model']=='gpt-6.1-sol' and m['context_window']==272000)
+    assert first['attachments']['documentPages'] and not first['attachments']['pdfNative']
+    credentials = await enroll(http)
+    settings = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
+    assert settings['attachment_routes']['private-route']['gpt-6.1-sol']['agentDocumentTools']
+    assert settings['profile'] == verify_profile(settings['profile_jws'], credentials['profile_signing_key'])

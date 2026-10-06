@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .. import __version__
 from .crypto import canonical_json, sha256_hex, verify_profile
 from .orgs import Agent, Audit, BuiltinTools, Mcp, ModelEntry, Overrides, Policy, Pricing, Quota
+from .attachments import route_attachments
 
 
 class PublicModel(BaseModel):
@@ -18,6 +19,7 @@ class PublicModel(BaseModel):
     max_output: int | None
     enabled: bool
     limits_source: Literal['configured'] = 'configured'
+    attachments: dict[str, Any] | None = None
 
 
 class Connection(BaseModel):
@@ -87,6 +89,7 @@ class HarnessSettings(BaseModel):
     profile: ClientProfile
     profile_jws: str
     profile_signing_key: dict[str, str]
+    attachment_routes: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 def endpoints():
@@ -98,7 +101,10 @@ def endpoints():
             'quota': '/harness/quota', 'llm_models': '/harness/llm/v1/models',
             'chat_completions': '/harness/llm/v1/chat/completions',
             'messages': '/harness/llm/v1/messages', 'agent_sessions': '/harness/agent/sessions',
-            'agent_context': '/harness/agent/sessions/{session_id}/context'}
+            'agent_context': '/harness/agent/sessions/{session_id}/context',
+            'agent_attachments': '/harness/agent/sessions/{session_id}/attachments',
+            'agent_documents': '/harness/agent/sessions/{session_id}/documents',
+            'agent_document_page': '/harness/agent/sessions/{session_id}/documents/{document_id}'}
 
 
 def limits(state):
@@ -120,6 +126,7 @@ def public_catalog(state):
                           kind=route.kind, protocol=route.protocol,
                           context_window=model.context_window if model.context_window > 0 else None,
                           max_output=model.max_output if model.max_output > 0 else None)
+            fields['attachments'] = route_attachments(state, org.id, route.id, model.model) if route.kind=='router-agent' else None
             identity = sha256_hex(canonical_json(fields))
             enabled = model.enabled and route.enabled
             if identity in variants:
@@ -134,8 +141,13 @@ def client_settings(state, row):
     # Читаем ровно persisted JWS: reload не может разорвать пару JSON/подпись.
     key = state.key.jwk()
     profile = verify_profile(row['jws'], key)
+    attachment_routes = {}
+    for route in profile['routes']:
+        if route['kind']=='router-agent':
+            attachment_routes[route['id']] = {m['model']: route_attachments(state, profile['org']['id'], route['id'], m['model'])
+                for m in profile['models'] if m['route_id']==route['id']}
     return HarnessSettings(endpoints=endpoints(), limits=limits(state), profile=profile,
-                           profile_jws=row['jws'], profile_signing_key=key)
+                           profile_jws=row['jws'], profile_signing_key=key, attachment_routes=attachment_routes)
 
 
 def json_snapshot(request, doc, private=False):
