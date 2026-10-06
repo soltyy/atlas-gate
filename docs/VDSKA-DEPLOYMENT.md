@@ -11,9 +11,11 @@ ChatGPT и существующий Claude вход сервера. Ubuntu 24.04
 | atlas-router-claude | 127.0.0.1:8768 | akbot | /var/lib/atlas-router-claude |
 
 Установленные commits: Router `1b2ed58b02e475a0d06a179a578f79aa77c6a5cb`,
-Gate `c360caf20f8454f4f4efe577b22c1421ac4058a5`. Git archive SHA-256 сверены,
+Gate первоначально `c360caf20f8454f4f4efe577b22c1421ac4058a5`, затем обновлён до
+`7be197721188807c72c007ebea19e263ce79fd27` (редактор моделей, #11).
+Git archive SHA-256 сверены,
 зависимости установлены `uv sync --locked --no-dev --python /usr/bin/python3`.
-Релизы `/opt/atlas/releases/{router-1b2ed58,gate-c360caf}`, ссылки
+Релизы `/opt/atlas/releases/{router-1b2ed58,gate-7be19772}`, ссылки
 `/opt/atlas/{router,gate}`. Установлен код кандидатов, PR ещё не слиты в main.
 
 Конфигурации `/etc/atlas/{router,router-claude,gate}.env`, root 0600;
@@ -40,7 +42,8 @@ X-Forwarded-For, отключает buffering SSE; admin paths снаружи 40
 Let's Encrypt certificate, ACME webroot и renewal deploy hook nginx reload
 настроены. Имеющийся corestack/aplatform virtual host сохранён и отвечает 200.
 Router порты не опубликованы наружу. Корень HTTPS перенаправляет на
-`/harness/discovery`: проверка из Windows вернула 200 и 13 моделей.
+`/harness/discovery`: проверка из Windows вернула 200. После сверки каталога
+и удаления устаревшей gpt-5.5 профиль версии 10 содержит 12 моделей.
 Единичный 502 во время перезапуска Gate устранён; это не ошибка OAuth.
 
 Все три systemd units enabled/active, без автоматических restart на момент
@@ -54,7 +57,9 @@ Reboot общего сервера не выполнялся; факт enabled �
 - На установленных systemd службах stub: enrollment → JWS settings →
   session/tool call/result → terminal events, закрытие сессии.
 - После переключения на SDK: оба Router подключены; discovery/settings
-  содержат все 13 сообщённых SDK моделей и разные PDF capabilities.
+  содержат модели обоих Router и разные PDF capabilities. После #11 сверка
+  каталога даёт 5 моделей Claude и 7 Codex. Редактор получает отдельные каталоги
+  org+route с именами SDK; неизвестные лимиты показаны как неизвестные.
 - Настоящий Claude sonnet через `https://gate.atlcon.ru`: mixed PDF 925144
   bytes, TEXT 42017 и raster SCAN 7391 прочитаны; каталог содержит 2 страницы.
   Цифры отсутствуют в prompt. SDK 0.2.159, существующий вход loggedIn=true.
@@ -65,7 +70,8 @@ Reboot общего сервера не выполнялся; факт enabled �
 
 SQLite Online Backup/PRAGMA integrity_check прошли для нового Gate и обоих
 Router journals. После входа выполнен свежий root-only backup
-`/var/backups/atlas/20261006T092310Z`, содержащий SQLite/config/orgs/signing key,
+`/var/backups/atlas/20261006T092310Z`, затем перед обновлением #11
+`/var/backups/atlas/20261006T094241Z`, содержащий SQLite/config/orgs/signing key,
 units и nginx virtual host. Credentials/histories
 существующего Claude профиля в backup не копировались. Каталог содержит
 секреты: не публиковать и не передавать неавторизованным пользователям.
