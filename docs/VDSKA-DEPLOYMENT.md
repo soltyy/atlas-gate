@@ -27,9 +27,10 @@ Claude service работает от akbot для использования с�
 profile `/home/akbot/.claude`; этот профиль не копировался. Codex использует
 отдельный `/var/lib/atlas-router/.codex`, без переноса credentials с Windows.
 По указанию пользователя device-auth отменён без изменения security settings.
-Человек завершает обычный browser OAuth в своём текущем ChatGPT аккаунте;
-callback 127.0.0.1:1455 идёт через SSH-туннель на server app-server. Пока
-вход не завершён, Codex inference не принят; каталог модели не равен авторизации.
+Пользователь завершил обычный browser OAuth в своём текущем ChatGPT аккаунте;
+callback 127.0.0.1:1455 прошёл через SSH-туннель на server app-server.
+Router подтвердил loggedIn=true, method=chatgpt; auth.json сохранён в отдельном
+CODEX_HOME. После приёмки временный callback-туннель закрыт.
 
 ## HTTPS и запуск
 
@@ -38,7 +39,9 @@ DNS gate.atlcon.ru указывает на сервер. Новый nginx virtua
 X-Forwarded-For, отключает buffering SSE; admin paths снаружи 403.
 Let's Encrypt certificate, ACME webroot и renewal deploy hook nginx reload
 настроены. Имеющийся corestack/aplatform virtual host сохранён и отвечает 200.
-Router порты не опубликованы наружу.
+Router порты не опубликованы наружу. Корень HTTPS перенаправляет на
+`/harness/discovery`: проверка из Windows вернула 200 и 13 моделей.
+Единичный 502 во время перезапуска Gate устранён; это не ошибка OAuth.
 
 Все три systemd units enabled/active, без автоматических restart на момент
 проверки. Gate начинает после обеих Router служб; bounded pre-start warmup
@@ -55,13 +58,15 @@ Reboot общего сервера не выполнялся; факт enabled �
 - Настоящий Claude sonnet через `https://gate.atlcon.ru`: mixed PDF 925144
   bytes, TEXT 42017 и raster SCAN 7391 прочитаны; каталог содержит 2 страницы.
   Цифры отсутствуют в prompt. SDK 0.2.159, существующий вход loggedIn=true.
-- Codex SDK 0.160.0 установлен; обычный browser login запущен, human completion
-  и live PDF на этом сервере пока ожидаются. Локальные Windows live Codex
-  tests не выдаются за серверную приёмку.
+- Настоящий Codex gpt-6.1-sol через тот же публичный HTTPS Gate: mixed PDF
+  925144 bytes, TEXT 42017 и raster SCAN 7391 прочитаны правильно; один документ,
+  ошибок нет. SDK 0.160.0, method=chatgpt. Проверка прошла на установленных
+  systemd службах сервера, тестовая сессия удалена.
 
 SQLite Online Backup/PRAGMA integrity_check прошли для нового Gate и обоих
-Router journals. Root-only backup `/var/backups/atlas/20261006T091123Z`
-содержит новые SQLite/config/orgs/signing key и units. Credentials/histories
+Router journals. После входа выполнен свежий root-only backup
+`/var/backups/atlas/20261006T092310Z`, содержащий SQLite/config/orgs/signing key,
+units и nginx virtual host. Credentials/histories
 существующего Claude профиля в backup не копировались. Каталог содержит
 секреты: не публиковать и не передавать неавторизованным пользователям.
 Manifest `/var/lib/atlas-gate/deployment-manifest.json` и отдельные acceptance
