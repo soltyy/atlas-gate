@@ -29,6 +29,13 @@ async def test_connector_create_approval_restart_conflicts_and_no_secrets(config
     assert (await http.post('/harness/admin/nodes', headers=AUTH, json=stale)).status_code == 409
     duplicate = await body(http)
     assert (await http.post('/harness/admin/nodes', headers=AUTH, json=duplicate)).status_code == 409
+    same_group = await body(http)
+    same_group['node_id'] = 'office-b'
+    assert (await http.post('/harness/admin/nodes', headers=AUTH, json=same_group)).status_code == 409
+    same_group.update(share_account=True, account_turn_capacity=8)
+    assert (await http.post('/harness/admin/nodes', headers=AUTH, json=same_group)).status_code == 422
+    same_group['account_turn_capacity'] = 0
+    assert (await http.post('/harness/admin/nodes', headers=AUTH, json=same_group)).status_code == 201
     invite = (await http.post('/harness/admin/nodes/office-a/invite', headers=AUTH)).json()['invitation']
     pem = csr(ed25519.Ed25519PrivateKey.generate())
     assert (await http.post('/node/enroll', json={'invitation': invite, 'csr': pem})).status_code == 200
