@@ -82,3 +82,10 @@ callId; ответ Harness проверяет principal/workspace/ancestor chain
 оригинала. HTTP каталог/страницы дополнительно требуют текущей проверки Harness
 перед обращением и прежних Gate ownership/binding проверок. Known ID не право.
 Проверка wire: scoped/legacy × direct/connector × SSE/async — 8 сценариев.
+
+## Strict TLS issuer (ATT-129-TLS, #17)
+
+Новый CA содержит SKI, server/client — SKI и AKI. Python 3.13+ strict certificate
+verification сохраняется. Операторские cert/key на диске автоматически не меняются:
+при cutover нужны отдельная новая issuance и проверка пары, затем переключение.
+Настоящий Python3.14 mTLS reconnect/revocation сценарий проходит без роста timeout.

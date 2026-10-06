@@ -25,7 +25,7 @@ def issue_server(ca_directory, directory, hosts):
     if not names:
         raise ValueError("нужен хотя бы один DNS/IP")
     now = datetime.now(timezone.utc)
-    certificate = x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Atlas TLS server")])).issuer_name(ca.subject).public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=30)).add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True).add_extension(x509.SubjectAlternativeName(names), critical=False).add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=True).sign(authority, algorithm=None)
+    certificate = x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Atlas TLS server")])).issuer_name(ca.subject).public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=30)).add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True).add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False).add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca.public_key()), critical=False).add_extension(x509.SubjectAlternativeName(names), critical=False).add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=True).sign(authority, algorithm=None)
     root.mkdir(parents=True, exist_ok=True)
     # Не затирать рабочие файлы: оператор переключает новую пару после проверки.
     with (root / "server-key.pem").open("xb") as f:
