@@ -96,3 +96,12 @@ POST sessions/{sid}/documents с `{id, attachments: […]}` проходит п�
 binding, data-class и v1 preflight проверки, затем direct/connector. Повтор использует
 Idempotency-Key; операция не создаёт paid turn. Nullable documentUpload находится
 в bound/route projection отдельно от JWS. SDK/PDF parser в Gate отсутствуют.
+
+## Fallback SDK history на том же узле (ATT-129-HISTORY-GATE, #22)
+
+`allowHistoryFallback` — optional boolean, default false. Gate передаёт его Router
+при создании сессии. Если указан owned SDK alias, Gate разрешает alias в native
+SDK ID и закрепляет исходный node: quota другого узла не меняет этот выбор.
+Чужой device не может использовать alias. Флаг не разрешает account/node migration
+и не подтверждает восстановление SDK истории: Router честно отдаёт resumed=false.
+Recap и доступные originals восстанавливает Harness до prompt.
