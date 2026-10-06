@@ -44,6 +44,31 @@ def device(name):
 
 
 @pytest.mark.asyncio
+async def test_unlimited_capacity_still_chooses_free_node_and_reserves_over_four(tmp_path):
+    from atlas_gate.gate.operations import Operations
+    store, nodes = Store(str(tmp_path / "unlimited.db")), FakeNodes(capacity=0)
+    for name, n in nodes.config.items():
+        n.node_id = name
+        n.account_turn_capacity = 0
+    for info in nodes.snapshots.values():
+        info['turnCapacity'] = 0
+    nodes.snapshots['a']['activeTurns'] = nodes.snapshots['a']['sessions'] = 8
+    routing = Routing(store, nodes)
+    _, response = await routing.create(device('free'), 'sub', 'claude', {}, 20)
+    binding = routing.get(json.loads(response)['id'], device('free'))
+    assert binding['node_id'] == 'b'
+    operations = Operations(store)
+    for i in range(7):
+        operation, fresh = operations.begin(device('free'), binding, 'POST', '/v1/sessions/local/prompt', {}, request_id=str(i), turn_id=str(i), nodes=nodes)
+        assert fresh and operation['units'] == 1
+    nodes.cooldown['b'] = time.monotonic() + 60
+    with pytest.raises(GateError) as limited:
+        operations.begin(device('free'), binding, 'POST', '/v1/sessions/local/prompt', {}, request_id='blocked', turn_id='blocked', nodes=nodes)
+    assert limited.value.code == 'rate_limit'
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_reservations_and_duplicate_local_ids(tmp_path):
     import asyncio
     store = Store(str(tmp_path / "test.db"))

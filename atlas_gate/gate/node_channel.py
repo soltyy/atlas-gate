@@ -18,6 +18,7 @@ RESULT_LIMIT = 96 * 1024 * 1024
 class Channel:
     def __init__(self, store):
         self.store = store
+        self.last_poll = {}
         store._exec("""CREATE TABLE IF NOT EXISTS node_work(id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
             method TEXT NOT NULL, path TEXT NOT NULL, request TEXT NOT NULL,
             state TEXT NOT NULL, deadline REAL NOT NULL, lease REAL NOT NULL DEFAULT 0,
@@ -47,6 +48,7 @@ class Channel:
         raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable", "канал Router не подтвердил ответ")
 
     async def poll(self, node_id, wait=25, disconnected=None, authorized=None):
+        self.last_poll[node_id] = time.monotonic()
         end = time.monotonic() + wait
         while True:
             if authorized and not authorized():

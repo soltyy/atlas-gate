@@ -89,6 +89,23 @@ async def create(client):
     return response.json()["id"]
 
 
+async def test_unlimited_gate_device_and_router_accept_more_than_four_sessions(network):
+    client, app, routers, settings, *_ = network
+    settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE = 0
+    for router in routers:
+        router.state.settings.ATLAS_NODE_CAPACITY = 0
+        router.state.settings.ATLAS_NODE_TURN_CAPACITY = 0
+    for node in app.state.gate.nodes.config.values():
+        node.account_turn_capacity = 0
+    ids = [await create(client) for _ in range(7)]
+    assert len(set(ids)) == 7
+    listing = await client.get('/harness/agent/sessions')
+    assert listing.status_code == 200
+    assert app.state.gate.store._one("SELECT COUNT(*) n FROM router_bindings WHERE status='ready'")['n'] == 7
+    bindings = [app.state.gate.store._one('SELECT node_id FROM router_bindings WHERE id=?', (sid,))['node_id'] for sid in ids]
+    assert set(bindings) == {'a', 'b'}
+
+
 async def test_documents_bound_owner_retry_and_foreign_device(network, monkeypatch):
     import base64
     client, app, routers, settings, creds, other = network

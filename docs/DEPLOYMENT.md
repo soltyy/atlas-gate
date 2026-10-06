@@ -1,5 +1,7 @@
 # Размещение
 
+Добавление из админки и объяснение ресурсов: [ROUTER-ONBOARDING.md](ROUTER-ONBOARDING.md).
+
 Текущий согласованный вариант — оба продукта на новом сервере без изменений
 действующего production: [PARALLEL-DEPLOYMENT.md](PARALLEL-DEPLOYMENT.md).
 
@@ -25,7 +27,7 @@ nodes.json — массив объектов:
 ```json
 [{"node_id":"router-a","transport":"direct","url":"http://127.0.0.1:8765",
 "token_env":"ROUTER_A_TOKEN","orgs":["my-org"],"routes":["claude-sub"],
-"account_group":"claude-a","account_turn_capacity":4}]
+"account_group":"claude-a","account_turn_capacity":0}]
 ```
 
 Удалённый direct: HTTPS обязательно; ca_file/cert_file/key_file позволяют Gate

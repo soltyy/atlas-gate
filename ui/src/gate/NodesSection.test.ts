@@ -16,7 +16,7 @@ it('показывает владельца беседы, нагрузку и о
   expect(w.text()).toContain('machine-a')
   expect(w.text()).toContain('public-session')
   expect(w.text()).toContain('2/4')
-  await w.findAll('button').find(b => b.text() === 'Завершить работу')!.trigger('click')
+  await w.findAll('button').find(b => b.text() === 'Остановить приём новых ходов')!.trigger('click')
   await flush()
   expect(drain).toHaveBeenCalledWith({ enabled: true })
   const sent = fetcher.mock.calls.find(c => c[0] === '/harness/admin/nodes/machine-a/drain')

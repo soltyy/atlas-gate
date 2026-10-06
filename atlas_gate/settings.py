@@ -1,6 +1,7 @@
 """Настройки службы: переменные окружения `ATLAS_*` и файл `.env` в рабочем каталоге."""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
     # Тестовый контур: организация `test-org` из поставки (scripted-апстримы из ${ATLAS_TEST_*_UPSTREAM} + stub-агент).
     ATLAS_GATE_TEST: bool = False
     # Одновременных агентных сессий (`/harness/agent/*`) на устройство.
-    ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE: int = 2
+    ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE: int = Field(default=0, ge=0)
     # Срок device_token (не больше суток) и refresh_token.
     ATLAS_GATE_DEVICE_TOKEN_TTL_SEC: int = 86400
     ATLAS_GATE_REFRESH_TOKEN_TTL_SEC: int = 30 * 86400

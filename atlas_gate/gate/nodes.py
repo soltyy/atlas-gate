@@ -1,6 +1,7 @@
 """Одобренные endpoint, capabilities и HTTP-клиенты; не проксирует произвольные пути."""
 from __future__ import annotations
 import asyncio
+import hashlib
 import ipaddress
 import json
 import os
@@ -26,7 +27,8 @@ class Node(BaseModel):
     ca_file: str | None = None
     cert_file: str | None = None
     key_file: str | None = None
-    account_turn_capacity: int = Field(default=4, ge=1)
+    account_turn_capacity: int = Field(default=0, ge=0)
+    backend: Literal["", "claude", "codex"] = ""
 
     @model_validator(mode="after")
     def endpoint(self):
@@ -35,6 +37,8 @@ class Node(BaseModel):
                 raise ValueError("connector не использует входящий endpoint/секрет Router")
             return self
         url = urlsplit(self.url)
+        if not url.hostname or (url.port is not None and not 1 <= url.port <= 65535):
+            raise ValueError("нужны корректные hostname и port")
         try:
             loopback = ipaddress.ip_address(url.hostname or "").is_loopback
         except ValueError:
@@ -51,7 +55,8 @@ class Node(BaseModel):
 
 
 class Nodes:
-    def __init__(self, path: str, store=None, channel=None):
+    def __init__(self, path: str, store=None, channel=None, *, tokens=None):
+        self.config_revision = hashlib.sha256(Path(path).read_bytes() if Path(path).is_file() else b"[]").hexdigest()
         raw = json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).is_file() else []
         nodes = [Node.model_validate(n) for n in raw]
         if len({n.node_id for n in nodes}) != len(nodes):
@@ -70,7 +75,7 @@ class Nodes:
                 from .node_channel import ChannelClient
                 self.clients[n.node_id] = ChannelClient(channel, n.node_id)
                 continue
-            token = os.environ.get(n.token_env)
+            token = (tokens or {}).get(n.token_env) or os.environ.get(n.token_env)
             if not token:
                 raise ValueError(f"нет секрета endpoint {n.node_id}: {n.token_env}")
             context = ssl.create_default_context(cafile=n.ca_file)
@@ -80,6 +85,7 @@ class Nodes:
                 headers={"X-Atlas-Token": token}, follow_redirects=False, trust_env=False,
                 verify=context, timeout=httpx.Timeout(70, connect=5))
         self.snapshots: dict[str, dict] = {}
+        self.probe_errors: dict[str, str] = {}
         self.cooldown: dict[str, float] = {}
         self.store = store
         self.catalog: dict[str, list] = {}
@@ -96,19 +102,36 @@ class Nodes:
         if self.revoked(node_id):
             self.snapshots.pop(node_id, None)
             return None
+        client = self.clients[node_id]
+        if self.config[node_id].transport == "connector" and time.monotonic() - getattr(client.channel, "last_poll", {}).get(node_id, 0) > 60:
+            # Одобрение и первый poll могут прийти одновременно с созданием беседы.
+            # Короткая grace-пауза не превращает список узлов в ожидание 70-секундной очереди.
+            credential = self.store and self.store._one("SELECT node_id FROM node_credentials WHERE node_id=? AND revoked=0 AND expires>?", (node_id, time.time()))
+            deadline = time.monotonic() + (2 if credential else 0)
+            while time.monotonic() < deadline and time.monotonic() - client.channel.last_poll.get(node_id, 0) > 60:
+                await asyncio.sleep(0.02)
+        if self.config[node_id].transport == "connector" and time.monotonic() - getattr(client.channel, "last_poll", {}).get(node_id, 0) > 60:
+            self.snapshots.pop(node_id, None)
+            self.probe_errors[node_id] = "Ожидается исходящее подключение. Выполните регистрацию, одобрите заявку и запустите atlas-node run."
+            return None
         try:
             response = await self.clients[node_id].get("/v1/node")
             response.raise_for_status()
             info = response.json()
+            if self.config[node_id].backend and info.get("backend") != self.config[node_id].backend:
+                self.probe_errors[node_id] = "Router использует другого поставщика. Проверьте ATLAS_BACKEND."
+                self.snapshots.pop(node_id, None)
+                return None
             if info.get("nodeId") != node_id or info.get("protocolVersion") != 1 or not info.get("bootId"):
                 raise ValueError("identity/protocol mismatch")
-            if not isinstance(info.get("capacity"), int) or info["capacity"] < 1:
+            if type(info.get("capacity")) is not int or info["capacity"] < 0:
                 raise ValueError("invalid capacity")
             if not isinstance(info.get("models"), list):
                 raise ValueError("invalid catalog")
             if not {"durable_commands", "durable_events"}.issubset(info.get("capabilities", [])):
                 raise ValueError("Gate требует дисковый журнал Router")
             self.snapshots[node_id] = dict(info, observed=time.monotonic())
+            self.probe_errors.pop(node_id, None)
             if isinstance(info.get("quota"), dict):
                 self.observe_event(node_id, dict(info["quota"], type="rate_limit"))
             if info["models"]:
@@ -116,7 +139,11 @@ class Nodes:
                 if self.store is not None:
                     self.store._exec("INSERT INTO router_catalogs VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET models=excluded.models", (node_id, json.dumps(info["models"])))
             return self.snapshots[node_id]
-        except (httpx.HTTPError, ValueError, TypeError, KeyError, GateError):
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, GateError) as failed:
+            self.probe_errors[node_id] = (
+                "Router отверг ключ доступа. Проверьте ATLAS_TOKEN." if isinstance(failed, httpx.HTTPStatusError) and failed.response.status_code in (401, 403)
+                else "Не удалось связаться с Router. Проверьте адрес, TLS и доступность с машины Gate." if isinstance(failed, httpx.HTTPError)
+                else "Router не подтвердил NODE_ID или протокол с дисковым журналом. Проверьте NODE_ID и NODE_DB.")
             self.snapshots.pop(node_id, None)
             return None
 

@@ -67,7 +67,7 @@ class Routing:
             if unresolved:
                 raise GateError(409, "command_outcome_unknown", "предыдущее создание требует сверки")
             mine = self.store._one("SELECT COUNT(*) n FROM router_bindings WHERE device_id=? AND status IN ('creating','ready','unknown')", (device.device_id,))["n"]
-            if mine >= limit:
+            if limit and mine >= limit:
                 raise GateError(409, "agent_sessions_limit", "достигнут предел сессий устройства")
             await self.nodes.refresh()
             resume = None
@@ -100,11 +100,13 @@ class Routing:
                 counts = self.store._one("SELECT SUM(status='ready') ready, SUM(status IN ('creating','unknown')) reserved FROM router_bindings WHERE node_id=?", (node_id,))
                 reserved = counts["reserved"] or 0
                 sessions = max(info.get("sessions", 0), counts["ready"] or 0) + reserved
-                if sessions >= info["capacity"]:
+                if info["capacity"] and sessions >= info["capacity"]:
                     continue
                 required = 1 + (info.get("maxSubagents", 0) if payload.get("agents") else 0)
                 group_load = sum(loads.get(other_id, 0) for other_id, other in self.nodes.config.items() if other.account_group == n.account_group)
-                if loads.get(node_id, 0) + required > info.get("turnCapacity", info["capacity"]) or group_load + required > getattr(n, "account_turn_capacity", 4):
+                turn_limit = info.get("turnCapacity", info["capacity"])
+                group_limit = getattr(n, "account_turn_capacity", 0)
+                if (turn_limit and loads.get(node_id, 0) + required > turn_limit) or (group_limit and group_load + required > group_limit):
                     continue
                 # Активные ходы приоритетнее неактивных историй; последние расходуют SDK sessions.
                 quota = info.get("quota") or {}
@@ -112,8 +114,8 @@ class Routing:
                 if isinstance(quota.get("utilization"), (int, float)):
                     known.append(quota["utilization"])
                 pressure = max(known) if known else 1.0  # null не считается свободной подпиской
-                candidates.append(((loads.get(node_id, 0) + reserved) / info.get("turnCapacity", info["capacity"]),
-                                   pressure, sessions / info["capacity"], node_id))
+                candidates.append(((loads.get(node_id, 0) + reserved) / (turn_limit or 1),
+                                   pressure, sessions / (info["capacity"] or 1), node_id))
             if not candidates:
                 raise GateError(503, "capacity_exceeded", "нет доступного совместимого Router")
             best = min((a, b, c) for a, b, c, _ in candidates)

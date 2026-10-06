@@ -53,7 +53,8 @@ class Operations:
                     reserved = {r["node_id"]: r["units"] for r in active}
                     load = max(reserved.get(node.node_id, 0), info.get("reservedUnits", 0))
                     group_load = sum(max(reserved.get(n, 0), nodes.snapshots.get(n, {}).get("reservedUnits", 0)) for n in group_nodes)
-                    if load + units > info.get("turnCapacity", 4) or group_load + units > node.account_turn_capacity:
+                    turn_limit = info.get("turnCapacity", 0)
+                    if (turn_limit and load + units > turn_limit) or (node.account_turn_capacity and group_load + units > node.account_turn_capacity):
                         raise GateError(429, "capacity_exceeded", "нет свободных ресурсов Router/аккаунта")
                 if quota_day:
                     reserved = db.execute("INSERT INTO agent_turns(user_id,day,count) SELECT ?,?,1 WHERE ? IS NULL OR ?>0 ON CONFLICT(user_id,day) DO UPDATE SET count=count+1 WHERE ? IS NULL OR count<?",

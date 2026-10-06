@@ -547,6 +547,8 @@ async def admin_nodes(request: Request) -> Any:
     return {"nodes": [{"node_id": n.node_id, "enabled": n.enabled, "orgs": n.orgs,
                         "routes": n.routes, "account_group": n.account_group,
                         "transport": n.transport, "revoked": state.nodes.revoked(n.node_id),
+                        "backend": n.backend, "url": n.url,
+                        "check_error": state.nodes.probe_errors.get(n.node_id),
                         "account_turn_capacity": n.account_turn_capacity,
                         "cooldown_seconds": max(0, state.nodes.cooldown.get(n.account_group, 0) - time.monotonic()),
                         "credential": state.store._one("SELECT expires,revoked FROM node_credentials WHERE node_id=?", (n.node_id,)),

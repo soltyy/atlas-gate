@@ -53,11 +53,23 @@ export interface Reloaded {
 }
 
 export interface RouterNode {
+  backend?: string; url?: string; check_error?: string
   node_id: string; enabled: boolean; revoked: boolean; transport: string
   orgs: string[]; routes: string[]; account_group: string; account_turn_capacity: number; cooldown_seconds: number
   credential: { expires: number; revoked: number } | null
   status: { backend: string; ready: boolean; draining: boolean; sessions: number; capacity: number; activeTurns: number; reservedUnits: number; turnCapacity: number; activeSubagents: number; quota: { status: string } | null } | null
   bindings: { id: string; device_id: string; route: string; status: string }[]
+}
+export interface NodeOptions {
+  revision: string; gate_url: string; mtls_port: number
+  orgs: { id: string; name: string; routes: { id: string; backends: string[] }[] }[]
+  account_groups: { id: string; capacity: number; backends: string[] }[]
+}
+export interface NewNode {
+  revision: string; node_id: string; backend: string; transport: string
+  org: string; routes: string[]; account_group: string; account_turn_capacity: number
+  share_account: boolean
+  url: string; token: string
 }
 export interface NodeEnrollment { id: string; node_id: string; fingerprint: string; expires: number }
 
@@ -80,6 +92,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const gateApi = {
+  nodeOptions: () => call<NodeOptions>('GET', '/harness/admin/node-options'),
+  nodeAdd: (body: NewNode) => call<{ node_id: string; status: RouterNode['status'] }>('POST', '/harness/admin/nodes', body),
   nodes: () => call<{ nodes: RouterNode[] }>('GET', '/harness/admin/nodes'),
   nodeEnrollments: () => call<{ enrollments: NodeEnrollment[] }>('GET', '/harness/admin/node-enrollments'),
   nodeInvite: (id: string) => call<{ invitation: string; expiresIn: number }>('POST', `/harness/admin/nodes/${encodeURIComponent(id)}/invite`),

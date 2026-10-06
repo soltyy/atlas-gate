@@ -3,6 +3,7 @@
 from ..settings import Settings
 from . import admin_orgs as _admin_orgs  # noqa: F401 — регистрирует /harness/admin/orgs* (редактор, #6)
 from . import agent as _agent  # noqa: F401 — регистрирует /harness/agent/* на общем роутере
+from . import admin_nodes as _admin_nodes  # noqa: F401
 from .api import router
 
 __all__ = ["GateConfigError", "check_settings", "router"]
