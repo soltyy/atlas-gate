@@ -108,3 +108,13 @@ Router MainPID/ActiveEnterTimestamp до и после совпадают; ст�
 и работающая EDT не менялись. У Gate сохранились конфигурация и signing key.
 Серверная/сетевая suite: 42 passed, 5 skipped; UI 44 passed, typecheck/build.
 Связанный клиентский PR: https://github.com/soltyy/edt-llm-agent-extension/pull/158.
+
+
+Дополнение: runtime `d220957f9ab58ec9f2c7d880e389dbaee63250a0`, профиль v13
+публикует `output_policy=sdk-default`, `output_budget=null` для всех подписок.
+SHA-256: `ebcedd5964a80ee0b40cee20405983bc410d5830a36533b8a7afe39eeb2f978e`.
+Режим подтверждён вместе с JWS/discovery/admin. Backup перед обновлением:
+`/var/backups/atlas/20261006T103102Z`; Router процессы не изменились.
+Финальная suite с рабочей политикой: 43 passed, 5 skipped; UI 44 passed, build.
+Авто SDK — выбранная эксплуатационная политика, а не выдуманный численный
+предел подписки. Для API в контракте предусмотрен отдельный бюджет запроса.
