@@ -181,3 +181,16 @@ class Nodes:
                 and (org is None or org in self.config[node_id].orgs)
                 and (routes is None or set(routes).intersection(self.config[node_id].routes))
                 for m in models if isinstance(m, dict) and m.get("value")}
+
+    def route_catalog(self, org, route):
+        """Approved cached model names for one organisation and route, including outages."""
+        entries = {}
+        for node_id, models in sorted(self.catalog.items()):
+            node = self.config.get(node_id)
+            if not node or not node.enabled or self.revoked(node_id) or org not in node.orgs or route not in node.routes:
+                continue
+            for model in models:
+                if isinstance(model, dict) and model.get("value"):
+                    value = str(model["value"])
+                    entries.setdefault(value, {"value": value, "name": str(model.get("name") or value)})
+        return [entries[value] for value in sorted(entries)]

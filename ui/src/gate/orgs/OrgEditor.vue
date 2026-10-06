@@ -47,6 +47,7 @@ const ctx = computed<EditorContext>(() => ({
   secrets: details.value?.secrets ?? {},
   upstreams: details.value?.upstreams ?? {},
   subscription_models: details.value?.subscription_models ?? [],
+  subscription_models_by_route: details.value?.subscription_models_by_route,
   route_usage: details.value?.route_usage ?? {},
 }))
 const savedRoutes = computed(() => new Set((original.value?.routes ?? []).map((r) => r.id)))

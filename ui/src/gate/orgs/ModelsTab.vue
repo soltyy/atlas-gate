@@ -14,9 +14,26 @@ function modelsOf(r: Route) {
   return indexed.value.filter(({ m }) => m.route_id === r.id)
 }
 
+function catalog(r: Route) {
+  return props.ctx.subscription_models_by_route?.[r.id] ??
+    (props.ctx.subscription_models_by_route ? [] : props.ctx.subscription_models.map(value => ({ value, name: value })))
+}
+
+function available(r: Route, model: string) {
+  return catalog(r).some(m => m.value === model)
+}
+
+function modelName(r: Route, model: string) {
+  return catalog(r).find(m => m.value === model)?.name ?? model
+}
+
+function setLimit(m: ModelEntry, field: 'context_window' | 'max_output', event: Event) {
+  m[field] = Number((event.target as HTMLInputElement).value) || 0
+}
+
 /** Модели подписки плюс уже настроенные (даже если роутер их сейчас не называет). */
 function subscriptionChoices(r: Route): string[] {
-  const set = new Set(props.ctx.subscription_models)
+  const set = new Set(catalog(r).map(m => m.value))
   for (const { m } of modelsOf(r)) set.add(m.model)
   return [...set].sort()
 }
@@ -27,7 +44,7 @@ function entry(r: Route, model: string): ModelEntry | undefined {
 
 function toggle(r: Route, model: string, on: boolean) {
   if (on && !entry(r, model)) {
-    props.org.models.push({ route_id: r.id, model, display_name: model, context_window: 0, max_output: 0, enabled: true })
+    props.org.models.push({ route_id: r.id, model, display_name: modelName(r, model), context_window: 0, max_output: 0, enabled: true })
   } else if (!on) {
     const i = props.org.models.findIndex((m) => m.route_id === r.id && m.model === model)
     if (i >= 0) props.org.models.splice(i, 1)
@@ -35,7 +52,7 @@ function toggle(r: Route, model: string, on: boolean) {
 }
 
 function setAll(r: Route, on: boolean) {
-  for (const name of subscriptionChoices(r)) toggle(r, name, on)
+  for (const name of on ? catalog(r).map(m => m.value) : subscriptionChoices(r)) toggle(r, name, on)
 }
 
 function add(r: Route) {
@@ -65,7 +82,8 @@ function idxOf(r: Route, model: string): number {
 
     <template v-if="r.kind === 'router-agent'">
       <p class="muted hint">Отметьте модели подписки, которые получат устройства. Отмеченная — в профиле; снятая — нет.</p>
-      <p v-if="!ctx.subscription_models.length" class="muted">список моделей подписки роутера сейчас недоступен</p>
+      <p class="muted hint">Пустой лимит означает, что его значение неизвестно. При необходимости задайте подтверждённое значение вручную.</p>
+      <p v-if="!catalog(r).length" class="muted">список моделей этого маршрута сейчас недоступен</p>
       <table class="edit">
         <thead><tr><th>в профиле</th><th>модель подписки</th><th>название для людей</th><th>окно, токенов</th><th>макс. ответ, токенов</th></tr></thead>
         <tbody>
@@ -73,13 +91,13 @@ function idxOf(r: Route, model: string): number {
             <td><input type="checkbox" :checked="!!entry(r, name)" :data-sub="name" @change="toggle(r, name, ($event.target as HTMLInputElement).checked)" /></td>
             <td>
               <code>{{ name }}</code>
-              <span v-if="!ctx.subscription_models.includes(name)" class="badge warn">нет у роутера</span>
+              <span v-if="!available(r, name)" class="badge warn">нет у роутера этого маршрута</span>
             </td>
             <template v-if="entry(r, name)">
-              <td><input v-model.trim="entry(r, name)!.display_name" type="text" size="26" /></td>
-              <td><input v-model.number="entry(r, name)!.context_window" type="number" min="0" class="num-in" /><div class="muted num-hint">{{ fmtNum(entry(r, name)!.context_window) }}</div></td>
+              <td><input v-model.trim="entry(r, name)!.display_name" :placeholder="modelName(r, name)" type="text" size="26" /></td>
+              <td><input :value="entry(r, name)!.context_window || ''" @input="setLimit(entry(r, name)!, 'context_window', $event)" type="number" min="0" placeholder="неизвестно" class="num-in" /><div class="muted num-hint">{{ entry(r, name)!.context_window ? fmtNum(entry(r, name)!.context_window) : 'неизвестно' }}</div></td>
               <td>
-                <input v-model.number="entry(r, name)!.max_output" type="number" min="0" class="num-in" /><div class="muted num-hint">{{ fmtNum(entry(r, name)!.max_output) }}</div>
+                <input :value="entry(r, name)!.max_output || ''" @input="setLimit(entry(r, name)!, 'max_output', $event)" type="number" min="0" placeholder="неизвестно" class="num-in" /><div class="muted num-hint">{{ entry(r, name)!.max_output ? fmtNum(entry(r, name)!.max_output) : 'неизвестно' }}</div>
                 <FieldErr :errors="errors" :loc="`models.${idxOf(r, name)}`" deep />
               </td>
             </template>

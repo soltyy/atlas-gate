@@ -133,6 +133,7 @@ export interface OrgDetails {
   /** Имя переменной с секретом → задана ли она (значения гейт не отдаёт никогда). */
   secrets: Record<string, boolean>
   subscription_models: string[]
+  subscription_models_by_route?: Record<string, { value: string; name: string }[]>
   upstreams: Record<string, string>
   /** Можно ли удалить сохранённый маршрут: нет вызовов и устройств с его моделями (GW-ADMIN-03). */
   route_usage?: Record<string, RouteUsage>
@@ -168,5 +169,6 @@ export interface EditorContext {
   secrets: Record<string, boolean>
   upstreams: Record<string, string>
   subscription_models: string[]
+  subscription_models_by_route?: Record<string, { value: string; name: string }[]>
   route_usage: Record<string, RouteUsage>
 }

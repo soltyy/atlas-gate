@@ -191,6 +191,8 @@ async def org_get(org_id: str, request: Request) -> Any:
             "profile_version": row.get("profile_version"),
             "signed_at": row.get("issued_at"), "secrets": _secrets(state, org),
             "subscription_models": sorted(listed or []), "upstreams": dict(state.upstreams),
+            "subscription_models_by_route": {r.id: state.nodes.route_catalog(org.id, r.id)
+                                             for r in org.routes if r.kind == "router-agent"},
             "route_usage": route_usage(state, org),
             "warnings": state.warnings.get(org_id, [])}
     return JSONResponse(body, headers={"ETag": etag})
