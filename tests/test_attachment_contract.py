@@ -21,9 +21,7 @@ def test_unknown_capabilities_and_size_bytes_not_trusted():
     with pytest.raises(GateError) as e:
         validate_prompt(PromptRequest(id='bad',text='',attachments=[{'kind':'pdf','data':'oops','sizeBytes':1}]),None)
     assert e.value.code=='attachment_invalid'
-    with pytest.raises(GateError) as e:
-        validate_prompt(PromptRequest(id='too-long',text='x'*1_000_001),None)
-    assert e.value.code=='attachment_limit'
+    validate_prompt(PromptRequest(id='long',text='x'*1_000_001),None)
 
 
 def test_document_authorization_nullable_and_intersection():
@@ -53,3 +51,18 @@ def test_document_scope_survives_public_to_router_schema():
     for invalid in (['not-sha'], ['a'*64]*501):
         with pytest.raises(ValueError):
             SessionCreate(system='test',model='model',documentAccess='client-authorized-v1',documentIds=invalid)
+
+
+def test_gate_uses_router_limits_without_its_own_ceiling():
+    caps = dict(schemaVersion=1, text=True, image=True, pdfNative=True,
+                documentPages=True, agentDocumentTools=True, maxFiles=20,
+                maxRawBytes=30*1024*1024, maxTotalBytes=40*1024*1024,
+                maxTextChars=2_000_000, maxPdfPages=500, maxPagePixels=4_000_000)
+    accepted = node_attachments({'attachments':caps})
+    validate_prompt(PromptRequest(id='large', text='x'*1_500_000), accepted)
+    with pytest.raises(GateError):
+        validate_prompt(PromptRequest(id='large', text='x'*2_000_001), accepted)
+    caps['maxTextChars'] = None
+    accepted = node_attachments({'attachments':caps})
+    assert accepted is not None
+    validate_prompt(PromptRequest(id='unlimited-text', text='x'*2_000_001), accepted)

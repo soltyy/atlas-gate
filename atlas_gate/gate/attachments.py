@@ -13,7 +13,8 @@ def node_attachments(info):
         return None
     if any(not isinstance(value.get(k), bool) for k in FLAGS):
         return None
-    if any(type(value.get(k)) is not int or value[k] <= 0 for k in LIMITS):
+    if any(not (k == 'maxTextChars' and k in value and value[k] is None)
+           and (type(value.get(k)) is not int or value[k] <= 0) for k in LIMITS):
         return None
     return dict(schemaVersion=1, source='router-reported',
                 documentUpload=value.get('documentUpload') if isinstance(value.get('documentUpload'), bool) else None,
@@ -34,20 +35,19 @@ def route_attachments(state, org, route, model):
     upload = False if any(v is False for v in uploads) else True if all(v is True for v in uploads) else None
     return dict(schemaVersion=1, source='router-reported', documentAuthorization=known, documentUpload=upload,
                 **{k: all(v[k] for v in values) for k in FLAGS},
-                **{k: min(v[k] for v in values) for k in LIMITS})
+                **{k: min((v[k] for v in values if v[k] is not None), default=None) for k in LIMITS})
 
 
 def validate_prompt(body, caps):
-    # Общий transport ceiling есть и для старых Router. Размеры считаются, sizeBytes не доверяем.
-    limits = {'maxFiles':8, 'maxRawBytes':15*1024*1024, 'maxTotalBytes':20*1024*1024, 'maxTextChars':1_000_000}
-    if caps:
-        limits.update({k:min(limits[k], caps[k]) for k in limits})
-    if len(body.attachments) > limits['maxFiles']:
-        raise GateError(422, 'attachment_limit', 'Превышено число вложений', requestId=body.id)
+    # Only the bound Router owns numeric ceilings. Unknown capabilities are delegated.
+    limits = caps or {}
+    def exceeds(key, value):
+        limit = limits.get(key)
+        return limit is not None and value > limit
+    if exceeds('maxFiles', len(body.attachments)):
+        raise GateError(422, 'attachment_limit', 'Превышено число вложений Router', requestId=body.id)
     total, text_size = 0, len(body.text)
     for a in body.attachments:
-        if len(a.filename) > 512:
-            raise GateError(422, 'attachment_limit', 'Имя вложения превышает 512 символов', requestId=body.id)
         if a.kind not in ('text', 'image', 'pdf'):
             raise GateError(422, 'attachment_invalid', 'Неизвестный тип вложения', requestId=body.id)
         if caps and a.kind=='image' and not caps['image']:
@@ -58,7 +58,7 @@ def validate_prompt(body, caps):
             size = len(a.data.encode())
             text_size += len(a.data)+len(a.filename)+100
         else:
-            if len(a.data) > (limits['maxRawBytes']+2)//3*4:
+            if limits.get('maxRawBytes') is not None and len(a.data) > (limits['maxRawBytes']+2)//3*4:
                 raise GateError(422, 'attachment_limit', 'Вложение слишком велико', requestId=body.id)
             try:
                 raw = base64.b64decode(a.data, validate=True)
@@ -67,8 +67,8 @@ def validate_prompt(body, caps):
             if not raw or (a.kind=='pdf' and not raw.startswith(b'%PDF-')):
                 raise GateError(422, 'attachment_invalid', 'Вложение пусто или не является PDF', requestId=body.id)
             size = len(raw)
-        if size > limits['maxRawBytes']:
+        if exceeds('maxRawBytes', size):
             raise GateError(422, 'attachment_limit', 'Вложение слишком велико', requestId=body.id)
         total += size
-    if total > limits['maxTotalBytes'] or text_size > limits['maxTextChars']:
+    if exceeds('maxTotalBytes', total) or exceeds('maxTextChars', text_size):
         raise GateError(422, 'attachment_limit', 'Превышен суммарный предел вложений или текста', requestId=body.id)

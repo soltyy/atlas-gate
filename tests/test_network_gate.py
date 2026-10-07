@@ -486,3 +486,20 @@ async def test_outbound_connector_enrollment_replay_tools_and_revocation(network
     finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
+
+
+async def test_large_text_reaches_the_bound_router_without_gate_ceiling(network, monkeypatch):
+    client, app, routers, *_ = network
+    sid = await create(client)
+    binding = app.state.gate.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+    owner = routers[0 if binding['node_id']=='a' else 1]
+    session = owner.state.registry.get(binding['local_id']).session
+    captured = []
+    async def prompt(turn_id, text, attachments=None):
+        captured.append(text)
+        yield {'type':'result','id':turn_id,'ok':True,'text':'accepted','turns':1,'durationMs':0,'costUsd':0}
+    monkeypatch.setattr(session, 'prompt', prompt)
+    text = 'К🙂' * 600000
+    response = await client.post('/harness/agent/sessions/'+sid+'/prompt',json={'id':'large','text':text})
+    assert response.status_code == 200, response.text[:300]
+    assert captured == [text]
