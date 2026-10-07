@@ -10,6 +10,9 @@ Gate 8766 и Router 8765 могут работать на одной машин�
 и SDK home/profile. Внешние установки используют HTTPS или исходящий connector.
 Для cohost Router bind loopback. Административный токен обязателен и на loopback.
 
+Ссылка подтверждения устройства должна открываться извне: настройка HTTPS ingress
+и разграничение HTML/API описаны в [ENROLLMENT-ENTRY.md](ENROLLMENT-ENTRY.md).
+
 Из `.env.example` создать защищённый `.env`, заменить REPLACE, задать абсолютные
 runtime пути. `ATLAS_GATE_NODE_ENV_FILE` читает только token_env из одобренных
 узлов; SDK credentials на Gate не нужны. Секреты/БД/ключи не добавлять в Git.
