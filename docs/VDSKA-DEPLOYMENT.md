@@ -38,7 +38,10 @@ CODEX_HOME. После приёмки временный callback-туннель
 
 DNS gate.atlcon.ru указывает на сервер. Новый nginx virtual host `atlas-gate`
 проксирует Gate, ограничивает body 32m, передаёт исходный IP через собственный
-X-Forwarded-For, отключает buffering SSE; admin paths снаружи 403.
+X-Forwarded-For, отключает buffering SSE. Первоначально admin paths снаружи
+отвечали 403. С 07.10.2026 по #26 открыта выдаваемая Gate ссылка подтверждения:
+HTML и ассеты доступны, admin API и одобрение требуют ключ. Конфигурация и
+проверки: [ENROLLMENT-ENTRY.md](ENROLLMENT-ENTRY.md).
 Let's Encrypt certificate, ACME webroot и renewal deploy hook nginx reload
 настроены. Имеющийся corestack/aplatform virtual host сохранён и отвечает 200.
 Router порты не опубликованы наружу. Корень HTTPS перенаправляет на
