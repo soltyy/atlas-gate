@@ -17,6 +17,7 @@ def node_attachments(info):
            and (type(value.get(k)) is not int or value[k] <= 0) for k in LIMITS):
         return None
     return dict(schemaVersion=1, source='router-reported',
+                toolResultImages=value.get('toolResultImages') if isinstance(value.get('toolResultImages'), bool) else None,
                 documentUpload=value.get('documentUpload') if isinstance(value.get('documentUpload'), bool) else None,
                 documentAuthorization=value.get('documentAuthorization') if isinstance(value.get('documentAuthorization'), bool) else None,
                 **{k: value[k] for k in FLAGS+LIMITS})
@@ -33,7 +34,9 @@ def route_attachments(state, org, route, model):
     known = False if any(v is False for v in authorization) else True if all(v is True for v in authorization) else None
     uploads = [v.get('documentUpload') for v in values]
     upload = False if any(v is False for v in uploads) else True if all(v is True for v in uploads) else None
-    return dict(schemaVersion=1, source='router-reported', documentAuthorization=known, documentUpload=upload,
+    tool_images = [v.get('toolResultImages') for v in values]
+    tool_images = False if any(v is False for v in tool_images) else True if all(v is True for v in tool_images) else None
+    return dict(schemaVersion=1, source='router-reported', documentAuthorization=known, documentUpload=upload, toolResultImages=tool_images,
                 **{k: all(v[k] for v in values) for k in FLAGS},
                 **{k: min((v[k] for v in values if v[k] is not None), default=None) for k in LIMITS})
 
@@ -72,3 +75,14 @@ def validate_prompt(body, caps):
         total += size
     if exceeds('maxTotalBytes', total) or exceeds('maxTextChars', text_size):
         raise GateError(422, 'attachment_limit', 'Превышен суммарный предел вложений или текста', requestId=body.id)
+
+
+def validate_tool_result(body, caps):
+    if not body.attachments:
+        return  # Preserve the existing text-only protocol without capability negotiation.
+    if not caps or caps.get('toolResultImages') is not True:
+        raise GateError(422, 'unsupported_media', 'Этот Router не принимает изображения результатов инструментов', requestId=body.callId)
+    if any(a.kind != 'image' or a.mediaType not in {'image/png', 'image/jpeg', 'image/gif', 'image/webp'} for a in body.attachments):
+        raise GateError(422, 'attachment_invalid', 'Результат инструмента допускает только изображения', requestId=body.callId)
+    from ..schemas import PromptRequest
+    validate_prompt(PromptRequest(id=body.callId, text=body.content, attachments=body.attachments), caps)

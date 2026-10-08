@@ -1,0 +1,40 @@
+{
+  "task": "ATT-MEDIA-GATE",
+  "issue": "https://github.com/soltyy/atlas-gate/issues/30",
+  "gate_base_commit": "1dad3b391bff63aeb3614d186a53d515580e41e6",
+  "gate_tested_working_tree": {
+    "atlas_gate/schemas.py": "1c06a216ab67f4c156286a95d15e7c1382212c7ea13295d79754bca6174b05d1",
+    "atlas_gate/gate/schemas.py": "4b525ea62549de6976bb7f33e898c212a5d59f72579de825e1735542ac3f567a",
+    "atlas_gate/gate/attachments.py": "58b07de9ec7cc9223492ffef34af7f78d14732f702ac2d2b7d7d3ac1df0f036b",
+    "atlas_gate/gate/agent.py": "c3ae22f7a277f09c85f95cb11787ba62cbbaaf495a9a6d2abec176ce9cda6086",
+    "tests/test_tool_result_images.py": "3a94e5a9bf1a8b327571cc2719177a3e8ed5cf18e1b81b305a2c4f3ecad731c9"
+  },
+  "router_base_commit": "d5cdfab6ff825857ea1d497943f9266f173f4b7c",
+  "router_tested_working_tree": {
+    "atlas_router/schemas.py": "12504ae9382e4b15f34b9192522963038e4bc7c06e58aac89df99ad1c41793fc",
+    "atlas_router/main.py": "a654a933d505241a96efc945d9fe8bff7316f8a95ecdeefb937a97a2c65e74f5",
+    "atlas_router/documents.py": "5101faa3e7842603e8bcff4bd2dce1ab32b289138d300d6b4afa0dc5f5665cfe",
+    "atlas_router/backends/base.py": "1b1f385919103ef7ce88976610f6fa896d0922ef60ef29a19b854863238aecb5",
+    "atlas_router/backends/claude.py": "69af51e823f3cca12a90f7d2f984971faf7f28f49cfd24058af90bfd35ea3b6c"
+  },
+  "command": "ATLAS_TEST_ROUTER_ROOT=/tmp/atlas-tool-result-media/router uv run --with /tmp/atlas-tool-result-media/router pytest tests/test_tool_result_images.py tests/test_attachment_contract.py -q --tb=short",
+  "cwd": "/private/tmp/atlas-tool-result-media/gate",
+  "exit_code": 0,
+  "passed": 9,
+  "failed": 0,
+  "seconds": 1.99,
+  "terminal_report_sha256": "17e6be905dee4c45ef0e4f980c9b0c224f73ace8cf381d8f5f1742d8ecda5bab",
+  "boundary": "Actual temporary Gate/Router HTTP servers; deterministic stub backend reports fixed-node Claude capability and captures typed tool_result, scenario login readiness. No SDK launched or provider inference.",
+  "paid_calls": 0,
+  "production_mutations": false,
+  "live_acceptance": "PENDING: transport contract acceptance does not close issue before delivery/live path",
+  "additional_checks": {
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "fixture_corrections": [
+    "Signed model field is attachments, not attachmentCapabilities",
+    "Reporting scenario backend name=claude also requires scenario auth_status loggedIn=True",
+    "Router imports in HTTP fixture require its declared dependencies; temporary uv --with Router used"
+  ]
+}

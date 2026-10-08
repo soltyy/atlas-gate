@@ -13,7 +13,7 @@ from .api import check_data_class, gate, org_of, ready_gate, require_device, rou
 from .errors import GateError, STATUS_CODES
 from .schemas import GateAgentSessionCreate
 from .state import Device
-from .attachments import node_attachments, validate_prompt
+from .attachments import node_attachments, validate_prompt, validate_tool_result
 
 log = logging.getLogger("atlas_gate")
 
@@ -195,11 +195,28 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     return EventSourceResponse(stream())
 
 
-async def _delegate(request, device, sid, method, suffix):
+async def _bound_attachments(state, binding):
+    response = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/attachments'), expected_boot=binding['boot_id'])
+    if response.status_code == 200:
+        try:
+            caps = node_attachments({'attachments': response.json().get('capabilities')})
+        except (ValueError, AttributeError):
+            caps = None
+        if caps is not None:
+            return caps
+    # Older Router has no negotiated endpoint. Keep its other known flags, never
+    # promote node-wide support into a per-session tool-result acknowledgement.
+    caps = node_attachments(state.nodes.snapshots.get(binding['node_id']))
+    return dict(caps, toolResultImages=False) if caps is not None else None
+
+
+async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     state = gate(request)
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"))
     binding = await state.routing.recover_boot(binding)
+    if tool_result is not None and tool_result.attachments:
+        validate_tool_result(tool_result, await _bound_attachments(state, binding))
     raw = await request.body()
     request_id = request.headers.get("idempotency-key")
     if not request_id and suffix == "/tool_result":
@@ -230,7 +247,7 @@ async def _delegate(request, device, sid, method, suffix):
 
 @router.post("/harness/agent/sessions/{sid}/tool_result")
 async def agent_tool_result(sid: str, body: ToolResultRequest, request: Request, device: Device = Depends(require_device)):
-    return await _delegate(request, device, sid, "POST", "/tool_result")
+    return await _delegate(request, device, sid, "POST", "/tool_result", tool_result=body)
 
 
 @router.post("/harness/agent/sessions/{sid}/interrupt")
@@ -263,8 +280,8 @@ async def agent_attachments(sid: str, request: Request, device: Device = Depends
     state = await ready_gate(request)
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request)
-    info = await state.nodes.probe(binding['node_id'])
-    return {'attachments': node_attachments(info)}
+    binding = await state.routing.recover_boot(binding)
+    return {'attachments': await _bound_attachments(state, binding)}
 
 
 @router.post('/harness/agent/sessions/{sid}/documents')
