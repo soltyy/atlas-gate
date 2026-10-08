@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 
 def _empty_object_schema() -> dict[str, Any]:
@@ -33,6 +33,8 @@ class AgentSpec(BaseModel):
 
 
 class SessionCreate(BaseModel):
+    # Explicit isolated qualification cap; omission preserves SDK defaults.
+    maxOutputTokens: Annotated[StrictInt, Field(gt=0)] | None = None
     system: str | None = None
     tools: list[ToolDefinition] = Field(default_factory=list)
     model: str | None = None
@@ -63,6 +65,8 @@ class SessionCreate(BaseModel):
 
 
 class SessionCreated(BaseModel):
+    # Configured transport value, not evidence of provider enforcement.
+    configuredMaxOutputTokens: int | None = None
     id: str
     tools: int
     # Принятые субагенты и отказы словами (issue #135); старый роутер этих полей не шлёт.
