@@ -1,5 +1,8 @@
 """Negotiated image tool results through real Gate/Router HTTP, no provider inference."""
+import asyncio
+import base64
 import json
+import httpx
 from types import SimpleNamespace
 
 import pytest
@@ -48,12 +51,48 @@ def test_missing_capability_refuses_media_but_preserves_text():
         validate_tool_result(ToolResultRequest(callId='call', content='legacy'), caps)
 
 
-async def test_real_http_images_negotiation_proxy_and_text_compatibility(network, monkeypatch):
+@pytest.fixture(params=['direct', 'connector'])
+async def image_network(network, request):
+    if request.param == 'direct':
+        yield network
+        return
+    from atlas_gate.gate.node_channel import ChannelClient
+    from atlas_router.connector import Connector
+    state = network[1].state.gate
+    workers, connections = [], []
+    try:
+        for node_id, node in state.nodes.config.items():
+            connector = object.__new__(Connector)
+            connector.identity = {'nodeId': node_id}
+            connector.router = httpx.AsyncClient(base_url=node.url, headers={'X-Atlas-Token': 'test-router'})
+            connections.append(connector.router)
+            await state.nodes.clients[node_id].aclose()
+            state.nodes.clients[node_id] = ChannelClient(state.channel, node_id)
+            async def pump(n=node_id, c=connector):
+                while True:
+                    work = await state.channel.poll(n, wait=.1)
+                    if work:
+                        result = await c.execute(work)
+                        state.channel.complete(n, work['id'], result['status'], base64.b64decode(result['body']))
+            workers.append(asyncio.create_task(pump()))
+        yield network
+        for task in workers:
+            if task.done():
+                task.result()
+    finally:
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        for client in connections:
+            await client.aclose()
+
+
+async def test_real_http_images_negotiation_proxy_and_text_compatibility(image_network, monkeypatch):
     from pydantic import BaseModel, Field
     from atlas_router.backends.stub import StubSession
     from atlas_gate.gate.crypto import verify_profile
 
-    client, app, routers, settings, creds, other = network
+    client, app, routers, settings, creds, other = image_network
     captured = []
     original = StubSession.tool_result
 
