@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from ..schemas import AgentSpec, ToolDefinition
 
@@ -146,6 +146,8 @@ class GateAgentSessionCreate(BaseModel):
     устройству недоступны.
     """
 
+    # Explicit isolated qualification cap; omission preserves SDK defaults.
+    maxOutputTokens: Annotated[StrictInt, Field(gt=0)] | None = None
     system: str | None = None
     tools: list[ToolDefinition] = Field(default_factory=list)
     model: str | None = None
