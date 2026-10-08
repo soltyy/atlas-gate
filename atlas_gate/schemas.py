@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 
 def _empty_object_schema() -> dict[str, Any]:
@@ -35,6 +35,7 @@ class AgentSpec(BaseModel):
 class SessionCreate(BaseModel):
     # Explicit isolated qualification cap; omission preserves SDK defaults.
     maxOutputTokens: Annotated[StrictInt, Field(gt=0)] | None = None
+    toolResultImages: StrictBool = False
     system: str | None = None
     tools: list[ToolDefinition] = Field(default_factory=list)
     model: str | None = None
@@ -65,6 +66,7 @@ class SessionCreate(BaseModel):
 
 
 class SessionCreated(BaseModel):
+    toolResultImages: bool = False
     # Configured transport value, not evidence of provider enforcement.
     configuredMaxOutputTokens: int | None = None
     id: str
@@ -174,6 +176,7 @@ class ToolResultRequest(BaseModel):
     callId: str
     content: str = ""
     isError: bool = False
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class SteerRequest(BaseModel):
