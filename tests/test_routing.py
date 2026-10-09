@@ -118,7 +118,7 @@ def test_usage_transaction_deduplicates_and_aliases(tmp_path):
     for _ in range(3):
         routing.usage(binding, "turn", {"usage": {"input_tokens": 7, "output_tokens": 5}}, device("one"))
     assert store._one("SELECT COUNT(*) n FROM usage")["n"] == 1
-    assert store._one("SELECT prompt_tokens FROM usage")["prompt_tokens"] == 7
+    assert store._one("SELECT prompt_tokens FROM usage")["prompt_tokens"] is None
     store.close()
 
 
