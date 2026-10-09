@@ -173,6 +173,9 @@ class UpdateManifest(_Strict):
     notes_url: str = ""
 
 
+from ..sdk_tools import SdkTools
+
+
 class OrgConfig(_Strict):
     id: str
     name: str
@@ -183,6 +186,7 @@ class OrgConfig(_Strict):
     agents: list[Agent] = Field(default_factory=list)
     mcp: list[Mcp] = Field(default_factory=list)
     builtin_tools: BuiltinTools = Field(default_factory=BuiltinTools)
+    sdk_tools: SdkTools = Field(default_factory=lambda: SdkTools(webSearch='live', files=True))
     overrides: Overrides = Field(default_factory=Overrides)
     feature_flags: dict[str, Any] = Field(default_factory=dict)
     min_app_version: str = "0.0.0"

@@ -186,7 +186,7 @@ async def test_explicit_history_fallback_keeps_original_node_affinity(tmp_path):
             {'resumeSessionId':first['sdk_alias'],'allowHistoryFallback':True},10)
         second=routing.get(json.loads(body)['id'],device('d'))
         assert second['node_id'] == 'a'  # b свободнее, но migration не разрешён.
-        assert sent == [('a', {'model':'claude','resumeSessionId':'native-sdk','allowHistoryFallback':True})]
+        assert sent == [('a', {'model':'claude','resumeSessionId':'native-sdk','allowHistoryFallback':True,'sdkTools':{'version':1,'webSearch':'disabled','files':False}})]
         with pytest.raises(GateError) as denied:
             await routing.create(device('other'),'sub','claude',
                 {'resumeSessionId':first['sdk_alias'],'allowHistoryFallback':True},10)

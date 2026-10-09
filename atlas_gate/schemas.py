@@ -9,6 +9,8 @@ def _empty_object_schema() -> dict[str, Any]:
     return {"type": "object", "properties": {}}
 
 
+from .sdk_tools import SdkTools
+
 class ToolDefinition(BaseModel):
     """Определение инструмента из рукопожатия — то же, что харнес шлёт любому провайдеру."""
 
@@ -33,6 +35,7 @@ class AgentSpec(BaseModel):
 
 
 class SessionCreate(BaseModel):
+    sdkTools: SdkTools | None = None
     # Explicit isolated qualification cap; omission preserves SDK defaults.
     maxOutputTokens: Annotated[StrictInt, Field(gt=0)] | None = None
     toolResultImages: StrictBool = False
@@ -66,6 +69,7 @@ class SessionCreate(BaseModel):
 
 
 class SessionCreated(BaseModel):
+    sdkTools: SdkTools | None = None
     toolResultImages: bool = False
     # Configured transport value, not evidence of provider enforcement.
     configuredMaxOutputTokens: int | None = None

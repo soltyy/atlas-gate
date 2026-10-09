@@ -6,6 +6,7 @@ import time
 import uuid
 import hashlib
 from .errors import GateError
+from ..sdk_tools import SdkTools, supports, enabled, defaults
 
 DDL = """
 CREATE TABLE IF NOT EXISTS router_bindings (
@@ -28,7 +29,7 @@ class Routing:
         with store._lock:
             store._db.executescript(DDL)
             columns = {r[1] for r in store._db.execute("PRAGMA table_info(router_bindings)")}
-            for name in ("request_key", "fingerprint", "response"):
+            for name in ("request_key", "fingerprint", "response", "sdk_tools"):
                 if name not in columns:
                     store._db.execute(f"ALTER TABLE router_bindings ADD COLUMN {name} TEXT")
             store._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS router_binding_request ON router_bindings(request_key)")
@@ -44,7 +45,7 @@ class Routing:
         return self.store._all("SELECT * FROM router_bindings WHERE device_id=? AND org=? AND status='ready' ORDER BY created",
                                (device.device_id, device.org))
 
-    async def create(self, device, route, model, payload, limit, request_id=None):
+    async def create(self, device, route, model, payload, limit, request_id=None, sdk_policy=None):
         if request_id is not None and (not request_id or len(request_id) > 200):
             raise GateError(422, "invalid_request", "request_id должен содержать 1..200 знаков")
         key = hashlib.sha256((device.device_id + ":" + (request_id or str(uuid.uuid4()))).encode()).hexdigest()
@@ -86,6 +87,8 @@ class Routing:
             loads = self.nodes.reserved() if hasattr(self.nodes, "reserved") else {n: i.get("activeTurns", 0) for n, i in self.nodes.snapshots.items()}
             for node_id, info in self.nodes.snapshots.items():
                 n = self.nodes.config[node_id]
+                if not supports(info.get('sdkTools'), SdkTools.model_validate(payload.get('sdkTools') or {})):
+                    continue
                 if not n.enabled or device.org not in n.orgs or route not in n.routes:
                     continue
                 if resume and node_id != resume["node_id"]:
@@ -122,11 +125,13 @@ class Routing:
             ties = [n for a, b, c, n in candidates if (a, b, c) == best]
             import secrets
             node_id = secrets.choice(ties)
+            body = dict(payload, model=model)
+            if body.get('sdkTools') is None:
+                body['sdkTools'] = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
             sid, alias = str(uuid.uuid4()), str(uuid.uuid4())
             boot_id = self.nodes.snapshots[node_id]["bootId"]
-            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?)",
-                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint))
-            body = dict(payload, model=model)
+            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?)",
+                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(body['sdkTools'])))
             if resume:
                 body["resumeSessionId"] = resume["sdk_id"]
         try:
@@ -139,6 +144,9 @@ class Routing:
             return response.status_code, response.content
         try:
             created = response.json()
+            requested = SdkTools.model_validate(body.get('sdkTools') or {})
+            if enabled(requested) and created.get('sdkTools') != requested.model_dump():
+                raise ValueError('SDK tools acknowledgement missing')
             local_id = created["id"]
             if not isinstance(local_id, str) or not local_id:
                 raise ValueError("invalid session id")
@@ -164,6 +172,9 @@ class Routing:
                     self.store._exec("UPDATE router_bindings SET status='rejected' WHERE id=?", (binding["id"],))
                     continue
                 created = command["response"]
+                requested = SdkTools.model_validate(json.loads(binding['sdk_tools'] or '{}'))
+                if enabled(requested) and created.get('sdkTools') != requested.model_dump():
+                    continue
                 local = created["id"]
                 if not isinstance(local, str) or not local:
                     continue

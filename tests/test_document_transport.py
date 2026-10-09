@@ -13,7 +13,7 @@ pytestmark=pytest.mark.skipif(not os.environ.get('ATLAS_TEST_ROUTER_ROOT'),reaso
 
 
 class DocumentRpc:
-    def __init__(self,settings,cwd,handler):
+    def __init__(self,settings,cwd,handler, *, web_search=None):
         self.handler=handler; self.queue=asyncio.Queue(); self.jobs=[]
     async def start(self): pass
     async def notification(self): return await self.queue.get()
