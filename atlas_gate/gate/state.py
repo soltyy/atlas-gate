@@ -185,6 +185,17 @@ class GateState:
                 caps = {(m.route_id, m.model): route_attachments(self, org.id, m.route_id, m.model)
                         for m in org.models if (r := org.route(m.route_id)) and r.kind == 'router-agent'}
                 body, warn = build_body(org, self.public_url, down, org_agent_ids if agent_ids is not None else None, caps)
+                for model in body['models']:
+                    options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
+                        if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
+                        and model['route_id'] in self.nodes.config[node_id].routes
+                        and model['model'] in {m.get('value') for m in info.get('models', [])}]
+                    modes = sorted({mode for c in options for mode in c.get('webSearch', {}).get('modes', [])
+                        if org.sdk_tools.webSearch == 'live' or org.sdk_tools.webSearch == mode})
+                    model['sdkTools'] = {'version':1, 'webSearch':{'modes':modes, 'supported':bool(modes),
+                        'executor':'sdk', 'accountAccess':'unknown'}, 'files':{'supported':org.sdk_tools.files and
+                        any(c.get('files', {}).get('supported') is True for c in options),
+                        'executor':'router', 'invocation':'sdk', 'processing':'isolated-python-v1'}}
                 for w in warn:
                     log.warning("профиль %s: %s", org.id, w)
                 row = publish(self.store, self.key, org.id, body, dump(org))

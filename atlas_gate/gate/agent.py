@@ -12,6 +12,7 @@ from ..schemas import CompactRequest, DocumentUploadRequest, PromptRequest, Stee
 from .api import check_data_class, gate, org_of, ready_gate, require_device, router
 from .errors import GateError, STATUS_CODES
 from .schemas import GateAgentSessionCreate
+from ..sdk_tools import SdkTools, permitted
 from .state import Device
 from .attachments import node_attachments, validate_prompt, validate_tool_result
 
@@ -46,12 +47,15 @@ def _selection(state, device, model=None, route_id=None):
     return str(selected["route_id"]), str(selected["model"])
 
 
-def _policy(state, device, binding, request, require_model=True):
+def _policy(state, device, binding, request, require_model=True, require_sdk=True):
     if require_model:
         _selection(state, device, binding["model"], binding["route"])
         for role in json.loads(binding["roles"]):
             if role.get("model") not in (None, "", "inherit"):
                 _selection(state, device, role["model"], binding["route"])
+    accepted = json.loads(binding.get('response') or '{}').get('sdkTools') or {}
+    if require_sdk and not permitted(SdkTools.model_validate(accepted), org_of(state, device).sdk_tools):
+        raise GateError(403, 'policy_denied', 'SDK tools больше не разрешены организацией')
     check_data_class(state, device, request, binding["route"])
     node = state.nodes.config.get(binding["node_id"])
     if node is None or not node.enabled or device.org not in node.orgs or binding["route"] not in node.routes:
@@ -124,12 +128,14 @@ async def agent_sessions(request: Request, device: Device = Depends(require_devi
 @router.post("/harness/agent/sessions")
 async def agent_session_create(body: GateAgentSessionCreate, request: Request, device: Device = Depends(require_device)):
     state = await ready_gate(request)
+    if body.sdkTools is not None and not permitted(body.sdkTools, org_of(state, device).sdk_tools):
+        raise GateError(403, 'policy_denied', 'SDK tools не разрешены организацией')
     route, model = _selection(state, device, body.model)
     for role in body.agents:
         if role.model and role.model != "inherit":
             _selection(state, device, role.model, route)
     check_data_class(state, device, request, route)
-    status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE, request.headers.get("idempotency-key"))
+    status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE, request.headers.get("idempotency-key"), sdk_policy=org_of(state, device).sdk_tools)
     import httpx
     return _response(httpx.Response(status, content=raw))
 
@@ -213,7 +219,9 @@ async def _bound_attachments(state, binding):
 async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     state = gate(request)
     binding = state.routing.get(sid, device)
-    _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"))
+    # Revocation blocks further work, not observing/stopping/deleting owned work.
+    control = method in ('GET', 'DELETE') or suffix == '/interrupt' or suffix.endswith('/stop')
+    _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"), require_sdk=not control)
     binding = await state.routing.recover_boot(binding)
     if tool_result is not None and tool_result.attachments:
         validate_tool_result(tool_result, await _bound_attachments(state, binding))
@@ -322,7 +330,7 @@ async def agent_turn(sid: str, turn_id: str, request: Request, device: Device = 
 async def agent_events(sid: str, turn_id: str, request: Request, device: Device = Depends(require_device)):
     state = gate(request)
     binding = state.routing.get(sid, device)
-    _policy(state, device, binding, request, require_model=False)
+    _policy(state, device, binding, request, require_model=False, require_sdk=False)
     try:
         after, wait = int(request.query_params.get("after", 0)), int(request.query_params.get("wait", 0))
         if after < 0 or wait < 0:
@@ -345,3 +353,20 @@ async def agent_delete(sid: str, request: Request, device: Device = Depends(requ
     if response.status_code < 400 or response.status_code == 404:
         state.store._exec("UPDATE router_bindings SET status='closed' WHERE id=?", (sid,))
     return response
+
+
+@router.get('/harness/agent/sessions/{sid}/sdk-tools')
+async def agent_sdk_tools(sid: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'GET', '/sdk-tools')
+
+@router.post('/harness/agent/sessions/{sid}/files')
+async def agent_upload_files(sid: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'POST', '/files')
+
+@router.get('/harness/agent/sessions/{sid}/files')
+async def agent_list_files(sid: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'GET', '/files')
+
+@router.delete('/harness/agent/sessions/{sid}/files/{file_id}')
+async def agent_delete_file(sid: str, file_id: str, request: Request, device: Device = Depends(require_device)):
+    return await _delegate(request, device, sid, 'DELETE', '/files/'+quote(file_id, safe=''))

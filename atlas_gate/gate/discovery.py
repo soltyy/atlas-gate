@@ -95,6 +95,8 @@ def endpoints():
             'chat_completions': '/harness/llm/v1/chat/completions',
             'messages': '/harness/llm/v1/messages', 'agent_sessions': '/harness/agent/sessions',
             'agent_context': '/harness/agent/sessions/{session_id}/context',
+            'agent_sdk_tools': '/harness/agent/sessions/{session_id}/sdk-tools',
+            'agent_files': '/harness/agent/sessions/{session_id}/files',
             'agent_attachments': '/harness/agent/sessions/{session_id}/attachments',
             'agent_documents': '/harness/agent/sessions/{session_id}/documents',
             'agent_document_page': '/harness/agent/sessions/{session_id}/documents/{document_id}'}

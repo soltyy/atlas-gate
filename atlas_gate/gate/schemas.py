@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 from ..schemas import AgentSpec, ToolDefinition
 
 
+from ..sdk_tools import SdkTools
+
 class GateErrorBody(BaseModel):
     code: str
     message: str
@@ -140,6 +142,7 @@ class GateReloaded(BaseModel):
 
 
 class GateAgentSessionCreate(BaseModel):
+    sdkTools: SdkTools | None = None
     """Рукопожатие агентной сессии с устройства: только эти поля уходят в `/v1/sessions` роутера.
 
     `foreignTools`/`foreignServers` не принимаются: серверы MCP человека на машине роутера

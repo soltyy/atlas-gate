@@ -11,6 +11,7 @@ class ModelContract(BaseModel):
     enabled: bool
     limits_source: Literal['configured'] = 'configured'
     attachments: dict[str, Any] | None = None
+    sdkTools: dict[str, Any] | None = None
     output_policy: Literal['sdk-default', 'harness-budget'] | None = None
     output_budget: int | None = None
 
