@@ -13,7 +13,7 @@ it('показывает ноль отдельно от неизвестного
   expect(w.text()).toContain('нет данных')
   expect(w.text()).toContain('Без чтения кеша')
   expect(w.text()).toContain('0.0 %')
-  expect(w.text()).toContain('Исторических с неполной детализацией: 1')
+  expect(w.text()).toContain('Записей без детализации SDK: 1')
   const params = new URL(fetcher.mock.calls[0][0] as string, 'http://localhost').searchParams
   await w.findAll('button').find(b => b.text() === 'Показать ещё')!.trigger('click'); await flush()
   const second = new URL(fetcher.mock.calls[1][0] as string, 'http://localhost').searchParams
