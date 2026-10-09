@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS usage (
     session_id TEXT,
     model_call TEXT
 );
+CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
+CREATE TABLE IF NOT EXISTS agent_usage_details (
+  session_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(session_id, turn_id)
+);
 CREATE TABLE IF NOT EXISTS agent_turns (
     user_id TEXT NOT NULL,
     day TEXT NOT NULL,

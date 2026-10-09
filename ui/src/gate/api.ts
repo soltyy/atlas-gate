@@ -91,7 +91,28 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T
 }
 
+export interface UsageMetrics {
+  records: number; legacyRecords: number; cacheReadPercent: number | null; cacheComparableRecords: number
+  totalInputTokens: number | null; totalInputTokensRecords: number
+  uncachedInputTokens: number | null; uncachedInputTokensRecords: number
+  cacheReadTokens: number | null; cacheReadTokensRecords: number
+  cacheWriteTokens: number | null; cacheWriteTokensRecords: number
+  outputTokens: number | null; outputTokensRecords: number
+}
+export interface UsageRow {
+  id: number; ts: number; org: string; deviceId: string; deviceName: string | null; platform: string | null
+  model: string; route: string; kind: string; sessionId: string | null; turnId: string | null
+  totalInputTokens: number | null; uncachedInputTokens: number | null; cacheReadTokens: number | null
+  cacheWriteTokens: number | null; outputTokens: number | null; durationMs: number | null
+  source: string; status: string; modelUsage: Record<string, Record<string, number | null>>
+}
+export interface UsageReport {
+  since: number; until: number; summary: UsageMetrics
+  groups: (UsageMetrics & { deviceId: string; deviceName: string | null; platform: string | null; model: string; kind: string })[]
+  rows: UsageRow[]; nextBefore: number | null
+}
 export const gateApi = {
+  usage: (params: URLSearchParams) => call<UsageReport>('GET', `/harness/admin/usage?${params}`),
   nodeOptions: () => call<NodeOptions>('GET', '/harness/admin/node-options'),
   nodeAdd: (body: NewNode) => call<{ node_id: string; status: RouterNode['status'] }>('POST', '/harness/admin/nodes', body),
   nodes: () => call<{ nodes: RouterNode[] }>('GET', '/harness/admin/nodes'),

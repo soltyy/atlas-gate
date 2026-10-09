@@ -37,3 +37,5 @@ Python-пакета или SDK. Реальный Codex тест opt-in ATLAS_LIV
 Исправление восстановления квоты: [выпуск 0.2.1](docs/RELEASE-0.2.1.md).
 
 Поиск SDK и оригиналы файлов по умолчанию: [контракт](docs/SDK-WEB-FILES.md), [выпуск 0.2.0](docs/RELEASE-0.2.0.md).
+
+Учёт токенов и кеша в админке: [docs/TOKEN-USAGE.md](docs/TOKEN-USAGE.md).

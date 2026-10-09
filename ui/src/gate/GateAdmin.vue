@@ -6,8 +6,9 @@ import { onMounted, reactive, ref } from 'vue'
 import { adminToken, gateApi, setAdminToken, type Device, type Enrollment } from './api'
 import OrgsSection from './orgs/OrgsSection.vue'
 import NodesSection from './NodesSection.vue'
+import UsageSection from './UsageSection.vue'
 
-const section = ref<'devices' | 'orgs' | 'nodes'>('devices')
+const section = ref<'devices' | 'orgs' | 'nodes' | 'usage'>('devices')
 
 const enrollments = ref<Enrollment[]>([])
 const orgs = ref<string[]>([])
@@ -92,6 +93,7 @@ onMounted(() => void refresh())
       </button>
       <button type="button" :class="{ active: section === 'orgs' }" data-section="orgs" @click="section = 'orgs'">Организации</button>
       <button type="button" :class="{ active: section === 'nodes' }" data-section="nodes" @click="section = 'nodes'">Router</button>
+      <button type="button" :class="{ active: section === 'usage' }" data-section="usage" @click="section = 'usage'">Расход</button>
     </nav>
     <span class="spacer" />
     <details class="access">
@@ -108,6 +110,7 @@ onMounted(() => void refresh())
     <OrgsSection />
   </main>
   <main v-else-if="section === 'nodes'"><NodesSection /></main>
+  <main v-else-if="section === 'usage'"><UsageSection /></main>
   <main v-else>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="notice" class="note">{{ notice }}</p>

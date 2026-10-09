@@ -242,9 +242,10 @@ class Routing:
         return data
 
     def usage(self, binding, turn, result, device):
-        u = result.get("usage") or {}
-        cached = int(u.get("cache_read_input_tokens") or 0)
-        prompt = int(u.get("input_tokens") or 0) + cached + int(u.get("cache_creation_input_tokens") or 0)
+        from .token_usage import sdk_usage
+        detail = sdk_usage(result)
+        cached = detail["cacheReadTokens"]
+        prompt = detail["totalInputTokens"]
         with self.store._lock:
             db = self.store._db
             db.execute("BEGIN IMMEDIATE")
@@ -252,8 +253,10 @@ class Routing:
                 added = db.execute("INSERT OR IGNORE INTO router_usage_receipts VALUES (?,?)", (binding["id"], turn)).rowcount
                 if added:
                     db.execute("INSERT INTO usage(org,user_id,device_id,kind,model,prompt_tokens,completion_tokens,cached_tokens,cost,ts,route,session_id,model_call) VALUES (?,?,?,'agent',?,?,?,?,NULL,?,?,?,?)",
-                        (device.org, device.user_id, device.device_id, binding["model"], prompt, int(u.get("output_tokens") or 0), cached,
+                        (device.org, device.user_id, device.device_id, binding["model"], prompt, detail["outputTokens"], cached,
                          time.time(), binding["route"], binding["id"], turn))
+                    db.execute("INSERT INTO agent_usage_details VALUES (?,?,?)",
+                        (binding["id"], turn, json.dumps(detail)))
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
