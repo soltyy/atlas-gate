@@ -179,6 +179,12 @@ class Nodes:
 
     def observe_event(self, node_id, event):
         if event.get("type") == "rate_limit" and event.get("status") in ("allowed", "allowed_warning"):
+            # Router has confirmed recovery. Remove the durable record as well,
+            # otherwise a Gate restart restores an already obsolete rejection.
+            group = self.config[node_id].account_group
+            if self.store:
+                self.store._exec("DELETE FROM router_account_cooldowns WHERE account_group=?", (group,))
+            self.cooldown.pop(group, None)
             return
         if event.get("type") == "rate_limit" or (event.get("type") == "error" and event.get("kind") in ("rate_limit", "rate_limit_exceeded", "usage_limit")):
             retry = event.get("retryAfterSeconds", 60)

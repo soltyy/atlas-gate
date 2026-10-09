@@ -34,6 +34,6 @@ resume/tools/interrupt/compact/events идут на сохранённый node.
 Python-пакета или SDK. Реальный Codex тест opt-in ATLAS_LIVE_CODEX=1 использует
 существующий ChatGPT вход и подписку; обычные тесты работают с временными БД/stub.
 
-Кандидат Gate 0.1.0 / Router 0.7.0 подготовлен; production cutover не выполнен.
+Исправление восстановления квоты: [выпуск 0.2.1](docs/RELEASE-0.2.1.md).
 
 Поиск SDK и оригиналы файлов по умолчанию: [контракт](docs/SDK-WEB-FILES.md), [выпуск 0.2.0](docs/RELEASE-0.2.0.md).
