@@ -1,6 +1,6 @@
 [project]
 name = "atlas-gate"
-version = "0.3.0"
+version = "0.3.1"
 description = "Централизованный доступ к распределённым Atlas Router"
 readme = "README.md"
 requires-python = ">=3.12"

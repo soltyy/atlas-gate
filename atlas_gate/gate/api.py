@@ -52,7 +52,6 @@ log = logging.getLogger("atlas_gate")
 
 ENROLL_TTL_SEC = 900
 POLL_INTERVAL_SEC = 5
-LLM_BODY_LIMIT = 10 * 1024 * 1024
 AUDIT_BODY_LIMIT = 1024 * 1024
 AUDIT_MAX_EVENTS = 1000
 STRIPPED_AUDIT_KEYS = {"text", "content", "args", "result"}
@@ -457,19 +456,6 @@ async def health(request: Request) -> Any:
 # --- /harness/llm/* — напрямую к апстримам ----------------------------------------------------
 
 
-async def _read_limited(request: Request, limit: int) -> bytes:
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > limit:
-        raise GateError(413, "payload_too_large", f"тело больше {limit} байт")
-    chunks, size = [], 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > limit:
-            raise GateError(413, "payload_too_large", f"тело больше {limit} байт")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 LLM_BODY = {"requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["model"],
                                                                          "properties": {"model": {"type": "string"}}}}}}}
 
@@ -487,7 +473,7 @@ async def llm_messages(request: Request, device: Device = Depends(require_device
 async def _llm_post(request: Request, device: Device, protocol: str, suffix: str) -> Response:
     state = await ready_gate(request)
     org = org_of(state, device)
-    raw = await _read_limited(request, LLM_BODY_LIMIT)
+    raw = await request.body()
     try:
         doc = json.loads(raw)
         model = doc.get("model")
