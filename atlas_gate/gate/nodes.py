@@ -169,8 +169,9 @@ class Nodes:
         if request_id:
             headers["Idempotency-Key"] = request_id
         try:
+            options = {"timeout": httpx.Timeout(connect=5, read=None, write=70, pool=5)} if path.endswith("/compact") and self.config[node_id].transport != 'connector' else {}
             response = await self.clients[node_id].request(method, path, content=content,
-                params=params, headers=headers)
+                params=params, headers=headers, **options)
         except httpx.HTTPError as failed:
             raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable",
                             "ответ Router не получен; повтор на другом узле запрещён", node_id=node_id) from failed

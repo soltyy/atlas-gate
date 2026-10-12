@@ -226,6 +226,93 @@ async def _bound_attachments(state, binding):
     return dict(caps, toolResultImages=False) if caps is not None else None
 
 
+async def _control_receipt(state, op):
+    current = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
+    if current["state"] != "complete":
+        current["receiptState"] = "unavailable"
+        try:
+            response = await state.nodes.request(op["node_id"], "GET", "/v1/commands/" + op["id"])
+            if response.status_code == 200:
+                current["receiptState"] = response.json().get("state", "unknown")
+            if response.status_code == 200 and response.json().get("state") == "complete":
+                import httpx
+                saved = response.json()
+                state.operations.complete(op["id"], httpx.Response(saved["status"], json=saved["response"]))
+                current = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
+        except (GateError, ValueError, KeyError):
+            pass
+    return current
+
+
+def _pending_control(op):
+    return JSONResponse({"commandId": op["id"], "state": "pending",
+                         "sessionId": op["session_id"]}, status_code=202,
+                        headers={"Retry-After": "1"})
+
+
+async def _execute_control(state, binding, op, raw):
+    try:
+        response = await state.nodes.request(binding["node_id"], "POST", op["path"],
+                    content=raw, expected_boot=binding["boot_id"], request_id=op["id"])
+    except Exception:
+        state.operations.unknown(op["id"])
+    else:
+        if response.status_code >= 500:
+            # A connector can lose its own HTTP reply while Router's durable
+            # command is still running. Its receipt is authoritative.
+            state.operations.unknown(op["id"])
+            await _control_receipt(state, op)
+        else:
+            state.operations.complete(op["id"], response)
+
+
+async def _compact_control(request, device, binding, raw, request_id):
+    state = gate(request)
+    await state.nodes.refresh()
+    op, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/compact"),
+                                      json.loads(raw) if raw else {}, request_id, nodes=state.nodes)
+    if fresh:
+        task = asyncio.create_task(_execute_control(state, binding, op, raw))
+        state.watchers.add(task)
+        task.add_done_callback(state.watchers.discard)
+    if "respond-async" in request.headers.get("prefer", "").lower():
+        return _pending_control(op)
+    # Legacy callers still receive the final response. A lost internal HTTP response
+    # starts receipt observation, never another inference or a failover.
+    while True:
+        current = await _control_receipt(state, op)
+        if current["state"] == "complete":
+            import httpx
+            return _response(httpx.Response(current["status"], content=current["response"].encode()))
+        if current["state"] == "unknown" and current.get("receiptState") in ("unavailable", "unknown"):
+            raise GateError(503, "command_outcome_unknown", "итог сжатия пока неизвестен; сессия сохранена", command_id=op["id"])
+        if await request.is_disconnected():
+            return _pending_control(op)  # The tracked command remains alive.
+        await asyncio.sleep(0.2)
+
+
+@router.get("/harness/agent/sessions/{sid}/commands/{command_id}")
+async def control_receipt(sid: str, command_id: str, request: Request,
+                          device: Device = Depends(require_device)):
+    state = gate(request)
+    binding = state.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=?", (sid, device.device_id, device.org))
+    if binding is None:
+        raise GateError(404, "not_found", "сессия не найдена")
+    op = state.store._one("SELECT * FROM router_operations WHERE id=? AND device_id=? AND session_id=? AND path LIKE '%/compact'",
+                         (command_id, device.device_id, sid))
+    if op is None:
+        raise GateError(404, "not_found", "команда не найдена")
+    current = await _control_receipt(state, op)
+    if current["state"] != "complete":
+        if current.get("receiptState") == "unknown":
+            raise GateError(503, "command_outcome_unknown", "Router перезапущен; требуется сверка результата сжатия", command_id=op["id"])
+        return _pending_control(op)
+    import httpx
+    result = _response(httpx.Response(current["status"], content=current["response"].encode()))
+    result.headers["X-Atlas-Command-State"] = "complete"
+    return result
+
+
 async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     state = gate(request)
     binding = state.routing.get(sid, device)
@@ -239,6 +326,14 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     request_id = request.headers.get("idempotency-key")
     if not request_id and suffix == "/tool_result":
         request_id = "tool-result:" + sid + ":" + str(json.loads(raw).get("callId", ""))
+    if method == "POST" and suffix == "/compact":
+        return await _compact_control(request, device, binding, raw, request_id)
+    if method == "DELETE":
+        # Cleanup after an uncertain HTTP outcome must not cancel an active SDK command.
+        for pending in state.store._all("SELECT * FROM router_operations WHERE session_id=? AND path LIKE '%/compact' AND finished=0", (sid,)):
+            current = await _control_receipt(state, pending)
+            if current["state"] != "complete":
+                raise GateError(409, "compact_pending", "сжатие ещё выполняется; закрытие сессии требует явной отмены")
     op = None
     if method != "GET":
         if suffix == "/compact":
