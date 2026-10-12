@@ -21,8 +21,8 @@ function supported(value: unknown) {
   <section class="metrics" :data-model-metrics="`${model.route_id}/${model.model}`">
     <strong>{{ model.display_name || model.model }} · {{ model.route_id }}</strong>
     <dl>
-      <dt>Окно, токенов</dt><dd>{{ positive(model.context_window) }}</dd>
-      <dt>Макс. ответ, токенов</dt><dd>{{ positive(model.max_output) }}</dd>
+      <dt>Окно, токенов</dt><dd>{{ positive(contract ? contract.context_window : model.context_window) }}</dd>
+      <dt>Макс. ответ, токенов</dt><dd>{{ positive(contract ? contract.max_output : model.max_output) }}</dd>
       <template v-for="[field, label] in labels" :key="field"><dt>{{ label }}</dt><dd>{{ positive(caps?.[field]) }}</dd></template>
       <dt>Изображения</dt><dd>{{ supported(caps?.image) }}</dd>
       <dt>PDF нативно</dt><dd>{{ supported(caps?.pdfNative) }}</dd>

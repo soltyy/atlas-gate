@@ -63,6 +63,8 @@ class GateState:
         self.nodes = Nodes(s.ATLAS_GATE_NODES_FILE, self.store, self.channel)
         self.routing = Routing(self.store, self.nodes)
         self.operations = Operations(self.store)
+        from .context_windows import ContextWindows
+        self.context_windows = ContextWindows(self)
         self.watchers: set[asyncio.Task] = set()
         self._closed = False
         self.key = SigningKey.load_or_create(s.ATLAS_GATE_KEY_PATH)
@@ -102,6 +104,10 @@ class GateState:
         if self._closed:
             return
         self._closed = True
+        context_task = getattr(self, "context_task", None)
+        if context_task is not None:
+            context_task.cancel()
+            await asyncio.gather(context_task, return_exceptions=True)
         recovery_task = getattr(self, "recovery_task", None)
         if recovery_task is not None and recovery_task is not asyncio.current_task():
             recovery_task.cancel()
@@ -174,6 +180,7 @@ class GateState:
             orgs, errors = load_orgs(self.settings.ATLAS_GATE_ORGS_DIR, self.settings.ATLAS_GATE_TEST)
             await self._refresh_routes(orgs)
             agent_ids = await self._agent_model_ids() if any(o.models_of("router-agent") for o in orgs.values()) else set()
+            self.context_windows.catalog()
             versions: dict[str, int] = {}
             warnings: dict[str, list[str]] = {}
             bodies: dict[str, dict[str, Any]] = {}
@@ -186,6 +193,9 @@ class GateState:
                         for m in org.models if (r := org.route(m.route_id)) and r.kind == 'router-agent'}
                 body, warn = build_body(org, self.public_url, down, org_agent_ids if agent_ids is not None else None, caps)
                 for model in body['models']:
+                    route = org.route(model['route_id'])
+                    if route and route.kind == 'router-agent':
+                        model.update(self.context_windows.project(org.id,route.id,model['model']))
                     options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
                         if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
                         and model['route_id'] in self.nodes.config[node_id].routes
@@ -206,6 +216,23 @@ class GateState:
             self.orgs, self.org_errors, self.warnings, self.bodies = orgs, errors, warnings, bodies
             self.ready.set()
             return {"orgs": versions, "errors": errors, "warnings": warnings, "upstreams": dict(self.upstreams)}
+
+    async def publish_contexts(self):
+        """Метаданные меняются без пересоздания агентов, сессий и org config."""
+        import copy
+        async with self._reload_lock:
+            bodies = copy.deepcopy(self.bodies)
+            for org in self.orgs.values():
+                body = bodies.get(org.id)
+                if not body:
+                    continue
+                for model in body['models']:
+                    route = org.route(model['route_id'])
+                    if route and route.kind == 'router-agent':
+                        model.update(self.context_windows.project(org.id,route.id,model['model']))
+                row = publish(self.store,self.key,org.id,body,dump(org))
+                self.snapshot(org,int(row['profile_version']))
+            self.bodies = bodies
 
     # --- история конфигураций организаций (редактор админки, #6) ---------------------------------
 

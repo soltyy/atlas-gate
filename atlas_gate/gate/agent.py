@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 from fastapi import Depends, Request
@@ -68,6 +69,7 @@ def _path(binding, suffix=""):
 
 async def _events(state, binding, turn, device, after=0, wait=0):
     binding = await state.routing.recover_boot(binding)
+    context_order = time.time_ns()
     response = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn, safe='')}/events"), params={"after": after, "wait": wait}, expected_boot=binding["boot_id"])
     if response.status_code == 410:
         receipt = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn, safe='')}/receipt"), expected_boot=binding["boot_id"])
@@ -75,6 +77,9 @@ async def _events(state, binding, turn, device, after=0, wait=0):
             terminal = receipt.json()
             if terminal.get("type") == "result":
                 state.routing.usage(binding, turn, terminal, device)
+                op = state.store._one('SELECT created FROM router_operations WHERE session_id=? AND turn_id=?',(binding['id'],turn))
+                if state.context_windows.observe(binding,terminal.get('context'),context_order,(op or {}).get('created',0)):
+                    await state.publish_contexts()
             state.store._exec("UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?", (binding["id"], turn))
     if response.status_code >= 400:
         return response, None
@@ -86,6 +91,11 @@ async def _events(state, binding, turn, device, after=0, wait=0):
             state.routing.usage(binding, turn, ev, device)
     if doc.get("done"):
         state.store._exec("UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?", (binding["id"], turn))
+    for event in doc.get('events',[]):
+        if event.get('type') == 'result':
+            op = state.store._one('SELECT created FROM router_operations WHERE session_id=? AND turn_id=?',(binding['id'],turn))
+            if state.context_windows.observe(binding,event.get('context'),context_order,(op or {}).get('created',0)):
+                await state.publish_contexts()
     return response, doc
 
 
@@ -242,6 +252,7 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
                 import httpx
                 return _response(httpx.Response(op["status"], content=op["response"].encode()))
             raise GateError(409, "command_outcome_unknown", "управляющая команда требует сверки")
+    context_order = time.time_ns()
     try:
         response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=raw, params=request.query_params, expected_boot=binding["boot_id"], request_id=op["id"] if op else None)
     except GateError:
@@ -250,6 +261,9 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
         raise
     if op:
         state.operations.complete(op["id"], response)
+    if method == "GET" and suffix == "/context" and response.status_code == 200:
+        if state.context_windows.observe(binding,response.json(),context_order):
+            await state.publish_contexts()
     return _response(response)
 
 

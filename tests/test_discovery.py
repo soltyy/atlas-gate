@@ -62,7 +62,8 @@ async def test_public_catalog_all_models_variants_and_no_private_settings(config
     assert response.status_code == 200, response.text
     doc = response.json()
     assert doc['schema_version'] == 1
-    assert sorted(m['context_window'] for m in doc['models'] if m['model']=='gpt-6.1-sol') == [272000, 872000]
+    assert [m['context_window'] for m in doc['models'] if m['model']=='gpt-6.1-sol'] == [None]
+    assert all(m['context_status']=='unknown' for m in doc['models'] if m['model']=='gpt-6.1-sol')
     assert len({m['catalog_id'] for m in doc['models']}) == len(doc['models'])
     assert any(m['model']=='api-model' and m['max_output']==128000 for m in doc['models'])
     assert any(m['model']=='disabled-model' and not m['enabled'] and m['context_window'] is None for m in doc['models'])
@@ -93,7 +94,7 @@ async def test_settings_are_exact_signed_profile_scoped_and_reloadable(configure
     assert doc['profile_jws'] == legacy.text
     assert doc['profile']['agents'][0]['extension_setting'] == {'retained':True}
     assert doc['profile']['org']['id'] == 'first'
-    assert doc['profile']['models'][0]['context_window'] == 272000
+    assert doc['profile']['models'][0]['context_window'] is None
     assert doc['profile']['mcp'][0]['id'] == 'private-mcp'
     assert 'private, no-cache' == response.headers['cache-control']
     assert 'Authorization' in response.headers['vary']
@@ -114,7 +115,7 @@ async def test_settings_are_exact_signed_profile_scoped_and_reloadable(configure
     assert updated.status_code == 200
     assert updated.json()['profile']['profile_version'] > payload['profile_version']
     assert updated.json()['profile']['agents'][0]['settings']['temperature'] == .7
-    assert (await http.get('/harness/discovery', headers={'If-None-Match':before})).status_code == 200
+    assert (await http.get('/harness/discovery', headers={'If-None-Match':before})).status_code == 304
     await state.reload()
     assert (await http.get('/harness/settings', headers=dict(auth, **{'If-None-Match':updated.headers['etag']}))).status_code == 304
 
@@ -164,7 +165,7 @@ async def test_attachment_capabilities_use_node_model_value(configured):
     state.nodes.catalog['test'] = [{'value': 'gpt-6.1-sol'}]
     await state.reload()
     doc = (await http.get('/harness/discovery')).json()
-    first = next(m for m in doc['models'] if m['model']=='gpt-6.1-sol' and m['context_window']==272000)
+    first = next(m for m in doc['models'] if m['model']=='gpt-6.1-sol' and m['attachments'] is not None)
     assert first['attachments']['documentPages'] and not first['attachments']['pdfNative']
     credentials = await enroll(http)
     settings = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
@@ -180,7 +181,7 @@ async def test_attachment_capabilities_use_node_model_value(configured):
     unchanged = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
     assert unchanged['profile_jws'] == etag
     assert unchanged['attachment_routes']['private-route']['gpt-6.1-sol']['maxFiles'] == 8
-    assert next(m for m in (await http.get('/harness/discovery')).json()['models'] if m['context_window']==272000)['attachments']['maxFiles']==8
+    assert next(m for m in (await http.get('/harness/discovery')).json()['models'] if m['model']=='gpt-6.1-sol' and m['attachments'] is not None)['attachments']['maxFiles']==8
     await state.reload()
     changed = (await http.get('/harness/settings', headers={'Authorization':'Bearer '+credentials['device_token']})).json()
     assert changed['profile_jws'] != etag

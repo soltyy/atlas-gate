@@ -84,6 +84,7 @@ class Nodes:
             self.clients[n.node_id] = httpx.AsyncClient(base_url=n.url.rstrip("/"),
                 headers={"X-Atlas-Token": token}, follow_redirects=False, trust_env=False,
                 verify=context, timeout=httpx.Timeout(70, connect=5))
+        self._probe_locks = {n.node_id: asyncio.Lock() for n in nodes}
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
         self.cooldown: dict[str, float] = {}
@@ -99,6 +100,10 @@ class Nodes:
         await asyncio.gather(*(c.aclose() for c in self.clients.values()))
 
     async def probe(self, node_id: str) -> dict | None:
+        async with self._probe_locks.setdefault(node_id, asyncio.Lock()):
+            return await self._probe(node_id)
+
+    async def _probe(self, node_id: str) -> dict | None:
         if self.revoked(node_id):
             self.snapshots.pop(node_id, None)
             return None
