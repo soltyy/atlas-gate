@@ -60,6 +60,11 @@ class ContextWindows:
         for node_id, info in self.state.nodes.snapshots.items():
             for model in info.get('models',[]):
                 data = model.get('contextWindow')
+                if 'contextWindow' in model and data is None:
+                    old = self.state.store._one('SELECT * FROM router_context_windows WHERE node_id=? AND model=?',(node_id,model['value']))
+                    if old and old['source']=='router-catalog' and old['boot_id']==info['bootId']:
+                        self.save(node_id,model['value'],info['bootId'],None,None,'router-catalog',(0,0),time.time_ns(),old['revision'])
+                    continue
                 if not isinstance(data,dict) or data.get('source') != 'sdk':
                     continue
                 revision = data.get('revision')

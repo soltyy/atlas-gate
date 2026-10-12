@@ -76,7 +76,11 @@ def test_catalog_revision_and_full_effective_semantics(tmp_path):
     m['contextWindow'].update(revision=1,effectiveTokens=258400)
     s.context_windows.catalog();assert projection(s)['context_window']==475000
     assert not observe(s,258400,100)
-    m['contextWindow'].update(revision=3,effectiveTokens=None)
+    m['contextWindow']=None
+    s.context_windows.catalog();assert projection(s)['context_window'] is None
+    m['contextWindow']={'source':'sdk','revision':3,'effectiveTokens':475000,'fullTokens':500000}
+    s.context_windows.catalog();assert projection(s)['context_window']==475000
+    m['contextWindow'].update(revision=4,effectiveTokens=None)
     s.context_windows.catalog();assert projection(s)['context_window'] is None
     s.store.close()
 
