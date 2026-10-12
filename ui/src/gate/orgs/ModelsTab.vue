@@ -96,7 +96,7 @@ function idxOf(r: Route, model: string): number {
             </td>
             <template v-if="entry(r, name)">
               <td><input v-model.trim="entry(r, name)!.display_name" :placeholder="modelName(r, name)" type="text" size="26" /></td>
-              <td><input :value="entry(r, name)!.context_window || ''" @input="setLimit(entry(r, name)!, 'context_window', $event)" type="number" min="0" placeholder="неизвестно" class="num-in" /><div class="muted num-hint">{{ entry(r, name)!.context_window ? fmtNum(entry(r, name)!.context_window) : 'неизвестно' }}</div></td>
+              <td><span class="num-in">{{ ctx.model_contracts?.[r.id]?.[name]?.context_window ? fmtNum(ctx.model_contracts[r.id][name].context_window!) : 'неизвестно' }}</span><div class="muted num-hint">Обновляет SDK Router</div></td>
               <td>
                 <input :value="entry(r, name)!.max_output || ''" @input="setLimit(entry(r, name)!, 'max_output', $event)" type="number" min="0" placeholder="неизвестно" class="num-in" /><div class="muted num-hint">{{ entry(r, name)!.max_output ? fmtNum(entry(r, name)!.max_output) : 'неизвестно' }}</div>
                 <FieldErr :errors="errors" :loc="`models.${idxOf(r, name)}`" deep />

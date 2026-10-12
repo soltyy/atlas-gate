@@ -4,7 +4,7 @@ import AgentsTab from './AgentsTab.vue'
 import type { OrgConfig, EditorContext } from './types'
 
 describe('единые показатели в карточке агента', () => {
-  it('выбранная модель читает контракт своего маршрута; черновик меняет окно без новой версии агента', async () => {
+  it('выбранная модель читает контракт своего маршрута; черновик не подменяет актуальное окно SDK', async () => {
     const org = { routes: [{ id: 'a', enabled: true }, { id: 'b', enabled: true }],
       models: [{ route_id: 'a', model: 'same', display_name: 'Model A', context_window: 258400, max_output: 0, enabled: true },
         { route_id: 'b', model: 'same', display_name: 'Model B', context_window: 1000000, max_output: 8192, enabled: true }],
@@ -22,7 +22,8 @@ describe('единые показатели в карточке агента', (
     expect(metrics.findAll('dd').map(x => x.text().replace(/\u00a0/g, ' ')).slice(0, 8)).toEqual(['258 400', 'неизвестно', '8', '15 728 640', '20 971 520', '1 000 000', '500', '4 000 000'])
     org.models[0].context_window = 900000
     await w.setProps({ org: { ...org, models: org.models.map(m => ({ ...m })) } })
-    expect(w.find('[data-model-metrics="a/same"]').text().replace(/\u00a0/g, ' ')).toContain('900 000')
+    expect(w.find('[data-model-metrics="a/same"]').text().replace(/\u00a0/g, ' ')).toContain('258 400')
+    expect(w.find('[data-model-metrics="a/same"]').text().replace(/\u00a0/g, ' ')).not.toContain('900 000')
     expect(org.agents).toHaveLength(1)
   })
 })

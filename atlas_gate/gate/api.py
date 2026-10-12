@@ -71,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             state.ready.set()
 
     task = asyncio.create_task(first_reload(), name="atlas-gate-reload")
+    state.context_task = asyncio.create_task(state.context_windows.run(), name="atlas-context-sync")
     async def recovery():
         from .agent import _watch
         await state.ready.wait()
