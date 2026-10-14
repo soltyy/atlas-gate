@@ -86,7 +86,7 @@ async def test_probe_recovery_unblocks_creation_and_existing_turn(tmp_path, stat
     try:
         with pytest.raises(GateError) as denied:
             await routing.create(device, "sub", "codex", {}, 0)
-        assert denied.value.code == "capacity_exceeded"
+        assert denied.value.code == "rate_limit"
         assert posts == []
         quota.update(status=status)
         _, body = await routing.create(device, "sub", "codex", {}, 0)
@@ -100,6 +100,77 @@ async def test_probe_recovery_unblocks_creation_and_existing_turn(tmp_path, stat
         _, fresh = operations.begin(device, binding, "POST", "/v1/sessions/local/prompt", {}, turn_id="turn", nodes=nodes)
         assert fresh
         assert not store._all("SELECT * FROM router_account_cooldowns")
+    finally:
+        await nodes.close()
+        store.close()
+
+
+async def test_absolute_reset_replay_restart_and_expiry(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    store = Store(str(tmp_path / "gate.db"))
+    nodes = setup_nodes(tmp_path, store)
+    event = {"type": "rate_limit", "status": "rejected", "resetsAt": 1100, "retryAfterSeconds": 100}
+    try:
+        nodes.observe_event("0", event)
+        clock[0] = 1099
+        nodes.observe_event("0", event)
+        assert nodes.cooldown["account"] == 1100
+        assert store._one("SELECT until FROM router_account_cooldowns")["until"] == 1100
+        await nodes.close()
+        nodes = setup_nodes(tmp_path, store)
+        clock[0] = 1101
+        nodes.observe_event("0", event)
+        assert nodes.cooldown.get("account", 0) <= clock[0]
+        # A new real rejection with a later reset still blocks.
+        nodes.observe_event("0", dict(event, resetsAt=1200))
+        nodes.observe_event("0", event)
+        assert nodes.cooldown["account"] == 1200
+    finally:
+        await nodes.close()
+        store.close()
+
+
+async def test_relative_event_and_probe_are_durable_once(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    store = Store(str(tmp_path / "gate.db"))
+    nodes = setup_nodes(tmp_path, store)
+    event = {"type": "error", "kind": "rate_limit", "id": "turn", "seq": 5, "retryAfterSeconds": 60}
+    probe = {"type": "rate_limit", "status": "rejected", "retryAfterSeconds": 60}
+    try:
+        nodes.observe_event("0", event)
+        nodes.observe_event("0", probe)
+        clock[0] = 1040
+        await nodes.close()
+        nodes = setup_nodes(tmp_path, store)
+        nodes.observe_event("0", event)
+        nodes.observe_event("0", probe)
+        assert nodes.cooldown["account"] == 1060
+        # An out-of-order allowed event must not erase the later rejection.
+        nodes.observe_event("0", {"type": "rate_limit", "status": "allowed", "id": "turn", "seq": 4})
+        assert nodes.cooldown["account"] == 1060
+        clock[0] = 1061
+        nodes.observe_event("0", event)
+        nodes.observe_event("0", probe)
+        assert nodes.cooldown.get("account", 0) <= clock[0]
+        nodes.observe_event("0", dict(event, seq=6))
+        assert nodes.cooldown["account"] == 1121
+    finally:
+        await nodes.close()
+        store.close()
+
+
+async def test_absolute_rejection_not_shortened_by_terminal_error(tmp_path):
+    store = Store(str(tmp_path / "gate.db"))
+    nodes = setup_nodes(tmp_path, store)
+    try:
+        reset = time.time() + 600
+        nodes.observe_event("0", {"type": "rate_limit", "status": "rejected", "resetsAt": reset, "id": "turn", "seq": 7})
+        nodes.observe_event("0", {"type": "error", "kind": "rate_limit", "id": "turn", "seq": 8})
+        assert store._one("SELECT until FROM router_account_cooldowns")["until"] == pytest.approx(reset, abs=.1)
     finally:
         await nodes.close()
         store.close()

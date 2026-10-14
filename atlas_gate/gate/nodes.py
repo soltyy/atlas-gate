@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import time
 import ssl
@@ -88,6 +89,7 @@ class Nodes:
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
         self.cooldown: dict[str, float] = {}
+        self.quota_seen: dict[str, float] = {}
         self.store = store
         self.catalog: dict[str, list] = {}
         if store is not None:
@@ -95,6 +97,9 @@ class Nodes:
             self.catalog = {r["node_id"]: json.loads(r["models"]) for r in store._all("SELECT * FROM router_catalogs")}
             store._exec("CREATE TABLE IF NOT EXISTS router_account_cooldowns(account_group TEXT PRIMARY KEY, until REAL NOT NULL)")
             self.cooldown = {r["account_group"]: time.monotonic() + max(0, r["until"] - time.time()) for r in store._all("SELECT * FROM router_account_cooldowns WHERE until>?", (time.time(),))}
+            store._exec("CREATE TABLE IF NOT EXISTS router_quota_observations(key TEXT PRIMARY KEY, value REAL NOT NULL)")
+            self.quota_seen = {r["key"]: r["value"] for r in store._all("SELECT * FROM router_quota_observations")}
+
 
     async def close(self):
         await asyncio.gather(*(c.aclose() for c in self.clients.values()))
@@ -176,7 +181,7 @@ class Nodes:
             raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable",
                             "ответ Router не получен; повтор на другом узле запрещён", node_id=node_id) from failed
         if response.status_code == 429 and "capacity_exceeded" not in response.text:
-            self.observe_event(node_id, {"type": "rate_limit"})
+            self.observe_event(node_id, {"type": "rate_limit", "observationId": request_id or str(time.time_ns())})
         if response.status_code == 409 and "command_outcome_unknown" in response.text:
             raise GateError(503, "command_outcome_unknown", "Router ещё не подтвердил итог команды; требуется сверка", node_id=node_id)
         if 300 <= response.status_code < 400:
@@ -184,22 +189,63 @@ class Nodes:
         return response
 
     def observe_event(self, node_id, event):
-        if event.get("type") == "rate_limit" and event.get("status") in ("allowed", "allowed_warning"):
-            # Router has confirmed recovery. Remove the durable record as well,
-            # otherwise a Gate restart restores an already obsolete rejection.
-            group = self.config[node_id].account_group
-            if self.store:
-                self.store._exec("DELETE FROM router_account_cooldowns WHERE account_group=?", (group,))
-            self.cooldown.pop(group, None)
+        kind = event.get("type")
+        if kind != "rate_limit" and not (kind == "error" and event.get("kind") in ("rate_limit", "rate_limit_exceeded", "usage_limit")):
             return
-        if event.get("type") == "rate_limit" or (event.get("type") == "error" and event.get("kind") in ("rate_limit", "rate_limit_exceeded", "usage_limit")):
-            retry = event.get("retryAfterSeconds", 60)
-            retry = max(1, min(float(retry) if isinstance(retry, (int, float)) else 60, 86400))
-            group = self.config[node_id].account_group
-            self.cooldown[group] = time.monotonic() + retry
-            if self.store:
-                self.store._exec("CREATE TABLE IF NOT EXISTS router_account_cooldowns(account_group TEXT PRIMARY KEY, until REAL NOT NULL)")
-                self.store._exec("INSERT INTO router_account_cooldowns VALUES (?,?) ON CONFLICT(account_group) DO UPDATE SET until=MAX(until,excluded.until)", (group, time.time() + retry))
+        group = self.config[node_id].account_group
+        allowed = kind == "rate_limit" and event.get("status") in ("allowed", "allowed_warning")
+        reset = event.get("resetsAt")
+        reset = float(reset) if type(reset) in (int, float) and math.isfinite(reset) and reset > 0 else None
+        stream = f"event:{node_id}:{event['id']}" if event.get("id") and type(event.get("seq")) is int else None
+        key = None
+        value = 0
+        if stream:
+            value = event["seq"]
+            if self.quota_seen.get(stream, -1) >= value:
+                return
+            key = stream
+        elif not allowed and reset is None:
+            # Cached quota and HTTP/event replay must not renew a relative interval.
+            key = "relative:" + node_id + ":" + hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
+            if key in self.quota_seen:
+                return
+        now = time.time()
+        retry = event.get("retryAfterSeconds", 60)
+        retry = float(retry) if type(retry) in (int, float) and math.isfinite(retry) else 60
+        until = reset if reset is not None else now + max(1, min(retry, 86400))
+        if reset is None and not allowed:
+            until = max(until, now + max(0, self.cooldown.get(group, 0) - time.monotonic()))
+        if not allowed and until <= now:
+            # Expired historical rejection cannot create a new block or clear a newer one.
+            if key:
+                self._quota_update(group, None, key, value, change=False)
+            return
+        self._quota_update(group, 0 if allowed else until, key, value)
+
+    def _quota_update(self, group, until, key, value, *, change=True):
+        if self.store:
+            with self.store._lock:
+                db = self.store._db
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    if key:
+                        db.execute("INSERT INTO router_quota_observations VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+                    if change:
+                        if until == 0:
+                            db.execute("DELETE FROM router_account_cooldowns WHERE account_group=?", (group,))
+                        else:
+                            db.execute("INSERT INTO router_account_cooldowns VALUES (?,?) ON CONFLICT(account_group) DO UPDATE SET until=excluded.until", (group, until))
+                    db.execute("COMMIT")
+                except BaseException:
+                    db.execute("ROLLBACK")
+                    raise
+        if key:
+            self.quota_seen[key] = value
+        if change:
+            if until == 0:
+                self.cooldown.pop(group, None)
+            else:
+                self.cooldown[group] = time.monotonic() + max(0, until - time.time())
 
     async def models(self):
         await self.refresh()
