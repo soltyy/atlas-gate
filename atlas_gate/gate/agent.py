@@ -313,6 +313,58 @@ async def control_receipt(sid: str, command_id: str, request: Request,
     return result
 
 
+def _tool_result_pending(op):
+    return GateError(503, "command_outcome_unknown",
+                     "доставка результата ещё не подтверждена; повторите ту же команду",
+                     command_id=op["id"])
+
+
+async def _deliver_tool_result(state, binding, op, fresh, raw, params):
+    """Сверка ACK и доставка того же результата, без повторного запуска инструмента (#50)."""
+    import httpx
+
+    async with state.operations.delivery_lock(op["id"]):
+        op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
+        if op["state"] == "complete":
+            return _response(httpx.Response(op["status"], content=op["response"].encode()))
+        try:
+            if not fresh:
+                receipt = await state.nodes.request(binding["node_id"], "GET", "/v1/commands/" + op["id"])
+                if receipt.status_code == 200:
+                    saved = receipt.json()
+                    if (saved.get("state") == "complete" and type(saved.get("status")) is int
+                            and 100 <= saved["status"] <= 599 and "response" in saved):
+                        response = httpx.Response(saved["status"], json=saved["response"])
+                        state.operations.complete(op["id"], response)
+                        return _response(response)
+                    raise _tool_result_pending(op)
+                if receipt.status_code != 404:
+                    raise _tool_result_pending(op)
+                # 404 разрешает повтор только при прежнем boot и durable дедупликации.
+                # Для старой записи без boot свидетельств недостаточно: ничего не посылаем.
+                info = await state.nodes.probe(binding["node_id"])
+                if (not info or not op["boot_id"] or info["bootId"] != op["boot_id"]
+                        or binding["boot_id"] != op["boot_id"]
+                        or "durable_commands" not in info.get("capabilities", [])):
+                    raise _tool_result_pending(op)
+            response = await state.nodes.request(
+                binding["node_id"], "POST", op["path"], content=raw, params=params,
+                expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"])
+        except GateError as failed:
+            state.operations.unknown(op["id"])
+            log.warning("tool_result pending: command=%s node=%s code=%s cause=%s",
+                        op["id"], binding["node_id"], failed.code,
+                        type(failed.__cause__).__name__ if failed.__cause__ else "none")
+            if failed.status >= 500 or failed.code == "command_outcome_unknown":
+                raise _tool_result_pending(op) from failed
+            raise
+        except (ValueError, KeyError, TypeError, AttributeError) as failed:
+            state.operations.unknown(op["id"])
+            raise _tool_result_pending(op) from failed
+        state.operations.complete(op["id"], response)
+        return _response(response)
+
+
 async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     state = gate(request)
     binding = state.routing.get(sid, device)
@@ -339,6 +391,8 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
         if suffix == "/compact":
             await state.nodes.refresh()
         op, fresh = state.operations.begin(device, binding, method, _path(binding, suffix), json.loads(raw) if raw else {}, request_id, nodes=state.nodes)
+        if suffix == "/tool_result":
+            return await _deliver_tool_result(state, binding, op, fresh, raw, request.query_params)
         if not fresh:
             if op["state"] != "complete":
                 await state.operations.reconcile(state.nodes)

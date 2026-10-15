@@ -1,0 +1,54 @@
+{
+  "version": "0.4.3",
+  "revision": "a9620ad466bb2610669595bcdd21d088bcd8dd81",
+  "installedAtUtc": "20261015T173130Z",
+  "previous": "/opt/atlas/releases/gate-4157ef013940",
+  "current": "/opt/atlas/releases/gate-a9620ad466bb",
+  "backup": "/var/backups/atlas-gate/tool-result-20261015T173130Z",
+  "gateHealth": {
+    "ok": true,
+    "version": "0.4.3"
+  },
+  "routerBefore": {
+    "router": {
+      "nodeId": "vdska-codex",
+      "bootId": "ffa6c581-2825-46ee-8411-1bbcdd57e408",
+      "activeTurns": 0,
+      "reservedUnits": 0
+    },
+    "router-claude": {
+      "nodeId": "vdska-claude",
+      "bootId": "4d5a0ef0-f546-48ef-93db-1c39773e92b5",
+      "activeTurns": 0,
+      "reservedUnits": 0
+    }
+  },
+  "routerAfter": {
+    "router": {
+      "nodeId": "vdska-codex",
+      "bootId": "ffa6c581-2825-46ee-8411-1bbcdd57e408",
+      "activeTurns": 0,
+      "reservedUnits": 0
+    },
+    "router-claude": {
+      "nodeId": "vdska-claude",
+      "bootId": "4d5a0ef0-f546-48ef-93db-1c39773e92b5",
+      "activeTurns": 0,
+      "reservedUnits": 0
+    }
+  },
+  "countsBefore": {
+    "devices": 40,
+    "tokens": 38,
+    "profiles": 1
+  },
+  "countsAfter": {
+    "devices": 40,
+    "tokens": 38,
+    "profiles": 1
+  },
+  "windowsTests": "124 passed, 6 opt-in skipped",
+  "linuxNetworkTests": "8 passed",
+  "sourcePr": "https://github.com/soltyy/atlas-gate/pull/51",
+  "clientCompanion": "https://github.com/soltyy/atlas_harness/issues/303"
+}

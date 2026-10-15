@@ -1,14 +1,17 @@
 """Собственный журнал Gate: квота, владельцы, результат и восстановление watchers."""
+import asyncio
 import hashlib
 import json
 import time
 import uuid
+import weakref
 from .errors import GateError
 
 
 class Operations:
     def __init__(self, store):
         self.store = store
+        self.delivery_locks = weakref.WeakValueDictionary()
         store._exec("""CREATE TABLE IF NOT EXISTS router_operations(
             id TEXT PRIMARY KEY, device_id TEXT NOT NULL, session_id TEXT NOT NULL,
             turn_id TEXT, fingerprint TEXT NOT NULL, node_id TEXT NOT NULL,
@@ -21,6 +24,12 @@ class Operations:
             store._exec("ALTER TABLE router_operations ADD COLUMN units INTEGER NOT NULL DEFAULT 1")
         if "accounted" not in columns:
             store._exec("ALTER TABLE router_operations ADD COLUMN accounted INTEGER NOT NULL DEFAULT 0")
+        if "boot_id" not in columns:
+            store._exec("ALTER TABLE router_operations ADD COLUMN boot_id TEXT")
+
+    def delivery_lock(self, rid):
+        # Один Gate/SQLite; Router дополнительно защищает durable Idempotency-Key.
+        return self.delivery_locks.setdefault(rid, asyncio.Lock())
 
     def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None):
         # Ходы имеют стабильный ID протокола, поэтому даже старый клиент не запускает дубль prompt.
@@ -63,7 +72,7 @@ class Operations:
                         raise GateError(402, "quota_exceeded", "дневной лимит исчерпан")
                 db.execute("INSERT INTO router_operations(id,device_id,session_id,turn_id,fingerprint,node_id,method,path,state,quota_day,created) VALUES (?,?,?,?,?,?,?,?,'prepared',?,?)",
                     (rid, device.device_id, binding["id"], turn_id, fingerprint, binding["node_id"], method, path, quota_day, time.time()))
-                db.execute("UPDATE router_operations SET units=? WHERE id=?", (units, rid))
+                db.execute("UPDATE router_operations SET units=?,boot_id=? WHERE id=?", (units, binding.get("boot_id"), rid))
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
