@@ -32,7 +32,24 @@ class Routing:
             for name in ("request_key", "fingerprint", "response", "sdk_tools"):
                 if name not in columns:
                     store._db.execute(f"ALTER TABLE router_bindings ADD COLUMN {name} TEXT")
+            for name, kind in (("rejection_status", "INTEGER"), ("rejection_body", "BLOB")):
+                if name not in columns:
+                    store._db.execute(f"ALTER TABLE router_bindings ADD COLUMN {name} {kind}")
             store._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS router_binding_request ON router_bindings(request_key)")
+
+    @staticmethod
+    def creation_response(binding):
+        if binding["status"] == "ready" and binding["response"]:
+            return 200, binding["response"].encode()
+        if (binding["status"] == "rejected" and binding["rejection_status"] is not None
+                and binding["rejection_body"] is not None):
+            return binding["rejection_status"], bytes(binding["rejection_body"])
+        return None
+
+    def reject_creation(self, sid, status, body):
+        # Исход и ответ фиксируются одной транзакцией, в том числе пустое тело.
+        self.store._exec("UPDATE router_bindings SET status='rejected',rejection_status=?,rejection_body=? WHERE id=?",
+                         (status, body, sid))
 
     def get(self, sid, device):
         row = self.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=? AND status='ready'",
@@ -57,12 +74,14 @@ class Routing:
             if old:
                 if old["fingerprint"] != fingerprint:
                     raise GateError(409, "idempotency_conflict", "создание с другими параметрами")
-                if old["response"] and old["status"] == "ready":
-                    return 200, old["response"].encode()
-                await self.reconcile()
+                cached = self.creation_response(old)
+                if cached is not None:
+                    return cached
+                await self.reconcile(old["id"])
                 old = self.store._one("SELECT * FROM router_bindings WHERE request_key=?", (key,))
-                if old["response"] and old["status"] == "ready":
-                    return 200, old["response"].encode()
+                cached = self.creation_response(old)
+                if cached is not None:
+                    return cached
                 raise GateError(409, "command_outcome_unknown", "создание требует сверки")
             unresolved = self.store._one("SELECT id FROM router_bindings WHERE device_id=? AND status='unknown'", (device.device_id,))
             if unresolved:
@@ -149,7 +168,7 @@ class Routing:
             self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))
             raise
         if response.status_code >= 400:
-            self.store._exec("UPDATE router_bindings SET status='rejected' WHERE id=?", (sid,))
+            self.reject_creation(sid, response.status_code, response.content)
             return response.status_code, response.content
         try:
             created = response.json()
@@ -167,8 +186,14 @@ class Routing:
         self.store._exec("UPDATE router_bindings SET response=? WHERE id=?", (json.dumps(created), sid))
         return response.status_code, json.dumps(created).encode()
 
-    async def reconcile(self):
-        for binding in self.store._all("SELECT * FROM router_bindings WHERE status IN ('creating','unknown') AND request_key IS NOT NULL"):
+    async def reconcile(self, binding_id=None):
+        # Старые rejected без ответа сверяются только по явному повтору ключа.
+        # Не опрашиваем их бесконечно фоновым циклом после истечения receipt.
+        if binding_id is None:
+            bindings = self.store._all("SELECT * FROM router_bindings WHERE status IN ('creating','unknown') AND request_key IS NOT NULL")
+        else:
+            bindings = self.store._all("SELECT * FROM router_bindings WHERE id=? AND status IN ('creating','unknown','rejected') AND request_key IS NOT NULL", (binding_id,))
+        for binding in bindings:
             try:
                 await self.nodes.probe(binding["node_id"])
                 response = await self.nodes.request(binding["node_id"], "GET", "/v1/commands/create:" + binding["request_key"])
@@ -178,7 +203,10 @@ class Routing:
                 if command["state"] != "complete":
                     continue
                 if command["status"] >= 400:
-                    self.store._exec("UPDATE router_bindings SET status='rejected' WHERE id=?", (binding["id"],))
+                    if command.get("response") is None:
+                        continue  # исход/тело не восстанавливаются догадкой
+                    self.reject_creation(binding["id"], command["status"],
+                                         json.dumps(command["response"], ensure_ascii=False).encode())
                     continue
                 created = command["response"]
                 requested = SdkTools.model_validate(json.loads(binding['sdk_tools'] or '{}'))

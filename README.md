@@ -1,5 +1,7 @@
 # Atlas Gate
 
+Текущий выпуск: **0.4.4** — [безопасный replay session-create](docs/RELEASE-0.4.4.md).
+
 Самостоятельный централизованный Gate для Atlas Harness/EDT и нескольких Router.
 Claude/Codex SDK, подписочные входы и SDK история находятся на Router. На одной
 машине Gate и Router работают на разных портах; удалённые Router доступны через
