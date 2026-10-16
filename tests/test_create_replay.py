@@ -118,3 +118,24 @@ def test_nullable_columns_migrate_existing_schema_without_changing_state(tmp_pat
         assert row['status'] == 'rejected' and row['rejection_status'] is None and row['rejection_body'] is None
     finally:
         store.close()
+
+
+async def test_terminal_creation_headers_require_persisted_matching_receipt(tmp_path):
+    store, nodes = Store(str(tmp_path/'gate.db')), RejectedNodes()
+    routing = Routing(store, nodes)
+    try:
+        status, body = await routing.create(device('d'), 'sub', 'claude', {}, 10, request_id='one')
+        expected = {'X-Atlas-Create-Outcome':'rejected', 'X-Atlas-Create-Key':'one'}
+        assert routing.creation_headers(device('d'), 'one', status, body) == expected
+        assert routing.creation_headers(device('other'), 'one', status, body) == {}
+        other_org = device('d')
+        other_org.org = 'other'
+        assert routing.creation_headers(other_org, 'one', status, body) == {}
+        assert routing.creation_headers(device('d'), 'other', status, body) == {}
+        assert routing.creation_headers(device('d'), None, status, body) == {}
+        assert routing.creation_headers(device('d'), 'one', 503, body) == {}
+        assert routing.creation_headers(device('d'), 'one', status, b'changed') == {}
+        store._exec("UPDATE router_bindings SET status='unknown'")
+        assert routing.creation_headers(device('d'), 'one', status, body) == {}
+    finally:
+        store.close()

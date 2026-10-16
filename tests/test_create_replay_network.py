@@ -38,9 +38,12 @@ async def test_rejected_create_replays_after_gate_restart_and_resumes_same_histo
     payload = {'system':'test', 'tools':[], 'model':'stub-fast', 'resumeSessionId':native}
     first = await client.post('/harness/agent/sessions',json=payload,headers={'Idempotency-Key':'failed-create'})
     assert first.status_code == (503 if lost_ack else 502), first.text
+    assert first.headers.get('X-Atlas-Create-Outcome') == (None if lost_ack else 'rejected')
     retry = await client.post('/harness/agent/sessions',json=payload,headers={'Idempotency-Key':'failed-create'})
     assert retry.status_code == 502 and retry.json()['error']['code'] == 'agent_backend_error'
     assert 'thread/resume' in retry.json()['error']['message']
+    assert retry.headers['X-Atlas-Create-Outcome'] == 'rejected'
+    assert retry.headers['X-Atlas-Create-Key'] == 'failed-create'
     assert len(calls) == 1 and len(routers[0].state.registry) == 0
     assert state.store._one("SELECT COUNT(*) n FROM router_operations")["n"] == 0
     await state.close()
@@ -49,9 +52,12 @@ async def test_rejected_create_replays_after_gate_restart_and_resumes_same_histo
         await reopened.state.gate.ready.wait()
         replay = await restored.post('/harness/agent/sessions',json=payload,headers={'Idempotency-Key':'failed-create'})
         assert replay.status_code == retry.status_code and replay.content == retry.content
+        assert replay.headers['X-Atlas-Create-Outcome'] == 'rejected'
+        assert replay.headers['X-Atlas-Create-Key'] == 'failed-create'
         assert len(calls) == 1
         conflict = await restored.post('/harness/agent/sessions',json={**payload,'system':'changed'},headers={'Idempotency-Key':'failed-create'})
         assert conflict.status_code == 409 and conflict.json()['error']['code']=='idempotency_conflict'
+        assert 'X-Atlas-Create-Outcome' not in conflict.headers
         # Отдельная попытка создания, без повторного задания/инструментов.
         resumed = await restored.post('/harness/agent/sessions',json=payload,headers={'Idempotency-Key':'separate-attempt'})
         assert resumed.status_code == 200 and resumed.json()['resumed'], resumed.text
