@@ -46,6 +46,18 @@ class Routing:
             return binding["rejection_status"], bytes(binding["rejection_body"])
         return None
 
+    def creation_headers(self, device, request_id, status, body):
+        """Подтверждение только сохранённого отказа исходного запроса клиента."""
+        if not request_id or status < 400:
+            return {}
+        key = hashlib.sha256((device.device_id + ":" + request_id).encode()).hexdigest()
+        binding = self.store._one(
+            "SELECT * FROM router_bindings WHERE request_key=? AND device_id=? AND org=?",
+            (key, device.device_id, device.org))
+        if binding and binding["status"] == "rejected" and self.creation_response(binding) == (status, body):
+            return {"X-Atlas-Create-Outcome": "rejected", "X-Atlas-Create-Key": request_id}
+        return {}
+
     def reject_creation(self, sid, status, body):
         # Исход и ответ фиксируются одной транзакцией, в том числе пустое тело.
         self.store._exec("UPDATE router_bindings SET status='rejected',rejection_status=?,rejection_body=? WHERE id=?",

@@ -147,7 +147,10 @@ async def agent_session_create(body: GateAgentSessionCreate, request: Request, d
     check_data_class(state, device, request, route)
     status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE, request.headers.get("idempotency-key"), sdk_policy=org_of(state, device).sdk_tools)
     import httpx
-    return _response(httpx.Response(status, content=raw))
+    response = _response(httpx.Response(status, content=raw))
+    response.headers.update(state.routing.creation_headers(
+        device, request.headers.get("idempotency-key"), status, raw))
+    return response
 
 
 @router.post("/harness/agent/sessions/{sid}/prompt")
