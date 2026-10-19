@@ -206,6 +206,15 @@ class GateState:
                         'executor':'sdk', 'accountAccess':'unknown'}, 'files':{'supported':org.sdk_tools.files and
                         any(c.get('files', {}).get('supported') is True for c in options),
                         'executor':'router', 'invocation':'sdk', 'processing':'isolated-python-v1'}}
+                    model['sdkTools']['imageGeneration'] = {
+                        'supported': org.sdk_tools.imageGeneration and any(
+                            c.get('imageGeneration', {}).get('supported') is True for c in options),
+                        'artifacts': 'session-media-v1', 'accountAccess': 'unknown'}
+                    if route and route.kind == 'gateway':
+                        configured = next((m for m in org.models if m.route_id == route.id and m.model == model['model']), None)
+                        model['sdkTools']['imageGeneration'] = {
+                            'supported': bool(org.sdk_tools.imageGeneration and configured and configured.image_generation and route.protocol == 'openai'),
+                            'executor': 'api', 'billing': 'api', 'accountAccess': 'unknown'}
                 for w in warn:
                     log.warning("профиль %s: %s", org.id, w)
                 row = publish(self.store, self.key, org.id, body, dump(org))

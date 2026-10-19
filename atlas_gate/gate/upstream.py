@@ -71,9 +71,11 @@ def with_usage_option(raw: bytes, doc: dict[str, Any]) -> bytes:
 def openai_usage(u: dict[str, Any] | None) -> dict[str, int] | None:
     if not isinstance(u, dict):
         return None
-    details = u.get("prompt_tokens_details") if isinstance(u.get("prompt_tokens_details"), dict) else {}
+    details = u.get('input_tokens_details') or u.get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        details = {}
     cached = int(details.get("cached_tokens") or u.get("prompt_cache_hit_tokens") or 0)
-    return {"prompt": int(u.get("prompt_tokens") or 0), "completion": int(u.get("completion_tokens") or 0),
+    return {"prompt": int(u.get("prompt_tokens") or u.get('input_tokens') or 0), "completion": int(u.get("completion_tokens") or u.get('output_tokens') or 0),
             "cached": cached}
 
 
@@ -143,7 +145,7 @@ class UsageTap:
             except ValueError:
                 continue
             if self.protocol == "openai":
-                u = openai_usage(ev.get("usage"))
+                u = openai_usage(ev.get("usage") or (ev.get('response') or {}).get('usage'))
                 if u is not None:
                     self.usage = u
             elif ev.get("type") == "message_start":
@@ -186,7 +188,10 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
     def record(u: dict[str, int] | None) -> None:
         if u is None:
             return
-        cost = cost_of(org, route.id, model, u)
+        # Existing pricing has text token rates only. Do not misprice image tokens.
+        image_billing = suffix.startswith('/images/') or (suffix == '/responses' and
+            any(t.get('type') == 'image_generation' for t in (json.loads(body).get('tools') or []) if isinstance(t, dict)))
+        cost = None if image_billing else cost_of(org, route.id, model, u)
         if cost is None:
             state.warn_unpriced_once(route.id, model)
         state.store.usage_add(org=org.id, user_id=device.user_id, device_id=device.device_id, kind="gateway",

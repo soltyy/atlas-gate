@@ -471,6 +471,17 @@ async def llm_messages(request: Request, device: Device = Depends(require_device
     return await _llm_post(request, device, "anthropic", "/messages")
 
 
+@router.post('/harness/llm/v1/images/generations', openapi_extra=LLM_BODY)
+async def llm_images(request: Request, device: Device = Depends(require_device)) -> Any:
+    return await _llm_post(request, device, 'openai', '/images/generations')
+
+
+@router.post('/harness/llm/v1/responses', openapi_extra=LLM_BODY)
+async def llm_responses(request: Request, device: Device = Depends(require_device)) -> Any:
+    # Включает штатный image_generation, input_image и последовательное редактирование.
+    return await _llm_post(request, device, 'openai', '/responses')
+
+
 async def _llm_post(request: Request, device: Device, protocol: str, suffix: str) -> Response:
     state = await ready_gate(request)
     org = org_of(state, device)
@@ -481,9 +492,15 @@ async def _llm_post(request: Request, device: Device, protocol: str, suffix: str
     except Exception as bad:  # noqa: BLE001
         raise GateError(400, "invalid_request", "тело не JSON-объект с полем model") from bad
     route = pick_route(state, device, org, model, protocol)
+    image_request = suffix.startswith('/images/') or (suffix == '/responses' and
+        any(t.get('type') == 'image_generation' for t in (doc.get('tools') or []) if isinstance(t, dict)))
+    if image_request:
+        configured = next((m for m in org.models if m.route_id == route.id and m.model == model), None)
+        if not org.sdk_tools.imageGeneration or not configured or not configured.image_generation:
+            raise GateError(403, 'policy_denied', 'генерация изображений не разрешена для API-модели', reason='image_generation_disabled')
     check_data_class(state, device, request, route.id)
     check_quota(state, device, org)
-    body = with_usage_option(raw, doc) if protocol == "openai" else raw
+    body = with_usage_option(raw, doc) if protocol == "openai" and suffix == '/chat/completions' else raw
     return await proxy(request, state, device, org, route, str(model), suffix, body, doc.get("stream") is True)
 
 

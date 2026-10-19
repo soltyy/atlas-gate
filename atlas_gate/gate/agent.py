@@ -374,7 +374,9 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     # Revocation blocks further work, not observing/stopping/deleting owned work.
     control = method in ('GET', 'DELETE') or suffix == '/interrupt' or suffix.endswith('/stop')
     _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"), require_sdk=not control)
-    binding = await state.routing.recover_boot(binding)
+    media_read = method == 'GET' and (suffix == '/media' or suffix.startswith('/media/'))
+    if not media_read:
+        binding = await state.routing.recover_boot(binding)
     if tool_result is not None and tool_result.attachments:
         validate_tool_result(tool_result, await _bound_attachments(state, binding))
     raw = await request.body()
@@ -406,7 +408,7 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
             raise GateError(409, "command_outcome_unknown", "управляющая команда требует сверки")
     context_order = time.time_ns()
     try:
-        response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=raw, params=request.query_params, expected_boot=binding["boot_id"], request_id=op["id"] if op else None)
+        response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=raw, params=request.query_params, expected_boot=None if media_read else binding["boot_id"], request_id=op["id"] if op else None)
     except GateError:
         if op:
             state.operations.unknown(op["id"])
@@ -524,6 +526,23 @@ async def agent_delete(sid: str, request: Request, device: Device = Depends(requ
 @router.get('/harness/agent/sessions/{sid}/sdk-tools')
 async def agent_sdk_tools(sid: str, request: Request, device: Device = Depends(require_device)):
     return await _delegate(request, device, sid, 'GET', '/sdk-tools')
+
+
+@router.get('/harness/agent/sessions/{sid}/media')
+async def agent_media(sid: str, request: Request, device: Device = Depends(require_device)):
+    response = await _delegate(request, device, sid, 'GET', '/media')
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
+
+
+@router.get('/harness/agent/sessions/{sid}/media/{artifact_id}')
+async def agent_media_read(sid: str, artifact_id: str, request: Request, device: Device = Depends(require_device)):
+    import re
+    if not re.fullmatch(r'[a-f0-9]{64}', artifact_id):
+        raise GateError(404, 'not_found', 'изображение не найдено')
+    response = await _delegate(request, device, sid, 'GET', '/media/' + artifact_id)
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
 
 @router.post('/harness/agent/sessions/{sid}/files')
 async def agent_upload_files(sid: str, request: Request, device: Device = Depends(require_device)):

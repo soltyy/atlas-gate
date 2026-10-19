@@ -61,6 +61,8 @@ class ModelEntry(_Strict):
     context_window: int = 0
     max_output: int = 0
     enabled: bool = True
+    # Только оператор подтверждает поддержку Images/Responses image tool у API-модели.
+    image_generation: bool = False
 
 
 class Pricing(_Strict):
@@ -186,7 +188,7 @@ class OrgConfig(_Strict):
     agents: list[Agent] = Field(default_factory=list)
     mcp: list[Mcp] = Field(default_factory=list)
     builtin_tools: BuiltinTools = Field(default_factory=BuiltinTools)
-    sdk_tools: SdkTools = Field(default_factory=lambda: SdkTools(webSearch='live', files=True))
+    sdk_tools: SdkTools = Field(default_factory=lambda: SdkTools(webSearch='live', files=True, imageGeneration=True))
     overrides: Overrides = Field(default_factory=Overrides)
     feature_flags: dict[str, Any] = Field(default_factory=dict)
     min_app_version: str = "0.0.0"
