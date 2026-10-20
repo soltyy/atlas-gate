@@ -167,34 +167,15 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     operation, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/prompt"), body.model_dump(),
         request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes)
-    if not fresh:
-        if operation["state"] != "complete":
-            await state.operations.reconcile(state.nodes)
-            operation = state.store._one("SELECT * FROM router_operations WHERE id=?", (operation["id"],))
-        if operation["state"] != "complete":
-            raise GateError(409, "command_outcome_unknown", "ход требует сверки; повторное исполнение запрещено")
-        import httpx
-        response = httpx.Response(operation["status"], content=operation["response"].encode())
-        if response.status_code >= 400 or mode == "async":
-            return _response(response)
-    else:
-        try:
-            response = await state.nodes.request(binding["node_id"], "POST", _path(binding, "/prompt"), content=body.model_dump_json().encode(), params={"mode": "async"}, expected_boot=binding["boot_id"], request_id=operation["id"])
-        except GateError as failed:
-            if failed.code == "node_unavailable":
-                import httpx
-                state.operations.complete(operation["id"], httpx.Response(503, json={"error": {"code": failed.code, "message": failed.message}}))
-            else:
-                state.operations.unknown(operation["id"])
-            raise
-        state.operations.complete(operation["id"], response)
+    response = await _deliver_operation(state, binding, operation, fresh,
+                                       body.model_dump_json().encode(), {"mode": "async"})
     if response.status_code >= 400:
-        return _response(response)
+        return _operation_response(response, operation)
     task = asyncio.create_task(_watch(state, binding, body.id, device))
     state.watchers.add(task)
     task.add_done_callback(state.watchers.discard)
     if mode == "async":
-        return _response(response)
+        return _operation_response(response, operation)
 
     async def stream():
         after = 0
@@ -236,20 +217,26 @@ async def _control_receipt(state, op):
         try:
             response = await state.nodes.request(op["node_id"], "GET", "/v1/commands/" + op["id"])
             if response.status_code == 200:
-                current["receiptState"] = response.json().get("state", "unknown")
-            if response.status_code == 200 and response.json().get("state") == "complete":
-                import httpx
+                from .receipts import completed_response
                 saved = response.json()
-                state.operations.complete(op["id"], httpx.Response(saved["status"], json=saved["response"]))
-                current = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
-        except (GateError, ValueError, KeyError):
+                current['receiptState'] = saved.get('state', 'unknown') if isinstance(saved, dict) else 'malformed'
+                confirmed = completed_response(saved, op['id'])
+                if confirmed is not None:
+                    state.operations.complete(op['id'], confirmed)
+                    current = state.store._one('SELECT * FROM router_operations WHERE id=?', (op['id'],))
+                elif current['receiptState'] == 'complete':
+                    current['receiptState'] = 'malformed'
+            elif response.status_code == 404:
+                current['receiptState'] = 'missing'
+        except (GateError, ValueError, KeyError, TypeError):
             pass
     return current
 
 
 def _pending_control(op):
     return JSONResponse({"commandId": op["id"], "state": "pending",
-                         "sessionId": op["session_id"]}, status_code=202,
+                         "sessionId": op["session_id"],
+                         "receiptState": op.get('receiptState', 'unconfirmed')}, status_code=202,
                         headers={"Retry-After": "1"})
 
 
@@ -301,45 +288,61 @@ async def control_receipt(sid: str, command_id: str, request: Request,
     binding = state.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=?", (sid, device.device_id, device.org))
     if binding is None:
         raise GateError(404, "not_found", "сессия не найдена")
-    op = state.store._one("SELECT * FROM router_operations WHERE id=? AND device_id=? AND session_id=? AND path LIKE '%/compact'",
+    _policy(state, device, binding, request, require_model=False, require_sdk=False)
+    if state.nodes.revoked(binding['node_id']):
+        raise GateError(503, 'node_unavailable', 'Router отозван')
+    op = state.store._one("SELECT * FROM router_operations WHERE id=? AND device_id=? AND session_id=?",
                          (command_id, device.device_id, sid))
     if op is None:
         raise GateError(404, "not_found", "команда не найдена")
     current = await _control_receipt(state, op)
     if current["state"] != "complete":
-        if current.get("receiptState") == "unknown":
-            raise GateError(503, "command_outcome_unknown", "Router перезапущен; требуется сверка результата сжатия", command_id=op["id"])
-        return _pending_control(op)
+        if current.get("receiptState") in ('unknown', 'expired', 'malformed'):
+            raise GateError(503, "command_outcome_unknown", "результат команды не подтверждён; требуется сверка",
+                            command_id=op["id"], receiptState=current['receiptState'])
+        return _pending_control(current)
     import httpx
-    result = _response(httpx.Response(current["status"], content=current["response"].encode()))
-    result.headers["X-Atlas-Command-State"] = "complete"
+    return _operation_response(httpx.Response(current["status"], content=current["response"].encode()), current)
+
+
+@router.get('/harness/agent/sessions/{sid}/commands')
+async def receipt_by_key(sid: str, request: Request, requestId: str,
+                         device: Device = Depends(require_device)):
+    """Lost ACK: клиент знает исходный Idempotency-Key, но ещё не знает commandId."""
+    state = gate(request)
+    return await control_receipt(sid, state.operations.key(device, requestId), request, device)
+
+
+def _operation_response(response, op):
+    result = _response(response)
+    result.headers['X-Atlas-Command-State'] = 'complete'
+    result.headers['X-Atlas-Command-Id'] = op['id']
     return result
 
 
 def _tool_result_pending(op):
     return GateError(503, "command_outcome_unknown",
-                     "доставка результата ещё не подтверждена; повторите ту же команду",
+                     "доставка команды ещё не подтверждена; требуется сверка той же операции",
                      command_id=op["id"])
 
 
-async def _deliver_tool_result(state, binding, op, fresh, raw, params):
-    """Сверка ACK и доставка того же результата, без повторного запуска инструмента (#50)."""
+async def _deliver_operation(state, binding, op, fresh, raw, params):
+    """Сверка ACK и повтор только с доказательством прежнего boot + durable dedup (#50/#60)."""
     import httpx
 
     async with state.operations.delivery_lock(op["id"]):
         op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
         if op["state"] == "complete":
-            return _response(httpx.Response(op["status"], content=op["response"].encode()))
+            return httpx.Response(op["status"], content=op["response"].encode())
         try:
             if not fresh:
                 receipt = await state.nodes.request(binding["node_id"], "GET", "/v1/commands/" + op["id"])
                 if receipt.status_code == 200:
-                    saved = receipt.json()
-                    if (saved.get("state") == "complete" and type(saved.get("status")) is int
-                            and 100 <= saved["status"] <= 599 and "response" in saved):
-                        response = httpx.Response(saved["status"], json=saved["response"])
+                    from .receipts import completed_response
+                    response = completed_response(receipt.json(), op['id'])
+                    if response is not None:
                         state.operations.complete(op["id"], response)
-                        return _response(response)
+                        return response
                     raise _tool_result_pending(op)
                 if receipt.status_code != 404:
                     raise _tool_result_pending(op)
@@ -351,11 +354,18 @@ async def _deliver_tool_result(state, binding, op, fresh, raw, params):
                         or "durable_commands" not in info.get("capabilities", [])):
                     raise _tool_result_pending(op)
             response = await state.nodes.request(
-                binding["node_id"], "POST", op["path"], content=raw, params=params,
+                binding["node_id"], op['method'], op["path"], content=raw, params=params,
                 expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"])
         except GateError as failed:
+            if fresh and failed.code == 'node_unavailable':
+                # Nodes проверил identity/доступность ДО отправки. Это известный
+                # отказ доставки, в отличие от потерянного ответа принятой команды.
+                response = httpx.Response(503, json={'error':{
+                    'code':failed.code, 'message':failed.message, 'deliveryState':'not_sent'}})
+                state.operations.complete(op['id'], response)
+                return response
             state.operations.unknown(op["id"])
-            log.warning("tool_result pending: command=%s node=%s code=%s cause=%s",
+            log.warning("command pending: command=%s node=%s code=%s cause=%s",
                         op["id"], binding["node_id"], failed.code,
                         type(failed.__cause__).__name__ if failed.__cause__ else "none")
             if failed.status >= 500 or failed.code == "command_outcome_unknown":
@@ -365,7 +375,7 @@ async def _deliver_tool_result(state, binding, op, fresh, raw, params):
             state.operations.unknown(op["id"])
             raise _tool_result_pending(op) from failed
         state.operations.complete(op["id"], response)
-        return _response(response)
+        return response
 
 
 async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
@@ -391,28 +401,12 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
                 raise GateError(409, "compact_pending", "сжатие ещё выполняется; закрытие сессии требует явной отмены")
     op = None
     if method != "GET":
-        if suffix == "/compact":
-            await state.nodes.refresh()
         op, fresh = state.operations.begin(device, binding, method, _path(binding, suffix), json.loads(raw) if raw else {}, request_id, nodes=state.nodes)
-        if suffix == "/tool_result":
-            return await _deliver_tool_result(state, binding, op, fresh, raw, request.query_params)
-        if not fresh:
-            if op["state"] != "complete":
-                await state.operations.reconcile(state.nodes)
-                op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
-            if op["state"] == "complete":
-                import httpx
-                return _response(httpx.Response(op["status"], content=op["response"].encode()))
-            raise GateError(409, "command_outcome_unknown", "управляющая команда требует сверки")
+        response = await _deliver_operation(state, binding, op, fresh, raw, request.query_params)
+        return _operation_response(response, op)
     context_order = time.time_ns()
-    try:
-        response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix), content=raw, params=request.query_params, expected_boot=binding["boot_id"], request_id=op["id"] if op else None)
-    except GateError:
-        if op:
-            state.operations.unknown(op["id"])
-        raise
-    if op:
-        state.operations.complete(op["id"], response)
+    response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix),
+                                         content=raw, params=request.query_params, expected_boot=binding["boot_id"])
     if method == "GET" and suffix == "/context" and response.status_code == 200:
         if state.context_windows.observe(binding,response.json(),context_order):
             await state.publish_contexts()
