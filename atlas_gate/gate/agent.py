@@ -59,8 +59,7 @@ def _policy(state, device, binding, request, require_model=True, require_sdk=Tru
         raise GateError(403, 'policy_denied', 'SDK tools больше не разрешены организацией')
     check_data_class(state, device, request, binding["route"])
     node = state.nodes.config.get(binding["node_id"])
-    if (node is None or not node.enabled or state.nodes.revoked(binding['node_id'])
-            or device.org not in node.orgs or binding["route"] not in node.routes):
+    if node is None or not node.enabled or device.org not in node.orgs or binding["route"] not in node.routes:
         raise GateError(403, "policy_denied", "узел больше не разрешён организации")
 
 
@@ -290,6 +289,8 @@ async def control_receipt(sid: str, command_id: str, request: Request,
     if binding is None:
         raise GateError(404, "not_found", "сессия не найдена")
     _policy(state, device, binding, request, require_model=False, require_sdk=False)
+    if state.nodes.revoked(binding['node_id']):
+        raise GateError(503, 'node_unavailable', 'Router отозван')
     op = state.store._one("SELECT * FROM router_operations WHERE id=? AND device_id=? AND session_id=?",
                          (command_id, device.device_id, sid))
     if op is None:
