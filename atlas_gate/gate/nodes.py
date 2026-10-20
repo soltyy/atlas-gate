@@ -9,7 +9,7 @@ import os
 import time
 import ssl
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 from typing import Literal
 import httpx
 from pydantic import BaseModel, Field, model_validator
@@ -186,6 +186,22 @@ class Nodes:
             raise GateError(503, "command_outcome_unknown", "Router ещё не подтвердил итог команды; требуется сверка", node_id=node_id)
         if 300 <= response.status_code < 400:
             raise GateError(502, "node_protocol_error", "redirect Router запрещён")
+        if method != 'GET' and request_id and response.status_code >= 500:
+            # 5xx может принадлежать relay, а команда уже принята Router.
+            # Только его дисковая квитанция подтверждает итог, включая настоящий 5xx.
+            from .receipts import completed_response
+            confirmed = None
+            try:
+                receipt = await self.request(node_id, 'GET', '/v1/commands/' + quote(request_id, safe=''))
+                if receipt.status_code == 200:
+                    confirmed = completed_response(receipt.json(), request_id)
+            except (GateError, ValueError, TypeError):
+                pass
+            if confirmed is None:
+                raise GateError(503, 'command_outcome_unknown',
+                                'ответ канала не подтверждён журналом Router; требуется сверка',
+                                command_id=request_id)
+            return confirmed
         return response
 
     def observe_event(self, node_id, event):

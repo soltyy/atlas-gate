@@ -31,12 +31,16 @@ class Operations:
         # Один Gate/SQLite; Router дополнительно защищает durable Idempotency-Key.
         return self.delivery_locks.setdefault(rid, asyncio.Lock())
 
+    @staticmethod
+    def key(device, request_id):
+        if not request_id or len(request_id) > 200:
+            raise GateError(422, 'invalid_request', 'request_id должен содержать 1..200 знаков')
+        return hashlib.sha256((device.device_id + ':' + request_id).encode()).hexdigest()
+
     def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None):
         # Ходы имеют стабильный ID протокола, поэтому даже старый клиент не запускает дубль prompt.
         rid = request_id or (f"prompt:{binding['id']}:{turn_id}" if turn_id else str(uuid.uuid4()))
-        if len(rid) > 200:
-            raise GateError(422, "invalid_request", "слишком длинный request_id")
-        rid = hashlib.sha256((device.device_id + ":" + rid).encode()).hexdigest()
+        rid = self.key(device, rid)
         fingerprint = hashlib.sha256((method + path + json.dumps(body, sort_keys=True)).encode()).hexdigest()
         old = self.store._one("SELECT * FROM router_operations WHERE id=?", (rid,))
         if old:
@@ -96,7 +100,7 @@ class Operations:
                 raise
 
     def unknown(self, rid):
-        self.store._exec("UPDATE router_operations SET state='unknown' WHERE id=?", (rid,))
+        self.store._exec("UPDATE router_operations SET state='unknown' WHERE id=? AND state!='complete'", (rid,))
 
     async def reconcile(self, nodes):
         rows = self.store._all("SELECT * FROM router_operations WHERE state IN ('prepared','unknown')")
@@ -107,9 +111,9 @@ class Operations:
                 response = await nodes.request(row["node_id"], "GET", "/v1/commands/" + row["id"])
                 if response.status_code != 200:
                     continue
-                saved = response.json()
-                if saved["state"] == "complete":
-                    import httpx
-                    self.complete(row["id"], httpx.Response(saved["status"], json=saved["response"]))
-            except GateError:
+                from .receipts import completed_response
+                confirmed = completed_response(response.json(), row['id'])
+                if confirmed is not None:
+                    self.complete(row['id'], confirmed)
+            except (GateError, ValueError, KeyError, TypeError):
                 continue
