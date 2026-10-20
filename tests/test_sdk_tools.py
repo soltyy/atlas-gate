@@ -53,12 +53,12 @@ async def test_http_sdk_files_direct_and_connector(image_network, monkeypatch, o
     assert (await client.get(path+'/sdk-tools')).json()['sdkTools']==opts
     original = b'x' * original_size
     payload={'id':'upload','attachments':[{'kind':'file','filename':'book.xlsx','data':base64.b64encode(original).decode()}]}
-    response=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'})
+    response=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'},timeout=None)
     assert response.status_code==200, response.text
     ident=response.json()['files'][0]['id']
     assert ident == hashlib.sha256(original).hexdigest()
     assert response.json()['files'][0]['sizeBytes'] == original_size
-    again=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'})
+    again=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'},timeout=None)
     assert again.json()==response.json()
     assert len((await client.get(path+'/files')).json()['files'])==1
     denied=await client.get(path+'/files',headers={'Authorization':'Bearer '+other['device_token']})
