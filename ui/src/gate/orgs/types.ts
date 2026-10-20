@@ -24,6 +24,7 @@ export interface ModelEntry {
   context_window: number
   max_output: number
   enabled: boolean
+  image_generation?: boolean
 }
 
 export interface ModelContract {
