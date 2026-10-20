@@ -1,6 +1,6 @@
 # Atlas Gate
 
-Текущий выпуск: **0.4.4** — [безопасный replay session-create](docs/RELEASE-0.4.4.md).
+Текущий выпуск: **0.4.7** — [безопасные повторы и квитанции](docs/RELEASE-0.4.7.md).
 
 Самостоятельный централизованный Gate для Atlas Harness/EDT и нескольких Router.
 Claude/Codex SDK, подписочные входы и SDK история находятся на Router. На одной
@@ -20,6 +20,8 @@ resume/tools/interrupt/compact/events идут на сохранённый node.
 
 - [Реализация и задачи](docs/IMPLEMENTATION.md)
 - [Открытый каталог и настройки харнеса](docs/HARNESS-DISCOVERY.md)
+- [Повторы, квитанции и неизвестный исход](docs/RETRY-RECEIPTS.md)
+- [Поставка Gate 0.4.7 и Router 0.8.4 на VDS](docs/RETRY60-DEPLOYMENT.md)
 - [Рекон и первичные источники](docs/RECON-STAGES.md)
 - [Установка, cohost, mTLS и NAT](docs/DEPLOYMENT.md)
 - [Оба продукта на новом сервере](docs/PARALLEL-DEPLOYMENT.md)
