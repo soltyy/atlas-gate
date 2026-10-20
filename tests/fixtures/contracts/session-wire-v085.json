@@ -1,0 +1,219 @@
+{
+  "source": "Read-only production Gate 0.4.8 / Router 0.8.5, 2026-10-20; EDT #209. Identifiers and timestamp replaced; no conversation data. Router OpenAPI is identical for Codex and Claude.",
+  "routerSchemas": {
+    "SessionCreated": {
+      "properties": {
+        "sdkTools": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/SdkTools"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toolResultImages": {
+          "type": "boolean",
+          "title": "Toolresultimages",
+          "default": false
+        },
+        "configuredMaxOutputTokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Configuredmaxoutputtokens"
+        },
+        "id": {
+          "type": "string",
+          "title": "Id"
+        },
+        "tools": {
+          "type": "integer",
+          "title": "Tools"
+        },
+        "agents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "title": "Agents"
+        },
+        "agentsRefused": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "title": "Agentsrefused"
+        },
+        "resumed": {
+          "type": "boolean",
+          "title": "Resumed",
+          "default": false
+        },
+        "resumeError": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Resumeerror"
+        }
+      },
+      "type": "object",
+      "required": [
+        "id",
+        "tools"
+      ],
+      "title": "SessionCreated"
+    },
+    "SessionInfo": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "title": "Id"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model"
+        },
+        "tools": {
+          "type": "integer",
+          "title": "Tools"
+        },
+        "turns": {
+          "type": "integer",
+          "title": "Turns"
+        },
+        "busy": {
+          "type": "boolean",
+          "title": "Busy"
+        },
+        "createdAt": {
+          "type": "string",
+          "title": "Createdat"
+        },
+        "sdkSessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Sdksessionid"
+        },
+        "resumed": {
+          "type": "boolean",
+          "title": "Resumed",
+          "default": false
+        }
+      },
+      "type": "object",
+      "required": [
+        "id",
+        "model",
+        "tools",
+        "turns",
+        "busy",
+        "createdAt"
+      ],
+      "title": "SessionInfo"
+    },
+    "SessionList": {
+      "properties": {
+        "sessions": {
+          "items": {
+            "$ref": "#/components/schemas/SessionInfo"
+          },
+          "type": "array",
+          "title": "Sessions"
+        }
+      },
+      "type": "object",
+      "required": [
+        "sessions"
+      ],
+      "title": "SessionList"
+    },
+    "SdkTools": {
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1,
+          "title": "Version",
+          "default": 1
+        },
+        "webSearch": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "cached",
+            "live"
+          ],
+          "title": "Websearch",
+          "default": "disabled"
+        },
+        "files": {
+          "type": "boolean",
+          "title": "Files",
+          "default": false
+        },
+        "imageGeneration": {
+          "type": "boolean",
+          "title": "Imagegeneration",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "title": "SdkTools"
+    }
+  },
+  "gateCreateAck": {
+    "sdkTools": {
+      "version": 1,
+      "webSearch": "live",
+      "files": true,
+      "imageGeneration": true
+    },
+    "toolResultImages": false,
+    "configuredMaxOutputTokens": null,
+    "id": "public-session",
+    "tools": 186,
+    "agents": [
+      "analyst",
+      "executor",
+      "controller"
+    ],
+    "agentsRefused": [],
+    "resumed": true,
+    "resumeError": null
+  },
+  "routerSessionInfo": {
+    "id": "router-local-session",
+    "model": "gpt-6-astra",
+    "tools": 186,
+    "turns": 0,
+    "busy": false,
+    "createdAt": "2026-10-20T00:00:00+00:00",
+    "sdkSessionId": "router-private-history",
+    "resumed": true
+  }
+}

@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi import Depends, Request
 from fastapi.responses import Response, JSONResponse
 from sse_starlette.sse import EventSourceResponse
-from ..schemas import CompactRequest, DocumentUploadRequest, PromptRequest, SteerRequest, ToolResultRequest, ToolsUpdate
+from ..schemas import CompactRequest, DocumentUploadRequest, PromptRequest, SessionCreated, SessionList, SteerRequest, ToolResultRequest, ToolsUpdate
 from .api import check_data_class, gate, org_of, ready_gate, require_device, router
 from .errors import GateError, STATUS_CODES
 from .schemas import GateAgentSessionCreate
@@ -114,7 +114,7 @@ async def _watch(state, binding, turn, device):
         log.warning("usage watcher %s остановлен: %s", turn, failed.code)
 
 
-@router.get("/harness/agent/sessions")
+@router.get("/harness/agent/sessions", response_model=SessionList, response_model_exclude_unset=True)
 async def agent_sessions(request: Request, device: Device = Depends(require_device)):
     state, result, cache = gate(request), [], {}
     for binding in state.routing.list(device):
@@ -135,7 +135,9 @@ async def agent_sessions(request: Request, device: Device = Depends(require_devi
     return {"sessions": result}
 
 
-@router.post("/harness/agent/sessions")
+@router.post("/harness/agent/sessions", response_model=SessionCreated,
+             description="Create ACK confirms resume only when resumed is explicitly true. "
+                         "sdkSessionId is returned by session listing/events, not by creation.")
 async def agent_session_create(body: GateAgentSessionCreate, request: Request, device: Device = Depends(require_device)):
     state = await ready_gate(request)
     if body.sdkTools is not None and not permitted(body.sdkTools, org_of(state, device).sdk_tools):
@@ -150,6 +152,8 @@ async def agent_session_create(body: GateAgentSessionCreate, request: Request, d
     response = _response(httpx.Response(status, content=raw))
     response.headers.update(state.routing.creation_headers(
         device, request.headers.get("idempotency-key"), status, raw))
+    # Keep the exact persisted success/rejection bytes and headers on replay.
+    # Response intentionally bypasses response_model serialization/default injection.
     return response
 
 

@@ -69,6 +69,12 @@ class SessionCreate(BaseModel):
 
 
 class SessionCreated(BaseModel):
+    """Create ACK. SDK history identity is obtained from SessionInfo/session events.
+
+    Extra response fields are additive; defaults are not proof of successful resume.
+    """
+
+    model_config = ConfigDict(extra="allow")
     sdkTools: SdkTools | None = None
     toolResultImages: bool = False
     # Configured transport value, not evidence of provider enforcement.
@@ -80,24 +86,37 @@ class SessionCreated(BaseModel):
     agentsRefused: list[str] = Field(default_factory=list)
     # Возобновлена ли история беседы у SDK (issue #126 харнеса). False без `resumeSessionId` —
     # обычная новая сессия; False С ним — возобновить не вышло, причина в `resumeError`.
-    resumed: bool = False
+    resumed: StrictBool = Field(default=False, description="Only explicit true confirms SDK history resume; absence is not confirmation.")
     resumeError: str | None = None
 
 
 class SessionInfo(BaseModel):
+    """Active session. sdkSessionId is a Gate-scoped alias, never a Router SDK id."""
+
+    model_config = ConfigDict(extra="allow")
     id: str
     model: str | None
     tools: int
     turns: int
     busy: bool
     createdAt: str
-    # Идентификатор сессии вендорского SDK и признак возобновления (issue #126 харнеса).
-    sdkSessionId: str | None = None
-    resumed: bool = False
+    sdkSessionId: str | None = Field(default=None, description="Opaque Gate-scoped history alias for resumeSessionId; not a provider SDK id.")
+    resumed: StrictBool = False
+
+
+class SuspendedSessionInfo(BaseModel):
+    """Known binding without live Router information; no invented counters/flags."""
+
+    model_config = ConfigDict(extra="allow")
+    id: str
+    model: str | None
+    state: Literal["session_suspended"]
+    sdkSessionId: str | None = Field(default=None, description="Gate-scoped history alias when known, otherwise null.")
 
 
 class SessionList(BaseModel):
-    sessions: list[SessionInfo]
+    model_config = ConfigDict(extra="allow")
+    sessions: list[SessionInfo | SuspendedSessionInfo]
 
 
 class Attachment(BaseModel):
