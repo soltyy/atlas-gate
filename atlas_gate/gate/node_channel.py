@@ -5,6 +5,10 @@ import base64
 import json
 import time
 import uuid
+import os
+import tempfile
+import logging
+from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -18,6 +22,9 @@ RESULT_LIMIT = 96 * 1024 * 1024
 class Channel:
     def __init__(self, store):
         self.store = store
+        database = store._one('PRAGMA database_list')['file']
+        self._temporary_payloads = tempfile.TemporaryDirectory(prefix='atlas-node-payloads-') if not database else None
+        self.payloads = Path(database + '.node-payloads') if database else Path(self._temporary_payloads.name)
         self.last_poll = {}
         store._exec("""CREATE TABLE IF NOT EXISTS node_work(id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
             method TEXT NOT NULL, path TEXT NOT NULL, request TEXT NOT NULL,
@@ -25,8 +32,14 @@ class Channel:
             status INTEGER, response BLOB, created REAL NOT NULL)""")
         store._exec("CREATE INDEX IF NOT EXISTS node_work_pending ON node_work(node_id,state,created)")
 
+    def discard_payload(self, rid):
+        try: (self.payloads / (rid + '.bin')).unlink(missing_ok=True)
+        except OSError:
+            logging.getLogger('atlas_gate').warning('Не удалось очистить временное тело завершённой команды')
+
     async def request(self, node_id, method, path, *, content=b"", params=None, headers=None):
-        if len(content) > BODY_LIMIT:
+        original_upload = method == 'POST' and path.endswith('/files')
+        if not original_upload and len(content) > BODY_LIMIT:
             raise GateError(413, "payload_too_large", "команда превышает предел канала")
         if method != "GET" and not (headers or {}).get("Idempotency-Key"):
             raise GateError(422, "invalid_request", "изменяющая команда требует request_id")
@@ -34,10 +47,28 @@ class Channel:
         if count >= 64:
             raise GateError(429, "capacity_exceeded", "очередь канала заполнена")
         used = self.store._one("SELECT COALESCE(SUM(length(request)),0) n FROM node_work WHERE node_id=? AND state IN ('queued','leased') AND deadline>?", (node_id, time.time()))["n"]
-        if used + len(content) * 4 // 3 + 2048 > 256 * 1024 * 1024:
+        if not original_upload and used + len(content) * 4 // 3 + 2048 > 256 * 1024 * 1024:
             raise GateError(429, "capacity_exceeded", "предел объёма очереди канала")
         rid = str(uuid.uuid4())
-        payload = json.dumps({"headers": headers or {}, "params": list(params.multi_items()) if hasattr(params, "multi_items") else params, "body": base64.b64encode(content).decode()})
+        envelope = {"headers": headers or {}, "params": list(params.multi_items()) if hasattr(params, "multi_items") else params}
+        if original_upload:
+            # Large originals must not turn every queue/lease probe into a scan
+            # of a multi-megabyte SQLite record. Keep only small metadata here.
+            temporary = None
+            try:
+                self.payloads.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with tempfile.NamedTemporaryFile(dir=self.payloads, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(content)
+                    stream.flush(); os.fsync(stream.fileno())
+                temporary.replace(self.payloads / (rid + '.bin'))
+            except OSError as failed:
+                if temporary is not None: temporary.unlink(missing_ok=True)
+                raise GateError(503, 'node_unavailable', 'Не удалось сохранить файловую команду до отправки Router') from failed
+            envelope['body_file'] = rid
+        else:
+            envelope['body'] = base64.b64encode(content).decode()
+        payload = json.dumps(envelope)
         now = time.time()
         self.store._exec("INSERT INTO node_work(id,node_id,method,path,request,state,deadline,created) VALUES (?,?,?,?,?,'queued',?,?)", (rid, node_id, method, path, payload, now + 70, now))
         while time.time() < now + 70:
@@ -61,6 +92,7 @@ class Channel:
                 db.execute("BEGIN IMMEDIATE")
                 try:
                     db.execute("UPDATE node_work SET state='expired' WHERE deadline<? AND state IN ('queued','leased')", (now,))
+                    obsolete = db.execute("SELECT id FROM node_work WHERE created<? AND state IN ('complete','expired')", (now - 86400,)).fetchall()
                     db.execute("DELETE FROM node_work WHERE created<? AND state IN ('complete','expired')", (now - 86400,))
                     row = db.execute("SELECT * FROM node_work WHERE node_id=? AND deadline>? AND (state='queued' OR (state='leased' AND lease<?)) ORDER BY created LIMIT 1", (node_id, now, now)).fetchone()
                     if row:
@@ -69,8 +101,16 @@ class Channel:
                 except BaseException:
                     db.execute("ROLLBACK")
                     raise
+            for old in obsolete: self.discard_payload(old['id'])
             if row:
-                return dict(json.loads(row["request"]), id=row["id"], method=row["method"], path=row["path"], deadline=row["deadline"])
+                envelope = json.loads(row['request'])
+                if 'body_file' in envelope:
+                    if envelope.pop('body_file') != row['id']:
+                        raise GateError(503, 'command_outcome_unknown', 'Повреждена привязка файловой команды')
+                    try: envelope['body'] = base64.b64encode((self.payloads / (row['id'] + '.bin')).read_bytes()).decode()
+                    except OSError as failed:
+                        raise GateError(503, 'command_outcome_unknown', 'Тело файловой команды недоступно; требуется сверка Router') from failed
+                return dict(envelope, id=row["id"], method=row["method"], path=row["path"], deadline=row["deadline"])
             if time.monotonic() >= end:
                 return None
             await asyncio.sleep(0.05)
@@ -86,6 +126,7 @@ class Channel:
         if row["state"] != "leased" or row["deadline"] < time.time():
             raise GateError(410, "expired", "срок команды истёк; сверить журнал Router")
         self.store._exec("UPDATE node_work SET state='complete',status=?,response=? WHERE id=?", (status, body, rid))
+        self.discard_payload(rid)
 
 
 class ChannelClient:
