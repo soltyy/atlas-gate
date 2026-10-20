@@ -1,5 +1,6 @@
 import base64
 import json
+import hashlib
 import httpx
 import pytest
 from atlas_gate.sdk_tools import SdkTools, permitted
@@ -30,7 +31,8 @@ async def test_capability_routing_requires_matching_ack(tmp_path):
     store.close()
 
 
-async def test_http_sdk_files_direct_and_connector(image_network, monkeypatch):
+@pytest.mark.parametrize('original_size', [20, 33 * 1024 * 1024])
+async def test_http_sdk_files_direct_and_connector(image_network, monkeypatch, original_size):
     client, app, routers, settings, creds, other = image_network
     async def logged_in(): return {'loggedIn':True}
     for router in routers:
@@ -49,11 +51,14 @@ async def test_http_sdk_files_direct_and_connector(image_network, monkeypatch):
     assert response.json()['sdkTools']==opts
     sid=response.json()['id']; path='/harness/agent/sessions/'+sid
     assert (await client.get(path+'/sdk-tools')).json()['sdkTools']==opts
-    payload={'id':'upload','attachments':[{'kind':'file','filename':'book.xlsx','data':base64.b64encode(b'original excel bytes').decode()}]}
-    response=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'})
+    original = b'x' * original_size
+    payload={'id':'upload','attachments':[{'kind':'file','filename':'book.xlsx','data':base64.b64encode(original).decode()}]}
+    response=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'},timeout=None)
     assert response.status_code==200, response.text
     ident=response.json()['files'][0]['id']
-    again=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'})
+    assert ident == hashlib.sha256(original).hexdigest()
+    assert response.json()['files'][0]['sizeBytes'] == original_size
+    again=await client.post(path+'/files',json=payload,headers={'Idempotency-Key':'upload-once'},timeout=None)
     assert again.json()==response.json()
     assert len((await client.get(path+'/files')).json()['files'])==1
     denied=await client.get(path+'/files',headers={'Authorization':'Bearer '+other['device_token']})

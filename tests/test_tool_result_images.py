@@ -64,7 +64,8 @@ async def image_network(network, request):
         for node_id, node in state.nodes.config.items():
             connector = object.__new__(Connector)
             connector.identity = {'nodeId': node_id}
-            connector.router = httpx.AsyncClient(base_url=node.url, headers={'X-Atlas-Token': 'test-router'})
+            connector.router = httpx.AsyncClient(base_url=node.url, headers={'X-Atlas-Token': 'test-router'},
+                                                timeout=httpx.Timeout(65, connect=5))
             connections.append(connector.router)
             await state.nodes.clients[node_id].aclose()
             state.nodes.clients[node_id] = ChannelClient(state.channel, node_id)
