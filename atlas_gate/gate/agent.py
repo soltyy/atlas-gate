@@ -357,6 +357,13 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
                 binding["node_id"], op['method'], op["path"], content=raw, params=params,
                 expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"])
         except GateError as failed:
+            if fresh and failed.code == 'node_unavailable':
+                # Nodes проверил identity/доступность ДО отправки. Это известный
+                # отказ доставки, в отличие от потерянного ответа принятой команды.
+                response = httpx.Response(503, json={'error':{
+                    'code':failed.code, 'message':failed.message, 'deliveryState':'not_sent'}})
+                state.operations.complete(op['id'], response)
+                return response
             state.operations.unknown(op["id"])
             log.warning("command pending: command=%s node=%s code=%s cause=%s",
                         op["id"], binding["node_id"], failed.code,

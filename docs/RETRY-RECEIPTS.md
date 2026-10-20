@@ -81,7 +81,7 @@ HTTP 202, Retry-After:1. `pending` означает наблюдение опе�
    и backoff/pending — Harness #328/#329.
 2. Gate сохраняет prepared до отправки. При неоднозначной доставке хранит unknown.
    Повтор сначала читает Router `/v1/commands/{id}` на том же узле. Валидный complete
-   (state/status/response/requestId) фиксируется в Gate; started/unknown/expired,
+   (state/status/response и requestId, если поле присутствует) фиксируется в Gate; started/unknown/expired,
    чужой requestId и повреждённые ответы никогда не разрешают исполнение.
 3. Для сессионных изменений повтор отправки допустим только после Router 404 И
    нового probe, подтвердившего исходный bootId, прежнюю binding и durable_commands.
@@ -93,6 +93,12 @@ HTTP 202, Retry-After:1. `pending` означает наблюдение опе�
    исполнения. Gate сверяет журнал Router до terminal фиксации. Истинный terminal
    5xx воспроизводится; неподтверждённый 5xx остаётся unknown, не отнимает квоту как
    доказанный отказ и не запускает failover.
+5. Отдельный случай: Nodes отказал ДО отправки свежей команды, не подтвердив
+   доступность/identity узла (`node_unavailable`). Это сохранённый terminal отказ
+   доставки с `deliveryState:not_sent`, резерв квоты освобождается. Повтор прежнего
+   ключа воспроизводит этот отказ. Новая попытка доставки допустима с новым ключом
+   только при этом явном доказательстве, сохраняя логический run/turn; это не
+   разрешение менять ID при unknown. Не каждый HTTP 503 является not_sent.
 
 ## Хранение и restart
 
