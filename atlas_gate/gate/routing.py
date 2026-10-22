@@ -115,7 +115,6 @@ class Routing:
                 if resume["route"] != route or resume["model"] != model:
                     raise GateError(403, "policy_denied", "resume требует прежнего маршрута и модели")
             candidates = []
-            cooldowns = []
             loads = self.nodes.reserved() if hasattr(self.nodes, "reserved") else {n: i.get("activeTurns", 0) for n, i in self.nodes.snapshots.items()}
             for node_id, info in self.nodes.snapshots.items():
                 n = self.nodes.config[node_id]
@@ -133,9 +132,8 @@ class Routing:
                 if not role_models.issubset({m.get("value") for m in info["models"]}):
                     continue
                 remaining = self.nodes.cooldown.get(n.account_group, 0) - time.monotonic()
-                if remaining > 0:
-                    cooldowns.append(remaining)
-                    continue
+                # Historical quota is advisory: an account upgrade can restore access
+                # before resetsAt. A new command must reach the pinned SDK once.
                 counts = self.store._one("SELECT SUM(status='ready') ready, SUM(status IN ('creating','unknown')) reserved FROM router_bindings WHERE node_id=?", (node_id,))
                 reserved = counts["reserved"] or 0
                 sessions = max(info.get("sessions", 0), counts["ready"] or 0) + reserved
@@ -153,16 +151,12 @@ class Routing:
                 if isinstance(quota.get("utilization"), (int, float)):
                     known.append(quota["utilization"])
                 pressure = max(known) if known else 1.0  # null не считается свободной подпиской
-                candidates.append(((loads.get(node_id, 0) + reserved) / (turn_limit or 1),
+                candidates.append((int(remaining > 0), (loads.get(node_id, 0) + reserved) / (turn_limit or 1),
                                    pressure, sessions / (info["capacity"] or 1), node_id))
             if not candidates:
-                if cooldowns:
-                    retry = min(cooldowns)
-                    raise GateError(429, "rate_limit", "подписка временно не принимает новые сессии",
-                                    retryAfterSeconds=retry, resetsAt=time.time() + retry)
                 raise GateError(503, "capacity_exceeded", "нет доступного совместимого Router")
-            best = min((a, b, c) for a, b, c, _ in candidates)
-            ties = [n for a, b, c, n in candidates if (a, b, c) == best]
+            best = min(row[:-1] for row in candidates)
+            ties = [row[-1] for row in candidates if row[:-1] == best]
             import secrets
             node_id = secrets.choice(ties)
             body = dict(payload, model=model)

@@ -62,9 +62,8 @@ async def test_unlimited_capacity_still_chooses_free_node_and_reserves_over_four
         operation, fresh = operations.begin(device('free'), binding, 'POST', '/v1/sessions/local/prompt', {}, request_id=str(i), turn_id=str(i), nodes=nodes)
         assert fresh and operation['units'] == 1
     nodes.cooldown['b'] = time.monotonic() + 60
-    with pytest.raises(GateError) as limited:
-        operations.begin(device('free'), binding, 'POST', '/v1/sessions/local/prompt', {}, request_id='blocked', turn_id='blocked', nodes=nodes)
-    assert limited.value.code == 'rate_limit'
+    _, fresh = operations.begin(device('free'), binding, 'POST', '/v1/sessions/local/prompt', {}, request_id='retry-after-upgrade', turn_id='retry-after-upgrade', nodes=nodes)
+    assert fresh
     store.close()
 
 
@@ -175,6 +174,7 @@ async def test_explicit_history_fallback_keeps_original_node_affinity(tmp_path):
         store._exec("UPDATE router_bindings SET sdk_id='native-sdk',status='closed' WHERE id=?", (first['id'],))
         nodes.snapshots['a']['quota']['windows'][0]['usedPercent'] = 80
         nodes.snapshots['b']['quota']['windows'][0]['usedPercent'] = 0
+        nodes.cooldown['a'] = time.monotonic() + 7200
         sent=[]
         original=nodes.request
         async def request(node_id, method, path, **kwargs):
@@ -191,5 +191,27 @@ async def test_explicit_history_fallback_keeps_original_node_affinity(tmp_path):
             await routing.create(device('other'),'sub','claude',
                 {'resumeSessionId':first['sdk_alias'],'allowHistoryFallback':True},10)
         assert denied.value.status == 404
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_real_upstream_limit_is_preserved_and_replayed(tmp_path):
+    store, nodes = Store(str(tmp_path / 'limit.db')), FakeNodes(capacity=0)
+    calls = []
+    for name in nodes.config:
+        nodes.cooldown[name] = time.monotonic() + 7200
+    async def rejected(node_id, method, path, **kwargs):
+        calls.append((node_id, method, path))
+        return httpx.Response(429, json={'error': {'code': 'rate_limit', 'resetsAt': 1792674000}})
+    nodes.request = rejected
+    routing = Routing(store, nodes)
+    try:
+        first = await routing.create(device('d'), 'sub', 'claude', {}, 0, request_id='new-attempt')
+        replay = await routing.create(device('d'), 'sub', 'claude', {}, 0, request_id='new-attempt')
+        assert first == replay
+        assert first[0] == 429
+        assert json.loads(first[1])['error']['resetsAt'] == 1792674000
+        assert len(calls) == 1
     finally:
         store.close()
