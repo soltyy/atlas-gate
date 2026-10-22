@@ -84,21 +84,17 @@ async def test_probe_recovery_unblocks_creation_and_existing_turn(tmp_path, stat
     routing = Routing(store, nodes)
     operations = Operations(store)
     try:
-        with pytest.raises(GateError) as denied:
-            await routing.create(device, "sub", "codex", {}, 0)
-        assert denied.value.code == "rate_limit"
-        assert posts == []
-        quota.update(status=status)
         _, body = await routing.create(device, "sub", "codex", {}, 0)
         binding = routing.get(json.loads(body)["id"], device)
         assert posts == ["/v1/sessions"]
         nodes.observe_event("0", {"type": "rate_limit", "status": "rejected"})
-        with pytest.raises(GateError) as denied:
-            operations.begin(device, binding, "POST", "/v1/sessions/local/prompt", {}, turn_id="turn", nodes=nodes)
-        assert denied.value.code == "rate_limit"
-        await nodes.refresh()
         _, fresh = operations.begin(device, binding, "POST", "/v1/sessions/local/prompt", {}, turn_id="turn", nodes=nodes)
         assert fresh
+        # Same logical command remains a replay, even while old quota is rejected.
+        _, fresh = operations.begin(device, binding, "POST", "/v1/sessions/local/prompt", {}, turn_id="turn", nodes=nodes)
+        assert not fresh
+        quota.update(status=status)
+        await nodes.refresh()
         assert not store._all("SELECT * FROM router_account_cooldowns")
     finally:
         await nodes.close()

@@ -58,8 +58,8 @@ class Operations:
                     units += info.get("maxSubagents", 0) if turn_id and json.loads(binding["roles"]) else 0
                     if info.get("draining"):
                         raise GateError(429, "capacity_exceeded", "Router готовится к обновлению")
-                    if nodes.cooldown.get(node.account_group, 0) > time.monotonic():
-                        raise GateError(429, "rate_limit", "подписка временно не принимает новые ходы")
+                    # A cached provider rejection must not veto a new explicit command.
+                    # Real concurrency/drain checks and durable replay remain enforced.
                     group_nodes = [n.node_id for n in nodes.config.values() if n.account_group == node.account_group]
                     placeholders = ",".join("?" for _ in group_nodes)
                     active = db.execute(f"SELECT node_id,SUM(units) units FROM router_operations WHERE node_id IN ({placeholders}) AND (turn_id IS NOT NULL OR path LIKE '%/compact') AND finished=0 AND (state IN ('prepared','unknown') OR (state='complete' AND status<400)) GROUP BY node_id", group_nodes).fetchall()

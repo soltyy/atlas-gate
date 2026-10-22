@@ -89,6 +89,32 @@ async def create(client):
     return response.json()["id"]
 
 
+async def test_explicit_request_after_upgrade_ignores_persisted_old_quota(network):
+    import time
+    client, app, routers, *_ = network
+    nodes = app.state.gate.nodes
+    for name in nodes.config:
+        nodes.observe_event(name, {"type": "rate_limit", "status": "rejected",
+                                  "resetsAt": time.time() + 7200})
+    assert app.state.gate.store._all("SELECT * FROM router_account_cooldowns")
+    sid = await create(client)
+    prefix = '/harness/agent/sessions/' + sid
+    payload = {'id': 'after-upgrade', 'text': 'hello'}
+    first = await client.post(prefix + '/prompt?mode=async', json=payload)
+    assert first.status_code == 202, first.text
+    for _ in range(100):
+        result = (await client.get(prefix + '/turns/after-upgrade/events', params={'wait': 200})).json()
+        if result['done']:
+            break
+    assert result['state'] == 'done', result
+    replay = await client.post(prefix + '/prompt?mode=async', json=payload)
+    assert replay.status_code == 202, replay.text
+    assert app.state.gate.store._one(
+        "SELECT COUNT(*) n FROM router_operations WHERE turn_id='after-upgrade'")['n'] == 1
+    # Observations remain intact; recovery does not erase evidence/history.
+    assert app.state.gate.store._all("SELECT * FROM router_account_cooldowns")
+
+
 async def test_unlimited_gate_device_and_router_accept_more_than_four_sessions(network):
     client, app, routers, settings, *_ = network
     settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE = 0
