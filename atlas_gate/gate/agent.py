@@ -384,12 +384,12 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
 
 async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     state = gate(request)
-    binding = state.routing.get(sid, device)
+    media_read = method == 'GET' and (suffix == '/media' or suffix.startswith('/media/'))
+    binding = state.routing.get(sid, device, include_closed=media_read)
     # Revocation blocks further work, not observing/stopping/deleting owned work.
     control = method in ('GET', 'DELETE') or suffix == '/interrupt' or suffix.endswith('/stop')
     _policy(state, device, binding, request, require_model=suffix in ("/steer", "/tools", "/compact"), require_sdk=not control)
-    media_read = method == 'GET' and (suffix == '/media' or suffix.startswith('/media/'))
-    if not media_read:
+    if not media_read or binding['status'] == 'closed':
         binding = await state.routing.recover_boot(binding)
     if tool_result is not None and tool_result.attachments:
         validate_tool_result(tool_result, await _bound_attachments(state, binding))
@@ -413,7 +413,7 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     context_order = time.time_ns()
     response = await state.nodes.request(binding["node_id"], method, _path(binding, suffix),
                                          content=raw, params=request.query_params,
-                                         expected_boot=None if media_read else binding["boot_id"])
+                                         expected_boot=None if media_read and binding['status'] != 'closed' else binding["boot_id"])
     if method == "GET" and suffix == "/context" and response.status_code == 200:
         if state.context_windows.observe(binding,response.json(),context_order):
             await state.publish_contexts()
@@ -496,7 +496,7 @@ async def agent_turn(sid: str, turn_id: str, request: Request, device: Device = 
 @router.get("/harness/agent/sessions/{sid}/turns/{turn_id}/events")
 async def agent_events(sid: str, turn_id: str, request: Request, device: Device = Depends(require_device)):
     state = gate(request)
-    binding = state.routing.get(sid, device)
+    binding = state.routing.get(sid, device, include_closed=True)
     _policy(state, device, binding, request, require_model=False, require_sdk=False)
     try:
         after, wait = int(request.query_params.get("after", 0)), int(request.query_params.get("wait", 0))
