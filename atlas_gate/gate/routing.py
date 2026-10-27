@@ -63,8 +63,11 @@ class Routing:
         self.store._exec("UPDATE router_bindings SET status='rejected',rejection_status=?,rejection_body=? WHERE id=?",
                          (status, body, sid))
 
-    def get(self, sid, device):
-        row = self.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=? AND status='ready'",
+    def get(self, sid, device, *, include_closed=False):
+        # Только чтение durable events/media может наблюдать закрытую привязку.
+        # Это не меняет её lifecycle и не разрешает команды/возобновление SDK.
+        statuses = "('ready','closed')" if include_closed else "('ready')"
+        row = self.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=? AND status IN " + statuses,
                               (sid, device.device_id, device.org))
         if row is None:
             raise GateError(404, "not_found", "сессия не найдена")
