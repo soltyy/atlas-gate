@@ -1,7 +1,7 @@
 """Gate owns organisation policy; SDK facts and application belong to the pinned Router."""
 from __future__ import annotations
 import json
-from ..reasoning import ReasoningError, ReasoningPolicy, policy_request, resolve, concrete
+from ..reasoning import ReasoningError, ReasoningPolicy, policy_request, resolve, concrete, codex_effort
 from .errors import GateError
 
 
@@ -27,7 +27,12 @@ def validate_node(info, model, snapshot):
     if (info.get('reasoningSettings') or {}).get('version') != 1:
         raise ReasoningError('reasoning_protocol_unsupported', 'Router did not advertise reasoning v1')
     metadata = next((m for m in info.get('models', []) if m.get('value') == model), {})
-    resolve(selected, metadata.get('reasoning'))
+    caps = metadata.get('reasoning') or {}
+    decision = resolve(selected, caps)
+    if info.get('backend') == 'claude' and selected['mode'] == 'enabled' and selected.get('budgetTokens') is None and not caps.get('adaptive'):
+        raise ReasoningError('reasoning_unsupported', 'SDK did not confirm adaptive thinking for this model')
+    if info.get('backend') == 'codex':
+        codex_effort(decision, caps)
 
 
 def confirm(snapshot, response):
@@ -72,6 +77,8 @@ def project_capabilities(state, org, route, model):
             'efforts':[v for v in Effort.__args__ if any(v in e.get('efforts',[]) for e in entries)],
             'defaultEffort':next(iter(defaults)) if len(defaults)==1 else None,
             'disabled':any(e.get('disabled') for e in entries), 'budgetTokens':any(e.get('budgetTokens') for e in entries),
+            'adaptive':any(e.get('adaptive') for e in entries),
+            'disabledEfforts':[v for v in Effort.__args__ if any(v in e.get('disabledEfforts',[]) for e in entries)],
             'source':'router_sdk', 'scope':'session', 'eligibleNodes':len(entries), 'knownNodes':total,
             'coverage':'all' if total and len(entries)==total else 'partial' if entries else 'unknown',
             'defaultsVaryByNode':len(defaults)>1, 'providerConfirmed':False}
