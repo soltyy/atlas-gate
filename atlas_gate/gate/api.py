@@ -500,8 +500,16 @@ async def _llm_post(request: Request, device: Device, protocol: str, suffix: str
             raise GateError(403, 'policy_denied', 'генерация изображений не разрешена для API-модели', reason='image_generation_disabled')
     check_data_class(state, device, request, route.id)
     check_quota(state, device, org)
+    configured = next((m for m in org.models if m.route_id == route.id and m.model == model), None)
+    raw, reasoning = state.api_reasoning.apply(raw, doc, configured, suffix, device, request.headers)
+    doc = json.loads(raw)
     body = with_usage_option(raw, doc) if protocol == "openai" and suffix == '/chat/completions' else raw
-    return await proxy(request, state, device, org, route, str(model), suffix, body, doc.get("stream") is True)
+    response = await proxy(request, state, device, org, route, str(model), suffix, body, doc.get("stream") is True)
+    if reasoning is not None:
+        from .api_reasoning import digest
+        response.headers['X-Atlas-Reasoning-Decision'] = digest(reasoning)
+        response.headers['X-Atlas-Configured-Reasoning'] = json.dumps(reasoning, separators=(',', ':'))
+    return response
 
 
 @router.get("/harness/llm/v1/models")

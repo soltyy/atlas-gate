@@ -7,6 +7,8 @@ import uuid
 import hashlib
 from .errors import GateError
 from ..sdk_tools import SdkTools, supports, enabled, defaults
+from .reasoning import select_request, validate_node, confirm
+from ..reasoning import ReasoningError, concrete
 
 DDL = """
 CREATE TABLE IF NOT EXISTS router_bindings (
@@ -29,7 +31,7 @@ class Routing:
         with store._lock:
             store._db.executescript(DDL)
             columns = {r[1] for r in store._db.execute("PRAGMA table_info(router_bindings)")}
-            for name in ("request_key", "fingerprint", "response", "sdk_tools"):
+            for name in ("request_key", "fingerprint", "response", "sdk_tools", "reasoning_snapshot"):
                 if name not in columns:
                     store._db.execute(f"ALTER TABLE router_bindings ADD COLUMN {name} TEXT")
             for name, kind in (("rejection_status", "INTEGER"), ("rejection_body", "BLOB")):
@@ -77,7 +79,7 @@ class Routing:
         return self.store._all("SELECT * FROM router_bindings WHERE device_id=? AND org=? AND status='ready' ORDER BY created",
                                (device.device_id, device.org))
 
-    async def create(self, device, route, model, payload, limit, request_id=None, sdk_policy=None):
+    async def create(self, device, route, model, payload, limit, request_id=None, sdk_policy=None, reasoning_policy=None):
         if request_id is not None and (not request_id or len(request_id) > 200):
             raise GateError(422, "invalid_request", "request_id должен содержать 1..200 знаков")
         key = hashlib.sha256((device.device_id + ":" + (request_id or str(uuid.uuid4()))).encode()).hexdigest()
@@ -101,6 +103,11 @@ class Routing:
             unresolved = self.store._one("SELECT id FROM router_bindings WHERE device_id=? AND status='unknown'", (device.device_id,))
             if unresolved:
                 raise GateError(409, "command_outcome_unknown", "предыдущее создание требует сверки")
+            # Resolve AFTER the immutable receipt lookup. Reload cannot rewrite an old create.
+            reasoning_snapshot = select_request(payload.get('reasoning'), reasoning_policy)
+            if any(concrete(a.get('reasoning')) for a in payload.get('agents', [])):
+                raise GateError(422, 'reasoning_subagent_unsupported',
+                                'Native SDK per-role overrides are not negotiated in reasoning v1')
             mine = self.store._one("SELECT COUNT(*) n FROM router_bindings WHERE device_id=? AND status IN ('creating','ready','unknown')", (device.device_id,))["n"]
             if limit and mine >= limit:
                 raise GateError(409, "agent_sessions_limit", "достигнут предел сессий устройства")
@@ -118,6 +125,7 @@ class Routing:
                 if resume["route"] != route or resume["model"] != model:
                     raise GateError(403, "policy_denied", "resume требует прежнего маршрута и модели")
             candidates = []
+            reasoning_failure, reasoning_compatible = None, False
             loads = self.nodes.reserved() if hasattr(self.nodes, "reserved") else {n: i.get("activeTurns", 0) for n, i in self.nodes.snapshots.items()}
             for node_id, info in self.nodes.snapshots.items():
                 n = self.nodes.config[node_id]
@@ -130,6 +138,12 @@ class Routing:
                 if not info.get("ready") or info.get("draining"):
                     continue
                 if model not in {m.get("value") for m in info["models"]}:
+                    continue
+                try:
+                    validate_node(info, model, reasoning_snapshot)
+                    reasoning_compatible = True
+                except ReasoningError as failed:
+                    reasoning_failure = failed
                     continue
                 role_models = {r.get("model") for r in payload.get("agents", []) if r.get("model") not in (None, "", "inherit")}
                 if not role_models.issubset({m.get("value") for m in info["models"]}):
@@ -157,18 +171,22 @@ class Routing:
                 candidates.append((int(remaining > 0), (loads.get(node_id, 0) + reserved) / (turn_limit or 1),
                                    pressure, sessions / (info["capacity"] or 1), node_id))
             if not candidates:
+                if reasoning_failure is not None and not reasoning_compatible:
+                    raise GateError(422, reasoning_failure.code, str(reasoning_failure))
                 raise GateError(503, "capacity_exceeded", "нет доступного совместимого Router")
             best = min(row[:-1] for row in candidates)
             ties = [row[-1] for row in candidates if row[:-1] == best]
             import secrets
             node_id = secrets.choice(ties)
             body = dict(payload, model=model)
+            if reasoning_snapshot['selected'] is not None:
+                body['reasoning'] = reasoning_snapshot['selected']
             if body.get('sdkTools') is None:
                 body['sdkTools'] = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
             sid, alias = str(uuid.uuid4()), str(uuid.uuid4())
             boot_id = self.nodes.snapshots[node_id]["bootId"]
-            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?)",
-                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(body['sdkTools'])))
+            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools,reasoning_snapshot) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?,?)",
+                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(body['sdkTools']), json.dumps(reasoning_snapshot)))
             if resume:
                 body["resumeSessionId"] = resume["sdk_id"]
         try:
@@ -181,6 +199,7 @@ class Routing:
             return response.status_code, response.content
         try:
             created = response.json()
+            confirm(reasoning_snapshot, created)
             requested = SdkTools.model_validate(body.get('sdkTools') or {})
             if enabled(requested) and created.get('sdkTools') != requested.model_dump():
                 raise ValueError('SDK tools acknowledgement missing')
@@ -218,6 +237,7 @@ class Routing:
                                          json.dumps(command["response"], ensure_ascii=False).encode())
                     continue
                 created = command["response"]
+                confirm(json.loads(binding.get('reasoning_snapshot') or '{}'), created)
                 requested = SdkTools.model_validate(json.loads(binding['sdk_tools'] or '{}'))
                 if enabled(requested) and created.get('sdkTools') != requested.model_dump():
                     continue

@@ -63,6 +63,8 @@ class GateState:
         self.nodes = Nodes(s.ATLAS_GATE_NODES_FILE, self.store, self.channel)
         self.routing = Routing(self.store, self.nodes)
         self.operations = Operations(self.store)
+        from .api_reasoning import ApiReasoning
+        self.api_reasoning = ApiReasoning(self.store)
         from .context_windows import ContextWindows
         self.context_windows = ContextWindows(self)
         self.watchers: set[asyncio.Task] = set()
@@ -196,6 +198,8 @@ class GateState:
                     route = org.route(model['route_id'])
                     if route and route.kind == 'router-agent':
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
+                        from .reasoning import project_capabilities
+                        model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
                     options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
                         if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
                         and model['route_id'] in self.nodes.config[node_id].routes
@@ -239,6 +243,8 @@ class GateState:
                     route = org.route(model['route_id'])
                     if route and route.kind == 'router-agent':
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
+                        from .reasoning import project_capabilities
+                        model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
                 row = publish(self.store,self.key,org.id,body,dump(org))
                 self.snapshot(org,int(row['profile_version']))
             self.bodies = bodies

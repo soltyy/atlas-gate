@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 
 def _empty_object_schema() -> dict[str, Any]:
@@ -10,6 +10,7 @@ def _empty_object_schema() -> dict[str, Any]:
 
 
 from .sdk_tools import SdkTools
+from .reasoning import ReasoningSettings
 
 class ToolDefinition(BaseModel):
     """Определение инструмента из рукопожатия — то же, что харнес шлёт любому провайдеру."""
@@ -22,6 +23,7 @@ class ToolDefinition(BaseModel):
 
 
 class AgentSpec(BaseModel):
+    reasoning: ReasoningSettings | None = None
     """Субагент харнеса (issue #135): роль с подмножеством инструментов сессии."""
 
     model_config = ConfigDict(extra="ignore")
@@ -69,6 +71,7 @@ class SessionCreate(BaseModel):
 
 
 class SessionCreated(BaseModel):
+    configuredReasoning: dict[str, Any] | None = None
     """Create ACK. SDK history identity is obtained from SessionInfo/session events.
 
     Extra response fields are additive; defaults are not proof of successful resume.
@@ -134,6 +137,13 @@ class Attachment(BaseModel):
 
 
 class PromptRequest(BaseModel):
+    @model_validator(mode='before')
+    @classmethod
+    def session_reasoning_only(cls, value):
+        if isinstance(value, dict) and value.get('reasoning') is not None:
+            raise ValueError('reasoning_rebind_required: reasoning v1 is configured at session creation')
+        return value
+
     id: str
     text: str
     attachments: list[Attachment] = Field(default_factory=list)

@@ -4,6 +4,9 @@ from pydantic import BaseModel
 
 
 class ModelContract(BaseModel):
+    reasoningPolicy: dict[str, Any] | None = None
+    reasoningCapabilities: dict[str, Any] | None = None
+    reasoningDialect: str | None = None
     model: str
     display_name: str
     context_window: int | None
@@ -33,6 +36,9 @@ def project_model(model, attachments=None, kind="gateway"):
                          enabled=model.enabled, attachments=attachments,
                          context_semantics='effective' if kind == 'router-agent' else 'model-full',
                          output_policy='sdk-default' if kind == 'router-agent' else 'harness-budget',
+                         reasoningPolicy=model.reasoningPolicy.model_dump() if model.reasoningPolicy is not None else None,
+                         reasoningCapabilities=model.reasoningCapabilities.model_dump() if kind == 'gateway' and model.reasoningCapabilities is not None else None,
+                         reasoningDialect=model.reasoningDialect if kind == 'gateway' else None,
                          output_budget=None if kind == 'router-agent' else budget).model_dump(mode='json')
 
 

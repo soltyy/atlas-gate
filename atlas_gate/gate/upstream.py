@@ -162,7 +162,8 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
     if key is None:
         raise GateError(503, "route_down", f"маршрут {route.id} не поднят: нет ключа {route.key_env}", route=route.id)
     headers = [(k, v) for k, v in request.headers.items()
-               if k.lower() not in DROP_REQUEST and not k.lower().startswith("x-harness-")]
+                 if k.lower() not in DROP_REQUEST and not k.lower().startswith("x-harness-")
+                 and k.lower() != 'x-atlas-reasoning-scope']
     if route.protocol == "anthropic":
         headers.append(("x-api-key", key))
         if not request.headers.get("anthropic-version"):

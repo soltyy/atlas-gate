@@ -39,6 +39,16 @@ def _shape(schema):
     return schema
 
 
+def _legacy_shape(schema):
+    import copy
+    schema=copy.deepcopy(schema)
+    if 'configuredReasoning' in schema.get('properties',{}):
+        extra=schema['properties'].pop('configuredReasoning')
+        assert extra['anyOf'][0]['type']=='object'
+        assert 'configuredReasoning' not in schema.get('required',[])
+    return _shape(schema)
+
+
 async def test_openapi_matches_captured_router_and_preserves_suspended_variant(network):
     client, app, routers, *_ = network
     gate = (await client.get('/openapi.json')).json()
@@ -47,10 +57,10 @@ async def test_openapi_matches_captured_router_and_preserves_suspended_variant(n
         response = gate['paths'][PREFIX][method]['responses']['200']['content']['application/json']['schema']
         assert response == {'$ref': '#/components/schemas/' + name}
     for name in ('SessionCreated', 'SessionInfo'):
-        assert _shape(schemas[name]) == _shape(WIRE['routerSchemas'][name])
+        assert _legacy_shape(schemas[name]) == _shape(WIRE['routerSchemas'][name])
         for router in routers:
             actual = router.openapi()['components']['schemas'][name]
-            assert _shape(actual) == _shape(WIRE['routerSchemas'][name])
+            assert _legacy_shape(actual) == _shape(WIRE['routerSchemas'][name])
     assert schemas['SessionCreated']['additionalProperties'] is True
     assert 'sdkSessionId' not in schemas['SessionCreated']['properties']
     assert schemas['SuspendedSessionInfo']['required'] == ['id', 'model', 'state']

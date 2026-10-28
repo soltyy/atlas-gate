@@ -37,7 +37,7 @@ class Operations:
             raise GateError(422, 'invalid_request', 'request_id должен содержать 1..200 знаков')
         return hashlib.sha256((device.device_id + ':' + request_id).encode()).hexdigest()
 
-    def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None):
+    def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None, validate_new=None):
         # Ходы имеют стабильный ID протокола, поэтому даже старый клиент не запускает дубль prompt.
         rid = request_id or (f"prompt:{binding['id']}:{turn_id}" if turn_id else str(uuid.uuid4()))
         rid = self.key(device, rid)
@@ -47,6 +47,8 @@ class Operations:
             if old["fingerprint"] != fingerprint or old["session_id"] != binding["id"]:
                 raise GateError(409, "idempotency_conflict", "request_id использован с другими параметрами")
             return old, False
+        if validate_new is not None:
+            validate_new()
         with self.store._lock:
             db = self.store._db
             db.execute("BEGIN IMMEDIATE")
