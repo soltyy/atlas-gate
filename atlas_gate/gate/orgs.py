@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from ..reasoning import ReasoningPolicy, ReasoningCapabilities
 
 log = logging.getLogger("atlas_gate")
 
@@ -55,6 +56,10 @@ class Route(_Strict):
 
 
 class ModelEntry(_Strict):
+    reasoningPolicy: ReasoningPolicy | None = None
+    # API capabilities must be attested for the exact route/model; never inferred from a name.
+    reasoningCapabilities: ReasoningCapabilities | None = None
+    reasoningDialect: Literal['openai', 'anthropic', 'deepseek'] | None = None
     route_id: str
     model: str
     display_name: str = ""

@@ -16,6 +16,7 @@ from .schemas import GateAgentSessionCreate
 from ..sdk_tools import SdkTools, permitted
 from .state import Device
 from .attachments import node_attachments, validate_prompt, validate_tool_result
+from .reasoning import model_policy, validate_new_prompt
 
 log = logging.getLogger("atlas_gate")
 
@@ -29,6 +30,9 @@ def _response(response):
             doc = {}
         if not isinstance(doc, dict) or "error" not in doc:
             detail = doc.get("detail", "Router отказал") if isinstance(doc, dict) else doc
+            if isinstance(detail, dict) and isinstance(detail.get('error'), dict):
+                return Response(content=json.dumps({'error':detail['error']}, ensure_ascii=False).encode(),
+                                status_code=response.status_code, media_type='application/json')
             code = STATUS_CODES.get(response.status_code, "agent_error")
             if str(detail).startswith("session_suspended"):
                 code = "session_suspended"
@@ -85,6 +89,13 @@ async def _events(state, binding, turn, device, after=0, wait=0):
         return response, None
     doc = response.json()
     doc["events"] = [state.routing.translate(binding, ev) for ev in doc.get("events", [])]
+    from .reasoning import confirm
+    for event in doc['events']:
+        if isinstance(event.get('configuredReasoning'), dict):
+            try:
+                confirm(json.loads(binding.get('reasoning_snapshot') or '{}'), event)
+            except ValueError as failed:
+                raise GateError(502, 'reasoning_confirmation_missing', str(failed)) from failed
     for ev in doc["events"]:
         state.nodes.observe_event(binding["node_id"], ev)
         if ev.get("type") == "result":
@@ -147,7 +158,8 @@ async def agent_session_create(body: GateAgentSessionCreate, request: Request, d
         if role.model and role.model != "inherit":
             _selection(state, device, role.model, route)
     check_data_class(state, device, request, route)
-    status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE, request.headers.get("idempotency-key"), sdk_policy=org_of(state, device).sdk_tools)
+    status, raw = await state.routing.create(device, route, model, body.model_dump(exclude_none=True), state.settings.ATLAS_GATE_AGENT_SESSIONS_PER_DEVICE, request.headers.get("idempotency-key"), sdk_policy=org_of(state, device).sdk_tools,
+        reasoning_policy=model_policy(org_of(state, device), route, model))
     import httpx
     response = _response(httpx.Response(status, content=raw))
     response.headers.update(state.routing.creation_headers(
@@ -170,7 +182,8 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     await state.nodes.refresh()
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     operation, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/prompt"), body.model_dump(),
-        request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes)
+        request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes,
+        validate_new=lambda: validate_new_prompt(state, binding, device))
     response = await _deliver_operation(state, binding, operation, fresh,
                                        body.model_dump_json().encode(), {"mode": "async"})
     if response.status_code >= 400:
@@ -525,6 +538,24 @@ async def agent_delete(sid: str, request: Request, device: Device = Depends(requ
 @router.get('/harness/agent/sessions/{sid}/sdk-tools')
 async def agent_sdk_tools(sid: str, request: Request, device: Device = Depends(require_device)):
     return await _delegate(request, device, sid, 'GET', '/sdk-tools')
+
+
+@router.get('/harness/agent/sessions/{sid}/reasoning')
+async def agent_reasoning(sid: str, request: Request, device: Device = Depends(require_device)):
+    state = gate(request)
+    binding = state.routing.get(sid, device, include_closed=True)
+    _policy(state, device, binding, request, require_model=False, require_sdk=False)
+    binding = await state.routing.recover_boot(binding)
+    response = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/reasoning'), expected_boot=binding['boot_id'])
+    if response.status_code >= 400:
+        return _response(response)
+    doc = response.json()
+    from .reasoning import confirm
+    try:
+        confirm(json.loads(binding.get('reasoning_snapshot') or '{}'), doc)
+    except ValueError as failed:
+        raise GateError(502, 'reasoning_confirmation_missing', str(failed)) from failed
+    return JSONResponse(doc, headers={'Cache-Control':'private, no-store'})
 
 
 @router.get('/harness/agent/sessions/{sid}/media')

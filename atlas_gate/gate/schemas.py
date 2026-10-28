@@ -10,6 +10,7 @@ from ..schemas import AgentSpec, ToolDefinition
 
 
 from ..sdk_tools import SdkTools
+from ..reasoning import ReasoningSettings
 
 class GateErrorBody(BaseModel):
     code: str
@@ -142,6 +143,7 @@ class GateReloaded(BaseModel):
 
 
 class GateAgentSessionCreate(BaseModel):
+    reasoning: ReasoningSettings | None = None
     sdkTools: SdkTools | None = None
     """Рукопожатие агентной сессии с устройства: только эти поля уходят в `/v1/sessions` роутера.
 
