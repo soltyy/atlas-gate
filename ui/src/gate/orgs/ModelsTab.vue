@@ -48,7 +48,7 @@ function toggle(r: Route, model: string, on: boolean) {
     props.org.models.push({ route_id: r.id, model, display_name: modelName(r, model), context_window: 0, max_output: 0, enabled: true })
   } else if (!on) {
     const i = props.org.models.findIndex((m) => m.route_id === r.id && m.model === model)
-    if (i >= 0) props.org.models.splice(i, 1)
+    if (i >= 0) remove(i)
   }
 }
 
@@ -61,6 +61,8 @@ function add(r: Route) {
 }
 
 function remove(i: number) {
+  const m = props.org.models[i]
+  if (props.org.pricing_v1) props.org.pricing_v1 = props.org.pricing_v1.filter((p) => p.route_id !== m.route_id || p.model !== m.model)
   props.org.models.splice(i, 1)
 }
 

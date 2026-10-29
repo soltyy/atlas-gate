@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from ..reasoning import ReasoningPolicy, ReasoningCapabilities
+from ..pricing import Schedule
 
 log = logging.getLogger("atlas_gate")
 
@@ -189,6 +190,7 @@ class OrgConfig(_Strict):
     routes: list[Route]
     models: list[ModelEntry] = Field(default_factory=list)
     pricing: list[Pricing] = Field(default_factory=list)
+    pricing_v1: list[Schedule] = Field(default_factory=list)
     policy: Policy = Field(default_factory=Policy)
     agents: list[Agent] = Field(default_factory=list)
     mcp: list[Mcp] = Field(default_factory=list)
@@ -236,6 +238,15 @@ class OrgConfig(_Strict):
         for p in self.pricing:
             if p.route_id not in ids:
                 raise ValueError(f"цена {p.model}: нет маршрута {p.route_id}")
+        dynamic = set()
+        for p in self.pricing_v1:
+            key = (p.route_id, p.model)
+            route = self.route(p.route_id)
+            if route is None or route.kind != 'gateway' or route.protocol != 'openai' or key not in {(m.route_id, m.model) for m in self.models}:
+                raise ValueError('pricing v1 requires an exact OpenAI-compatible gateway model')
+            if key in dynamic or any((v.route_id, v.model) == key for v in self.pricing):
+                raise ValueError('duplicate or mixed static/dynamic price')
+            dynamic.add(key)
         for cls, routes in self.policy.routes_by_class.items():
             if cls not in classes:
                 raise ValueError(f"routes_by_class: класс {cls!r} не в policy.data_classes")

@@ -49,6 +49,18 @@ export interface Pricing {
   subscription: boolean
 }
 
+export interface PricingSchedule {
+  route_id: string
+  model: string
+  currency: string
+  pricing_version: string
+  valid_from: string
+  valid_until: string
+  source_url: string
+  periods: Array<{ starts_at: string; ends_at: string; tariff_id: string;
+    rates: { input_uncached: number; input_cached: number; output: number } }>
+}
+
 export type ToolMode = 'auto' | 'ask' | 'deny'
 
 export interface ToolPolicy {
@@ -104,6 +116,7 @@ export interface OrgConfig {
   routes: Route[]
   models: ModelEntry[]
   pricing: Pricing[]
+  pricing_v1?: PricingSchedule[]
   policy: Policy
   agents: Agent[]
   mcp: Mcp[]
