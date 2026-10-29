@@ -27,7 +27,7 @@ def plan(at=None):
 
 def selection(p, period=0):
     v=p.periods[period]
-    return {'pricing_version':p.pricing_version,'tariff_id':v.tariff_id,
+    return {'pricing_version':p.pricing_version,'revision':p.revision,'tariff_id':v.tariff_id,
             'starts_at':v.starts_at.isoformat(),'ends_at':v.ends_at.isoformat()}
 
 
@@ -179,6 +179,9 @@ async def test_pinned_request_rejects_changed_body_and_has_no_io_retry(configure
     r=await client.post('/harness/llm/v1/chat/completions',json={**body,'messages':[{'role':'user','content':'different'}]},headers=headers)
     assert r.status_code==409 and 'idempotency_conflict' in r.text and len(calls)==1
     assert len(state.store._all('SELECT * FROM gateway_price_requests'))==1
+    p.periods[0].rates.output=9  # reused human version must not admit a stale reserve
+    stale=await client.post('/harness/llm/v1/chat/completions',json=body,headers=headers)
+    assert stale.status_code==409 and 'pricing_requote_required' in stale.text and len(calls)==1
     read=await client.get('/harness/llm/pricing/decision',params={'requestId':'immutable','route_id':'private-api','model':'api-model'})
     assert read.status_code==200 and read.json()['providerOutcome']=='not_recorded' and len(calls)==1
     other=await enroll(client)

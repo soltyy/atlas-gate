@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -83,14 +85,21 @@ class Schedule(Strict):
 
     def public(self):
         doc = self.model_dump(mode='json')
+        doc['revision'] = self.revision
         doc['reserve_rates'] = {key: max(getattr(p.rates, key) for p in self.periods)
                                 for key in Rates.model_fields}
         return doc
+
+    @property
+    def revision(self):
+        return hashlib.sha256(json.dumps(self.model_dump(mode='json'), sort_keys=True,
+            separators=(',', ':'), ensure_ascii=True).encode()).hexdigest()
 
 
 def selected(schedule, period):
     return {'version': 1, 'route_id': schedule.route_id, 'model': schedule.model,
             'pricing_version': schedule.pricing_version, 'tariff_id': period.tariff_id,
+            'revision': schedule.revision,
             'starts_at': period.starts_at.isoformat(), 'ends_at': period.ends_at.isoformat(),
             'rates': period.rates.model_dump(), 'currency': schedule.currency,
             'unit': schedule.unit, 'cost_kind': 'estimate', 'time_basis': schedule.time_basis,

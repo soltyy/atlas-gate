@@ -183,7 +183,7 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
             wanted = json.loads(request.headers.get('x-atlas-pricing-selection', 'null'))
         except ValueError:
             wanted = None
-        if wanted != {'pricing_version': schedule.pricing_version, 'tariff_id': period.tariff_id,
+        if wanted != {'pricing_version': schedule.pricing_version, 'revision': schedule.revision, 'tariff_id': period.tariff_id,
                       'starts_at': period.starts_at.isoformat(), 'ends_at': period.ends_at.isoformat()}:
             raise GateError(409, 'pricing_requote_required', 'тариф изменился до отправки; пересчитайте резерв', deliveryState='not_sent')
         if suffix.startswith('/images/'):

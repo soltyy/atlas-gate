@@ -12,7 +12,7 @@ legacy клиент сохраняет отказ admission, а не прини�
 ```json
 {"pricing_contract":{"version":1,"legacy_dynamic_prices":"omitted","selection_required":true,"cost_kind":"estimate"},
  "pricing_v1":[{"version":1,"route_id":"deepseek-api","model":"deepseek-flash",
- "pricing_version":"deepseek-reviewed-20261029","currency":"USD","unit":"per_million_tokens",
+ "pricing_version":"deepseek-reviewed-20261029","revision":"<sha256 of complete schedule>","currency":"USD","unit":"per_million_tokens",
  "cost_kind":"estimate","time_basis":"gate_admission_utc","provider_confirmed":false,
  "source_url":"https://api-docs.deepseek.com/quick_start/pricing/",
  "calendar_source_url":"https://www.gov.cn/zhengce/content/202511/content_7047090.htm",
@@ -44,9 +44,12 @@ v1 поддерживает USD и OpenAI-compatible token usage. Модель �
 ```text
 Idempotency-Key: <immutable model-call ID>
 X-Atlas-Pricing-Contract: 1
-X-Atlas-Pricing-Selection: {"pricing_version":"...","tariff_id":"...","starts_at":"...+00:00","ends_at":"...+00:00"}
+X-Atlas-Pricing-Selection: {"pricing_version":"...","revision":"...","tariff_id":"...","starts_at":"...+00:00","ends_at":"...+00:00"}
 ```
 
+`revision` — вычисленный сервером SHA256 всего schedule, включая ставки/источники/горизонт;
+клиент берёт его из подписанного профиля, не вычисляет самостоятельно. Повторное использование
+человеческого pricing_version не позволит принять старый резерв после изменения ставок.
 Границы selection — нормализованные ISO UTC с `+00:00`; профиль может сериализовать UTC как `Z`.
 При изменении окна/версии до отправки Gate возвращает `409 pricing_requote_required`,
 при истечении покрытия — `409 pricing_expired`, без negotiation — `422 pricing_contract_required`.
