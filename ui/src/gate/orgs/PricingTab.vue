@@ -8,7 +8,7 @@ import type { OrgConfig } from './types'
 const props = defineProps<{ org: OrgConfig; errors: Record<string, string> }>()
 
 const unpriced = computed(() =>
-  props.org.models.filter((m) => !props.org.pricing.some((p) => p.route_id === m.route_id && p.model === m.model)),
+  props.org.models.filter((m) => ![...props.org.pricing, ...(props.org.pricing_v1 ?? [])].some((p) => p.route_id === m.route_id && p.model === m.model)),
 )
 
 function isSubscription(routeId: string, subscription: boolean): boolean {
@@ -55,8 +55,19 @@ function remove(i: number) {
         </tr>
       </tbody>
     </table>
-    <p v-else class="muted">Платных моделей нет.</p>
+    <p v-else-if="!org.pricing_v1?.length" class="muted">Платных моделей нет.</p>
   </div>
+  <section v-for="p in org.pricing_v1 ?? []" :key="p.route_id + p.model" data-dynamic-price>
+    <h4>{{ p.route_id }} / {{ p.model }} — тариф по времени, {{ p.currency }}</h4>
+    <p class="muted">Расчётная стоимость. Версия {{ p.pricing_version }}. Период: {{ p.valid_from }} — {{ p.valid_until }}.</p>
+    <details>
+      <summary>Тарифные интервалы UTC — {{ p.periods.length }}</summary>
+      <table class="edit"><thead><tr><th>начало</th><th>конец</th><th>тариф</th><th>вход, за 1 млн</th><th>из кэша, за 1 млн</th><th>выход, за 1 млн</th></tr></thead>
+        <tbody><tr v-for="v in p.periods" :key="v.starts_at"><td>{{ v.starts_at }}</td><td>{{ v.ends_at }}</td><td>{{ v.tariff_id }}</td><td>{{ v.rates.input_uncached }}</td><td>{{ v.rates.input_cached }}</td><td>{{ v.rates.output }}</td></tr></tbody>
+      </table>
+    </details>
+  </section>
+  <FieldErr :errors="errors" loc="pricing_v1" />
   <FieldErr :errors="errors" loc="pricing" />
   <p v-if="unpriced.length" class="row">
     <span class="muted">без цены (стоимость вызовов пишется null):</span>

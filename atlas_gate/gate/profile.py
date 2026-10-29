@@ -76,6 +76,11 @@ def build_body(org: OrgConfig, public_url: str, down_routes: set[str],
         "quota": org.quota.model_dump(),
         "audit": org.audit.model_dump(),
     }
+    if org.pricing_v1:
+        body['pricing_v1'] = [p.public() for p in org.pricing_v1 if (p.route_id, p.model) in kept]
+        body['pricing_contract'] = {'version': 1, 'legacy_dynamic_prices': 'omitted',
+                                    'selection_required': True, 'cost_kind': 'estimate',
+                                    'decision_endpoint': '/harness/llm/pricing/decision'}
     return body, warnings
 
 

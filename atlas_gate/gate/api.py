@@ -512,6 +512,20 @@ async def _llm_post(request: Request, device: Device, protocol: str, suffix: str
     return response
 
 
+@router.get('/harness/llm/pricing/decision')
+async def pricing_decision(request: Request, requestId: str, route_id: str, model: str,
+                           device: Device = Depends(require_device)):
+    """Own immutable pricing settings only. Does not confirm provider acceptance/result."""
+    from .api_reasoning import digest
+    state = await ready_gate(request)
+    org_of(state, device)
+    identity = digest([device.org, device.device_id, route_id, model, requestId])
+    saved = state.store._one('SELECT decision FROM gateway_price_requests WHERE id=?', (identity,))
+    if saved is None:
+        raise GateError(404, 'pricing_decision_not_found', 'снимок цены model-call не найден')
+    return {'decision': json.loads(saved['decision']), 'providerOutcome': 'not_recorded'}
+
+
 @router.get("/harness/llm/v1/models")
 async def llm_models(request: Request, device: Device = Depends(require_device)) -> Any:
     """Модели включённых gateway-маршрутов из профиля (формат OpenAI)."""

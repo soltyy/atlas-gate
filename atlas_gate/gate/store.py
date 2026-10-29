@@ -117,6 +117,15 @@ CREATE TABLE IF NOT EXISTS profiles (
 );
 CREATE INDEX IF NOT EXISTS enrollments_user_code ON enrollments(user_code);
 CREATE INDEX IF NOT EXISTS usage_user_ts ON usage(user_id, ts);
+CREATE TABLE IF NOT EXISTS gateway_usage_pricing (
+    usage_id INTEGER PRIMARY KEY,
+    decision TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gateway_price_requests (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    decision TEXT NOT NULL
+);
 """
 
 
@@ -267,9 +276,20 @@ class Store:
     # --- учёт ---------------------------------------------------------------------------------
 
     def usage_add(self, **row: Any) -> None:
+        decision = row.pop('pricing_decision', None)
         row.setdefault("ts", time.time())
         cols = ",".join(row)
-        self._exec(f"INSERT INTO usage({cols}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
+        with self._lock:
+            self._db.execute('BEGIN IMMEDIATE')
+            try:
+                cursor = self._db.execute(f"INSERT INTO usage({cols}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
+                if decision is not None:
+                    self._db.execute('INSERT INTO gateway_usage_pricing VALUES (?,?)',
+                                     (cursor.lastrowid, json.dumps(decision, ensure_ascii=True)))
+                self._db.execute('COMMIT')
+            except BaseException:
+                self._db.execute('ROLLBACK')
+                raise
 
     def usage(self, device_id: str | None = None) -> list[dict[str, Any]]:
         if device_id:

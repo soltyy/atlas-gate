@@ -66,7 +66,7 @@ const counts = computed<Record<string, number | string>>(() => {
   const o = draft.value
   if (!o) return {} as Record<string, number | string>
   return {
-    routes: o.routes.length, models: o.models.length, pricing: o.pricing.length,
+    routes: o.routes.length, models: o.models.length, pricing: o.pricing.length + (o.pricing_v1?.length ?? 0),
     agents: new Set(o.agents.map((a) => a.id)).size, mcp: o.mcp.length, policy: o.policy.tool_policies.length, general: '',
   }
 })

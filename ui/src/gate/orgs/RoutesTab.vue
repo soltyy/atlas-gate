@@ -40,6 +40,7 @@ function removeSaved(i: number) {
   o.routes.splice(i, 1)
   o.models = o.models.filter((m) => m.route_id !== id)
   o.pricing = o.pricing.filter((p) => p.route_id !== id)
+  if (o.pricing_v1) o.pricing_v1 = o.pricing_v1.filter((p) => p.route_id !== id)
   for (const cls of Object.keys(o.policy.routes_by_class)) {
     o.policy.routes_by_class[cls] = o.policy.routes_by_class[cls].filter((rid) => rid !== id)
   }

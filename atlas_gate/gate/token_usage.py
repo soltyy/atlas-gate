@@ -51,9 +51,10 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
         json_extract(a.payload,'$.durationMs') AS durationMs,
         COALESCE(json_extract(a.payload,'$.source'),'legacy') AS source,
         COALESCE(json_extract(a.payload,'$.status'),'unknown') AS status,
-        json_extract(a.payload,'$.modelUsage') AS modelUsage
+        json_extract(a.payload,'$.modelUsage') AS modelUsage, p.decision AS pricingDecision
         FROM usage u LEFT JOIN devices d ON u.device_id = d.device_id
         LEFT JOIN agent_usage_details a ON u.kind = 'agent' AND u.session_id = a.session_id AND u.model_call = a.turn_id
+        LEFT JOIN gateway_usage_pricing p ON u.rowid = p.usage_id
         WHERE """ + " AND ".join(conditions)
     aggregate = "COUNT(*) AS records, SUM(source = 'legacy') AS legacyRecords, " + ", ".join(
         f"SUM({name}) AS {name}, COUNT({name}) AS {name}Records" for name in METRICS)
@@ -85,4 +86,5 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
     next_before = rows[limit - 1]["id"] if len(rows) > limit else None
     for row in rows[:limit]:
         row["modelUsage"] = json.loads(row["modelUsage"]) if row["modelUsage"] else {}
+        row['pricingDecision'] = json.loads(row['pricingDecision']) if row['pricingDecision'] else None
     return {"since": since, "until": until, "summary": summary, "groups": groups, "rows": rows[:limit], "nextBefore": next_before}

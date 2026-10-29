@@ -68,12 +68,21 @@ def with_usage_option(raw: bytes, doc: dict[str, Any]) -> bytes:
     return json.dumps(patched, ensure_ascii=False).encode("utf-8")
 
 
-def openai_usage(u: dict[str, Any] | None) -> dict[str, int] | None:
+def openai_usage(u: dict[str, Any] | None, strict: bool = False) -> dict[str, int] | None:
     if not isinstance(u, dict):
         return None
     details = u.get('input_tokens_details') or u.get("prompt_tokens_details") or {}
     if not isinstance(details, dict):
         details = {}
+    if strict:
+        inp = u.get('prompt_tokens', u.get('input_tokens'))
+        out = u.get('completion_tokens', u.get('output_tokens'))
+        cache = details.get('cached_tokens', u.get('prompt_cache_hit_tokens'))
+        if any(type(v) is not int or v < 0 for v in (inp, out, cache)) or cache > inp:
+            return None
+        if 'cached_tokens' in details and 'prompt_cache_hit_tokens' in u and details['cached_tokens'] != u['prompt_cache_hit_tokens']:
+            return None
+        return {'prompt': inp, 'completion': out, 'cached': cache}
     cached = int(details.get("cached_tokens") or u.get("prompt_cache_hit_tokens") or 0)
     return {"prompt": int(u.get("prompt_tokens") or u.get('input_tokens') or 0), "completion": int(u.get("completion_tokens") or u.get('output_tokens') or 0),
             "cached": cached}
@@ -123,8 +132,9 @@ def check_quota(state: GateState, device: Device, org: OrgConfig) -> None:
 class UsageTap:
     """Снимает usage с потока SSE, не задерживая байты клиенту."""
 
-    def __init__(self, protocol: str) -> None:
+    def __init__(self, protocol: str, strict: bool = False) -> None:
         self.protocol = protocol
+        self.strict = strict
         self._buf = b""
         self.usage: dict[str, int] | None = None
         self._start: dict[str, Any] | None = None
@@ -145,7 +155,7 @@ class UsageTap:
             except ValueError:
                 continue
             if self.protocol == "openai":
-                u = openai_usage(ev.get("usage") or (ev.get('response') or {}).get('usage'))
+                u = openai_usage(ev.get("usage") or (ev.get('response') or {}).get('usage'), strict=self.strict)
                 if u is not None:
                     self.usage = u
             elif ev.get("type") == "message_start":
@@ -158,12 +168,45 @@ class UsageTap:
 
 async def proxy(request: Request, state: GateState, device: Device, org: OrgConfig, route: Route,
                 model: str, suffix: str, body: bytes, stream: bool) -> Response:
+    # Capture once before provider IO. Reload/time-window changes cannot reprice an active call.
+    from datetime import datetime, timezone
+    from ..pricing import selected
+    schedule = next((p for p in org.pricing_v1 if (p.route_id, p.model) == (route.id, model)), None)
+    price_decision, period = None, None
+    if schedule:
+        if request.headers.get('x-atlas-pricing-contract') != '1':
+            raise GateError(422, 'pricing_contract_required', 'маршрут требует pricing v1; обновите профиль/клиент', deliveryState='not_sent')
+        period = schedule.select(datetime.now(timezone.utc))
+        if period is None:
+            raise GateError(409, 'pricing_expired', 'нет действующего тарифного интервала; обновите прайс', deliveryState='not_sent')
+        try:
+            wanted = json.loads(request.headers.get('x-atlas-pricing-selection', 'null'))
+        except ValueError:
+            wanted = None
+        if wanted != {'pricing_version': schedule.pricing_version, 'revision': schedule.revision, 'tariff_id': period.tariff_id,
+                      'starts_at': period.starts_at.isoformat(), 'ends_at': period.ends_at.isoformat()}:
+            raise GateError(409, 'pricing_requote_required', 'тариф изменился до отправки; пересчитайте резерв', deliveryState='not_sent')
+        if suffix.startswith('/images/'):
+            raise GateError(422, 'pricing_usage_unsupported', 'token pricing не покрывает Images API', deliveryState='not_sent')
+        price_decision = selected(schedule, period)
+        from .api_reasoning import digest
+        request_key = request.headers.get('idempotency-key') or request.headers.get('x-harness-model-call')
+        if not request_key or len(request_key) > 500:
+            raise GateError(422, 'pricing_request_key_required', 'pricing v1 требует устойчивый model-call ID', deliveryState='not_sent')
+        identity = digest([device.org, device.device_id, route.id, model, request_key])
+        fingerprint = digest([suffix, json.loads(body), wanted])
+        state.store._exec('INSERT OR IGNORE INTO gateway_price_requests VALUES (?,?,?)',
+                          (identity, fingerprint, json.dumps(price_decision)))
+        pinned = state.store._one('SELECT * FROM gateway_price_requests WHERE id=?', (identity,))
+        if pinned['fingerprint'] != fingerprint or json.loads(pinned['decision']) != price_decision:
+            raise GateError(409, 'idempotency_conflict', 'принятый model-call изменил тело или pricing snapshot', deliveryState='not_sent')
     key = state.key_for(route)
     if key is None:
         raise GateError(503, "route_down", f"маршрут {route.id} не поднят: нет ключа {route.key_env}", route=route.id)
     headers = [(k, v) for k, v in request.headers.items()
                  if k.lower() not in DROP_REQUEST and not k.lower().startswith("x-harness-")
-                 and k.lower() != 'x-atlas-reasoning-scope']
+                 and k.lower() != 'x-atlas-reasoning-scope'
+                 and not k.lower().startswith('x-atlas-pricing-')]
     if route.protocol == "anthropic":
         headers.append(("x-api-key", key))
         if not request.headers.get("anthropic-version"):
@@ -183,6 +226,8 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
         raise GateError(502, "upstream_error", f"апстрим {route.id} недоступен: {type(failed).__name__}",
                         route=route.id) from failed
     out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in DROP_RESPONSE}
+    if price_decision:
+        out_headers['X-Atlas-Pricing-Decision'] = json.dumps(price_decision, separators=(',', ':'), ensure_ascii=True)
     session = request.headers.get("x-harness-session")
     model_call = request.headers.get("x-harness-model-call")
 
@@ -192,13 +237,13 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
         # Existing pricing has text token rates only. Do not misprice image tokens.
         image_billing = suffix.startswith('/images/') or (suffix == '/responses' and
             any(t.get('type') == 'image_generation' for t in (json.loads(body).get('tools') or []) if isinstance(t, dict)))
-        cost = None if image_billing else cost_of(org, route.id, model, u)
+        cost = None if image_billing else (period.rates.cost(u) if period else cost_of(org, route.id, model, u))
         if cost is None:
             state.warn_unpriced_once(route.id, model)
         state.store.usage_add(org=org.id, user_id=device.user_id, device_id=device.device_id, kind="gateway",
                               model=model, prompt_tokens=u["prompt"], completion_tokens=u["completion"],
                               cached_tokens=u["cached"], cost=cost, route=route.id, session_id=session,
-                              model_call=model_call)
+                              model_call=model_call, pricing_decision=price_decision)
 
     if resp.status_code >= 400 or not stream:
         # Ошибка апстрима — как есть; нестримовый ответ читается целиком ради usage.
@@ -212,13 +257,13 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
         if resp.status_code < 400:
             try:
                 doc = json.loads(raw)
-                record(openai_usage(doc.get("usage")) if route.protocol == "openai"
+                record(openai_usage(doc.get("usage"), strict=bool(schedule)) if route.protocol == "openai"
                        else anthropic_usage(doc.get("usage"), None))
             except (ValueError, AttributeError):
                 log.warning("ответ апстрима %s без разбираемого usage", route.id)
         return Response(content=raw, status_code=resp.status_code, headers=out_headers)
 
-    tap = UsageTap(route.protocol)
+    tap = UsageTap(route.protocol, strict=bool(schedule))
 
     async def relay() -> AsyncIterator[bytes]:
         try:
