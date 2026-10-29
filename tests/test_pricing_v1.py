@@ -43,6 +43,7 @@ def test_interval_boundaries_reserve_and_exact_estimate():
 @pytest.mark.parametrize('usage',[{}, {'prompt_tokens':1},
     {'prompt_tokens':1,'completion_tokens':2},
     {'prompt_tokens':1,'completion_tokens':2,'prompt_cache_hit_tokens':2},
+    {'prompt_tokens':1,'completion_tokens':2,'prompt_tokens_details':{'cached_tokens':0},'prompt_cache_hit_tokens':1},
     {'prompt_tokens':True,'completion_tokens':2,'prompt_cache_hit_tokens':0}])
 def test_incomplete_dynamic_usage_is_unknown_not_free(usage):
     from atlas_gate.gate.upstream import openai_usage

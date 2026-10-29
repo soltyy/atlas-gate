@@ -80,6 +80,9 @@ def openai_usage(u: dict[str, Any] | None, strict: bool = False) -> dict[str, in
         cache = details.get('cached_tokens', u.get('prompt_cache_hit_tokens'))
         if any(type(v) is not int or v < 0 for v in (inp, out, cache)) or cache > inp:
             return None
+        if 'cached_tokens' in details and 'prompt_cache_hit_tokens' in u and details['cached_tokens'] != u['prompt_cache_hit_tokens']:
+            return None
+        return {'prompt': inp, 'completion': out, 'cached': cache}
     cached = int(details.get("cached_tokens") or u.get("prompt_cache_hit_tokens") or 0)
     return {"prompt": int(u.get("prompt_tokens") or u.get('input_tokens') or 0), "completion": int(u.get("completion_tokens") or u.get('output_tokens') or 0),
             "cached": cached}
