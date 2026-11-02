@@ -48,6 +48,10 @@ class GateRoute(APIRoute):
 
         async def handler(request: Request) -> Response:
             try:
+                from .maintenance import blocks
+                if blocks(request):
+                    return error_response(503, 'gate_maintenance', 'Gate обновляется; повторите сверку после паузы',
+                                          headers={'Retry-After': '1'}, retryable=True)
                 return await inner(request)
             except GateError as failed:
                 return error_response(failed.status, failed.code, failed.message, **failed.extra)

@@ -12,11 +12,12 @@ from sse_starlette.sse import EventSourceResponse
 from ..schemas import CompactRequest, DocumentUploadRequest, PromptRequest, SessionCreated, SessionList, SteerRequest, ToolResultRequest, ToolsUpdate
 from .api import check_data_class, gate, org_of, ready_gate, require_device, router
 from .errors import GateError, STATUS_CODES
-from .schemas import GateAgentSessionCreate
+from .schemas import GateAgentSessionCreate, PromptAdmissionResolve
 from ..sdk_tools import SdkTools, permitted
 from .state import Device
 from .attachments import node_attachments, validate_prompt, validate_tool_result
 from .reasoning import model_policy, validate_new_prompt
+from .operations import body_sha256
 
 log = logging.getLogger("atlas_gate")
 
@@ -183,7 +184,8 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     operation, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/prompt"), body.model_dump(),
         request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes,
-        validate_new=lambda: validate_new_prompt(state, binding, device))
+        validate_new=lambda: validate_new_prompt(state, binding, device),
+        body_digest=body_sha256(await request.json()))
     response = await _deliver_operation(state, binding, operation, fresh,
                                        body.model_dump_json().encode(), {"mode": "async"})
     if response.status_code >= 400:
@@ -311,6 +313,10 @@ async def control_receipt(sid: str, command_id: str, request: Request,
     op = state.store._one("SELECT * FROM router_operations WHERE id=? AND device_id=? AND session_id=?",
                          (command_id, device.device_id, sid))
     if op is None:
+        sealed = state.store._one('SELECT response FROM router_admission_fences WHERE id=? AND device_id=? AND org=? AND session_id=?',
+                                 (command_id, device.device_id, device.org, sid))
+        if sealed:
+            return _admission_negative(json.loads(sealed['response']))
         raise GateError(404, "not_found", "команда не найдена")
     current = await _control_receipt(state, op)
     if current["state"] != "complete":
@@ -328,6 +334,30 @@ async def receipt_by_key(sid: str, request: Request, requestId: str,
     """Lost ACK: клиент знает исходный Idempotency-Key, но ещё не знает commandId."""
     state = gate(request)
     return await control_receipt(sid, state.operations.key(device, requestId), request, device)
+
+
+def _admission_negative(proof):
+    return JSONResponse({'error': {'code': 'command_not_sent', 'message': 'Исходный intent закрыт до допуска'},
+                         'recovery': proof}, status_code=409, headers={
+        'X-Atlas-Command-State': 'complete', 'X-Atlas-Command-Id': proof['commandId'],
+        'X-Atlas-Command-Outcome': 'not_sent', 'X-Atlas-Recovery-Version': '1'})
+
+
+@router.post('/harness/agent/sessions/{sid}/commands/reconcile')
+async def reconcile_prompt_admission(sid: str, body: PromptAdmissionResolve, request: Request,
+                                     device: Device = Depends(require_device)):
+    state = gate(request)
+    binding = state.store._one('SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=?',
+                              (sid, device.device_id, device.org))
+    if binding is None:
+        raise GateError(404, 'not_found', 'Сессия не найдена')
+    _policy(state, device, binding, request, require_model=False, require_sdk=False)
+    if state.nodes.revoked(binding['node_id']):
+        raise GateError(503, 'node_unavailable', 'Router отозван')
+    proof = state.operations.resolve_prompt(device, binding, body.requestId, body.turnId, body.bodySha256)
+    if proof['outcome'] == 'not_sent':
+        return _admission_negative(proof)
+    return JSONResponse({'recovery': proof}, status_code=202, headers={'Retry-After': '1'})
 
 
 def _operation_response(response, op):

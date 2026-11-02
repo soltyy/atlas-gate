@@ -12,6 +12,13 @@ from ..schemas import AgentSpec, ToolDefinition
 from ..sdk_tools import SdkTools
 from ..reasoning import ReasoningSettings
 
+
+class PromptAdmissionResolve(BaseModel):
+    version: Literal[1]
+    requestId: str = Field(min_length=1, max_length=200)
+    turnId: str = Field(min_length=1, max_length=200)
+    bodySha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
 class GateErrorBody(BaseModel):
     code: str
     message: str
