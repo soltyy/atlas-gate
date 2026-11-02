@@ -356,6 +356,8 @@ class Routing:
                 continue
 
     def translate(self, binding, data):
+        from .transport_recovery import decorate
+        data = decorate(data)
         # SDK IDs из session event — отдельное непрозрачное пространство Gate.
         if data.get("type") == "session" and data.get("sessionId"):
             self.store._exec("UPDATE router_bindings SET sdk_id=? WHERE id=?", (str(data["sessionId"]), binding["id"]))
