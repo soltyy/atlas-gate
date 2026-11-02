@@ -551,6 +551,22 @@ async def agent_events(sid: str, turn_id: str, request: Request, device: Device 
     return JSONResponse(doc) if doc is not None else _response(response)
 
 
+@router.get('/harness/agent/sessions/{sid}/turns/{turn_id}/receipt')
+async def agent_turn_receipt(sid: str, turn_id: str, request: Request, device: Device = Depends(require_device)):
+    state = gate(request)
+    binding = state.routing.get(sid, device, include_closed=True)
+    _policy(state, device, binding, request, require_model=False, require_sdk=False)
+    binding = await state.routing.recover_boot(binding)
+    response = await state.nodes.request(binding['node_id'], 'GET',
+        _path(binding, f'/turns/{quote(turn_id, safe="")}/receipt'), expected_boot=binding['boot_id'])
+    if response.status_code != 200:
+        return _response(response)
+    terminal = state.routing.translate(binding, response.json())
+    if terminal.get('type') == 'result':
+        state.routing.usage(binding, turn_id, terminal, device)
+    return JSONResponse(terminal, headers={'Cache-Control': 'private, no-store'})
+
+
 @router.delete("/harness/agent/sessions/{sid}")
 async def agent_delete(sid: str, request: Request, device: Device = Depends(require_device)):
     state = gate(request)
