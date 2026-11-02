@@ -118,7 +118,10 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guar
     if failure=='legacy_rollback':
         assert ('api-contract','0.4.17') in events and ('api-contract','0.4.16') in events
         assert not m.API_FLAG.exists() and not m.API_FLAG.with_name(m.API_FLAG.name+'.pending').exists()
-    assert events[0]==('api-contract',None)  # stale capability is reconciled even before a busy abort
+    # nginx -t intentionally precedes the deployment lock. Capability sync must
+    # precede node admission checks, not that side-effect-free syntax check.
+    assert events.index(('api-contract',None)) < next(
+        (i for i,e in enumerate(events) if e[0] in ('drain','ingress-drain') or 'atlas_gate.admission_check' in e), len(events))
     if failure is None:
         assert [('ingress-drain',False),('wait-idle',False),('ingress-drain',True)] == [
             event for event in events if event[0] in ('ingress-drain','wait-idle')]
