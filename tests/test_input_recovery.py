@@ -68,3 +68,13 @@ async def test_gate_cold_files_restore_keeps_scope_owner_and_upload_ack(network,
         assert not any(ScriptedRpc.histories.values()),'No prompt was submitted during recovery'
     finally:
         for backend in backends:await backend.close()
+
+
+def test_paused_input_keeps_retry_hint_without_reclassifying_protocol():
+    import httpx
+    from atlas_gate.gate.agent import _response
+    body={'error':{'code':'input_preparation_paused','deliveryState':'not_sent','scope':'attempt'}}
+    reply=_response(httpx.Response(503,json=body,headers={'Retry-After':'1'}))
+    assert reply.status_code==503 and reply.headers['Retry-After']=='1'
+    import json
+    assert json.loads(reply.body)==body

@@ -24,6 +24,7 @@ log = logging.getLogger("atlas_gate")
 
 def _response(response):
     raw = response.content
+    headers = {"Retry-After": response.headers["Retry-After"]} if "Retry-After" in response.headers else {}
     if response.status_code >= 400:
         try:
             doc = response.json()
@@ -33,7 +34,7 @@ def _response(response):
             detail = doc.get("detail", "Router отказал") if isinstance(doc, dict) else doc
             if isinstance(detail, dict) and isinstance(detail.get('error'), dict):
                 return Response(content=json.dumps({'error':detail['error']}, ensure_ascii=False).encode(),
-                                status_code=response.status_code, media_type='application/json')
+                                status_code=response.status_code, media_type='application/json', headers=headers)
             code = STATUS_CODES.get(response.status_code, "agent_error")
             if str(detail).startswith("session_suspended"):
                 code = "session_suspended"
@@ -42,7 +43,7 @@ def _response(response):
             elif str(detail).startswith('resume_unavailable'):
                 code = 'sdk_session_recovery_unavailable'
             raw = json.dumps({"error": {"code": code, "message": str(detail)}}, ensure_ascii=False).encode()
-    return Response(content=raw, status_code=response.status_code, media_type="application/json")
+    return Response(content=raw, status_code=response.status_code, media_type="application/json", headers=headers)
 
 
 def _selection(state, device, model=None, route_id=None):
