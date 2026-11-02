@@ -39,6 +39,8 @@ def _response(response):
                 code = "session_suspended"
             elif str(detail) == "router_identity_mismatch":
                 code = "router_identity_mismatch"
+            elif str(detail).startswith('resume_unavailable'):
+                code = 'sdk_session_recovery_unavailable'
             raw = json.dumps({"error": {"code": code, "message": str(detail)}}, ensure_ascii=False).encode()
     return Response(content=raw, status_code=response.status_code, media_type="application/json")
 
@@ -460,6 +462,25 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     if method == "GET" and suffix == "/context" and response.status_code == 200:
         if state.context_windows.observe(binding,response.json(),context_order):
             await state.publish_contexts()
+    if method == 'GET' and suffix in ('/files', '/sdk-tools') and response.status_code == 200:
+        from .input_recovery import validate, public
+        proof = response.json().get('inputRecovery')
+        sdk_id = binding.get('sdk_id')
+        if proof is not None and not sdk_id:
+            saved = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/reconcile'),
+                                              expected_boot=binding['boot_id'])
+            if saved.status_code != 200:
+                raise GateError(409, 'input_recovery_unavailable', 'Привязка файловой сессии не подтверждена')
+            metadata = saved.json()
+            if (metadata.get('id') != binding['local_id'] or metadata.get('nodeId') != binding['node_id']
+                    or metadata.get('bootId') != binding['boot_id']):
+                raise GateError(409, 'input_recovery_mismatch', 'Идентичность файловой сессии не подтверждена')
+            sdk_id = metadata.get('sdkSessionId')
+        validate(proof, binding['local_id'], sdk_id)
+        if proof is not None:
+            doc = response.json()
+            doc['inputRecovery'] = public(proof, binding)
+            return JSONResponse(doc)
     return _response(response)
 
 

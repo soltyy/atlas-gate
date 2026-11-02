@@ -331,8 +331,11 @@ class Routing:
             raise GateError(409, "router_identity_mismatch", "привязка Router не подтверждена")
         if binding["sdk_id"] and saved.get("sdkSessionId") != binding["sdk_id"]:
             raise GateError(409, "resume_unavailable", "история SDK не совпадает")
-        self.store._exec("UPDATE router_bindings SET boot_id=? WHERE id=?", (info["bootId"], binding["id"]))
-        return dict(binding, boot_id=info["bootId"])
+        from .input_recovery import validate
+        validate(saved.get('inputRecovery'), binding['local_id'], saved.get('sdkSessionId'))
+        self.store._exec("UPDATE router_bindings SET boot_id=?,sdk_id=COALESCE(sdk_id,?) WHERE id=?",
+                         (info["bootId"], saved.get('sdkSessionId'), binding["id"]))
+        return dict(binding, boot_id=info["bootId"], sdk_id=binding['sdk_id'] or saved.get('sdkSessionId'))
 
     async def sync_bindings(self, device_id=None):
         # Проверять journal metadata, а не пустой memory registry после reboot.
@@ -359,6 +362,8 @@ class Routing:
                     self.store._exec("UPDATE router_operations SET finished=1 WHERE session_id=?", (binding["id"],))
                     continue
                 if saved.get("sdkSessionId"):
+                    from .input_recovery import validate
+                    validate(saved.get('inputRecovery'), binding['local_id'], saved['sdkSessionId'])
                     self.store._exec("UPDATE router_bindings SET sdk_id=? WHERE id=?", (saved["sdkSessionId"], binding["id"]))
                 if binding["status"] == "closing" or binding["revoked_at"] is not None:
                     closed = await self.nodes.request(binding["node_id"], "DELETE", "/v1/sessions/" + binding["local_id"], expected_boot=saved["bootId"], request_id="revoke:" + binding["device_id"] + ":" + binding["id"])
