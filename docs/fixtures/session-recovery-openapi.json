@@ -1,0 +1,1771 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Gate recovery v1 candidate wire",
+    "version": "0.4.20"
+  },
+  "x-installed": false,
+  "x-runtime-status": "candidate-not-deployed",
+  "paths": {
+    "/harness/llm/attempts/reconcile": {
+      "post": {
+        "tags": [
+          "gate"
+        ],
+        "summary": "Api Attempt Reconcile",
+        "operationId": "api_attempt_reconcile_harness_llm_attempts_reconcile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiAttemptReconcile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment Required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request Entity Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Precondition Required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/llm/attempts/lookup": {
+      "get": {
+        "tags": [
+          "gate"
+        ],
+        "summary": "Api Attempt Lookup",
+        "operationId": "api_attempt_lookup_harness_llm_attempts_lookup_get",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Requestid"
+            }
+          },
+          {
+            "name": "route_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Route Id"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          },
+          {
+            "name": "bodySha256",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bodysha256"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Payment Required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/harness/llm/attempts/{attempt_id}": {
+      "get": {
+        "tags": [
+          "gate"
+        ],
+        "summary": "Api Attempt Receipt",
+        "operationId": "api_attempt_receipt_harness_llm_attempts__attempt_id__get",
+        "parameters": [
+          {
+            "name": "attempt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Attempt Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Payment Required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/harness/llm/attempts/{attempt_id}/result": {
+      "get": {
+        "tags": [
+          "gate"
+        ],
+        "summary": "Api Attempt Result",
+        "operationId": "api_attempt_result_harness_llm_attempts__attempt_id__result_get",
+        "parameters": [
+          {
+            "name": "attempt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Attempt Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Payment Required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/harness/recovery/inventories": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Inventories",
+        "operationId": "inventories_harness_recovery_inventories_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InventoryCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/inventories/{inventory_id}/seal": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Seal Inventory",
+        "operationId": "seal_inventory_harness_recovery_inventories__inventory_id__seal_post",
+        "parameters": [
+          {
+            "name": "inventory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Inventory Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Versioned"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/cases": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Cases",
+        "operationId": "cases_harness_recovery_cases_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaseCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/cases/{case_id}": {
+      "get": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Snapshot",
+        "operationId": "snapshot_harness_recovery_cases__case_id__get",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Case Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/cases/{case_id}/evidence": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Append Evidence",
+        "operationId": "append_evidence_harness_recovery_cases__case_id__evidence_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Case Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Evidence"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/cases/{case_id}/apply": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Apply",
+        "operationId": "apply_harness_recovery_cases__case_id__apply_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Case Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Apply"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/cases/{case_id}/ack": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Ack",
+        "operationId": "ack_harness_recovery_cases__case_id__ack_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Case Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Ack"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/harness/recovery/cases/{case_id}/cancel": {
+      "post": {
+        "tags": [
+          "recovery"
+        ],
+        "summary": "Cancel",
+        "operationId": "cancel_harness_recovery_cases__case_id__cancel_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Case Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Cancel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Ack": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "ackKey": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Ackkey"
+          },
+          "planId": {
+            "type": "string",
+            "title": "Planid"
+          },
+          "planRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Planrevision"
+          },
+          "sourceManifestSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sourcemanifestsha256"
+          },
+          "clientStoreEpoch": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Clientstoreepoch"
+          },
+          "sourceRunId": {
+            "type": "string",
+            "title": "Sourcerunid"
+          },
+          "sourceSessionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcesessionid"
+          },
+          "sourceAttemptId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceattemptid"
+          },
+          "sourceCheckpointVersion": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Sourcecheckpointversion"
+          },
+          "appliedActions": {
+            "items": {
+              "$ref": "#/components/schemas/AppliedAction"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Appliedactions"
+          },
+          "localCommitRef": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Localcommitref"
+          },
+          "localCommitSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Localcommitsha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "ackKey",
+          "planId",
+          "planRevision",
+          "sourceManifestSha256",
+          "clientStoreEpoch",
+          "sourceRunId",
+          "sourceCheckpointVersion",
+          "appliedActions",
+          "localCommitRef",
+          "localCommitSha256"
+        ],
+        "title": "Ack"
+      },
+      "ApiAttemptReconcile": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Requestid"
+          },
+          "routeId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Routeid"
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model"
+          },
+          "endpoint": {
+            "type": "string",
+            "enum": [
+              "/chat/completions",
+              "/responses",
+              "/messages",
+              "/images/generations"
+            ],
+            "title": "Endpoint"
+          },
+          "bodySha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Bodysha256"
+          },
+          "conversationId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversationid"
+          },
+          "branchId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branchid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "requestId",
+          "routeId",
+          "model",
+          "endpoint",
+          "bodySha256"
+        ],
+        "title": "ApiAttemptReconcile"
+      },
+      "ApiSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "api_attempt",
+            "title": "Kind"
+          },
+          "gateRoot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateroot"
+          },
+          "attemptId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Attemptid"
+          },
+          "routeId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Routeid"
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "attemptId",
+          "routeId",
+          "model"
+        ],
+        "title": "ApiSource"
+      },
+      "AppliedAction": {
+        "properties": {
+          "actionId": {
+            "type": "string",
+            "title": "Actionid"
+          },
+          "evidenceSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidencesha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "actionId",
+          "evidenceSha256"
+        ],
+        "title": "AppliedAction"
+      },
+      "Apply": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "planId": {
+            "type": "string",
+            "title": "Planid"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expectedrevision"
+          },
+          "sourceManifestSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sourcemanifestsha256"
+          },
+          "branchFence": {
+            "$ref": "#/components/schemas/Fence"
+          },
+          "actionIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Actionids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "planId",
+          "expectedRevision",
+          "sourceManifestSha256",
+          "branchFence",
+          "actionIds"
+        ],
+        "title": "Apply"
+      },
+      "Cancel": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expectedrevision"
+          },
+          "sourceManifestSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sourcemanifestsha256"
+          },
+          "branchFence": {
+            "$ref": "#/components/schemas/Fence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "expectedRevision",
+          "sourceManifestSha256",
+          "branchFence"
+        ],
+        "title": "Cancel"
+      },
+      "CaseCreate": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "inventoryId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Inventoryid"
+          },
+          "sourceRef": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Sourceref"
+          },
+          "conversationId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Conversationid"
+          },
+          "branchId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Branchid"
+          },
+          "sourceRunId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Sourcerunid"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaseSource"
+              },
+              {
+                "$ref": "#/components/schemas/ApiSource"
+              }
+            ],
+            "title": "Source"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/Operation"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Operations"
+          },
+          "sourceCheckpointVersion": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Sourcecheckpointversion",
+            "default": 0
+          },
+          "observation": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Observation"
+          },
+          "control": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Control"
+          },
+          "permissions": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Permissions"
+          },
+          "transportGoal": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "released",
+              "none"
+            ],
+            "title": "Transportgoal",
+            "default": "ready"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "version",
+          "inventoryId",
+          "sourceRef",
+          "conversationId",
+          "branchId",
+          "sourceRunId",
+          "source",
+          "operations"
+        ],
+        "title": "CaseCreate"
+      },
+      "CaseSource": {
+        "properties": {
+          "gateRoot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateroot"
+          },
+          "sessionId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Sessionid"
+          },
+          "historyAlias": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Historyalias"
+          },
+          "routeId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Routeid"
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model"
+          },
+          "kind": {
+            "type": "string",
+            "const": "managed_session",
+            "title": "Kind",
+            "default": "managed_session"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sessionId",
+          "historyAlias",
+          "routeId",
+          "model"
+        ],
+        "title": "CaseSource"
+      },
+      "Evidence": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Kind"
+          },
+          "claim": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Claim"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "kind",
+          "claim"
+        ],
+        "title": "Evidence"
+      },
+      "Fence": {
+        "properties": {
+          "recoveryGeneration": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Recoverygeneration"
+          },
+          "controlEpoch": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Controlepoch"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "recoveryGeneration",
+          "controlEpoch"
+        ],
+        "title": "Fence"
+      },
+      "GateErrorBody": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "GateErrorBody"
+      },
+      "GateErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/GateErrorBody"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "GateErrorResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "InventoryCreate": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "conversationId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Conversationid"
+          },
+          "branchId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Branchid"
+          },
+          "clientStoreEpoch": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Clientstoreepoch"
+          },
+          "checkpointInventoryVersion": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Checkpointinventoryversion"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "type": "array",
+            "title": "Sources"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "conversationId",
+          "branchId",
+          "clientStoreEpoch",
+          "checkpointInventoryVersion",
+          "sources"
+        ],
+        "title": "InventoryCreate"
+      },
+      "Operation": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "prompt",
+              "tool_result",
+              "compact",
+              "tools",
+              "interrupt",
+              "tool_effect",
+              "api_attempt"
+            ],
+            "title": "Kind"
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Requestid"
+          },
+          "bodySha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Bodysha256"
+          },
+          "turnId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turnid"
+          },
+          "callId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Callid"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "kind",
+          "requestId",
+          "bodySha256"
+        ],
+        "title": "Operation"
+      },
+      "SourceRef": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version",
+            "default": 1
+          },
+          "sourceRef": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Sourceref"
+          },
+          "sourceRunId": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Sourcerunid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "managed_session",
+              "api_attempt"
+            ],
+            "title": "Kind",
+            "default": "managed_session"
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessionid"
+          },
+          "attemptId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attemptid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sourceRef",
+          "sourceRunId"
+        ],
+        "title": "SourceRef"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "Versioned": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "Versioned"
+      }
+    }
+  }
+}
