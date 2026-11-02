@@ -37,7 +37,8 @@ async def test_auth_unknown_and_catalog_mismatch_are_not_capacity(tmp_path,state
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('history_present', [True, False])
-async def test_existing_create_path_replaces_closed_transport_after_login(network, monkeypatch, history_present):
+@pytest.mark.parametrize('lost_ack', [False, True])
+async def test_existing_create_path_replaces_closed_transport_after_login(network, monkeypatch, history_present, lost_ack):
     client, app, routers, settings, creds, other = network
     from atlas_router.backends.stub import StubBackend
     native = 'auth79-history'
@@ -61,7 +62,20 @@ async def test_existing_create_path_replaces_closed_transport_after_login(networ
     waiting=await client.post('/harness/agent/sessions',json=request,headers={'Idempotency-Key':'after-login'})
     assert waiting.status_code==503 and waiting.json()['error']['code']=='sdk_auth_required'
     monkeypatch.setattr(state.nodes,'refresh',refresh)
+    node_request=state.nodes.request
+    dropped=False
+    async def lose_once(node,method,path,**kw):
+        nonlocal dropped
+        response=await node_request(node,method,path,**kw)
+        if lost_ack and method=='POST' and path=='/v1/sessions' and not dropped:
+            dropped=True
+            raise GateError(503,'command_outcome_unknown','lost ACK')
+        return response
+    monkeypatch.setattr(state.nodes,'request',lose_once)
     recovered=await client.post('/harness/agent/sessions',json=request,headers={'Idempotency-Key':'after-login'})
+    if lost_ack:
+        assert recovered.status_code==503
+        recovered=await client.post('/harness/agent/sessions',json=request,headers={'Idempotency-Key':'after-login'})
     assert recovered.status_code==200,recovered.text
     ack=recovered.json()
     assert ack['id']!=sid and ack['resumed'] is history_present

@@ -31,7 +31,7 @@ class Routing:
         with store._lock:
             store._db.executescript(DDL)
             columns = {r[1] for r in store._db.execute("PRAGMA table_info(router_bindings)")}
-            for name in ("request_key", "fingerprint", "response", "sdk_tools", "reasoning_snapshot"):
+            for name in ("request_key", "fingerprint", "response", "sdk_tools", "reasoning_snapshot", "recovery_source"):
                 if name not in columns:
                     store._db.execute(f"ALTER TABLE router_bindings ADD COLUMN {name} TEXT")
             for name, kind in (("rejection_status", "INTEGER"), ("rejection_body", "BLOB")):
@@ -47,6 +47,18 @@ class Routing:
                 and binding["rejection_body"] is not None):
             return binding["rejection_status"], bytes(binding["rejection_body"])
         return None
+
+    @staticmethod
+    def recovery_ack(binding, created):
+        source = json.loads(binding.get('recovery_source') or 'null')
+        if source is None:
+            return
+        created['sessionRecovery'] = {'version': 1,
+            'mode': ('resumed' if created.get('resumed') is True else
+                     'history_fallback' if created.get('resumed') is False else 'unconfirmed'),
+            'previousSessionId': source['previousSessionId'], 'actionsReplayed': False}
+        if created.get('resumed') is False and not source['allowHistoryFallback']:
+            raise ValueError('SDK did not confirm history and fallback was not authorized')
 
     def creation_headers(self, device, request_id, status, body):
         """Подтверждение только сохранённого отказа исходного запроса клиента."""
@@ -224,8 +236,10 @@ class Routing:
                 body['sdkTools'] = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
             sid, alias = str(uuid.uuid4()), str(uuid.uuid4())
             boot_id = self.nodes.snapshots[node_id]["bootId"]
-            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools,reasoning_snapshot) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?,?)",
-                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(body['sdkTools']), json.dumps(reasoning_snapshot)))
+            recovery_source = json.dumps({'previousSessionId': resume.get('id'),
+                'allowHistoryFallback': bool(payload.get('allowHistoryFallback'))}) if resume else None
+            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools,reasoning_snapshot,recovery_source) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?,?,?)",
+                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(body['sdkTools']), json.dumps(reasoning_snapshot), recovery_source))
             if resume:
                 body["resumeSessionId"] = resume["sdk_id"]
         try:
@@ -245,13 +259,7 @@ class Routing:
             local_id = created["id"]
             if not isinstance(local_id, str) or not local_id:
                 raise ValueError("invalid session id")
-            if resume:
-                created['sessionRecovery'] = {'version': 1,
-                    'mode': ('resumed' if created.get('resumed') is True else
-                             'history_fallback' if created.get('resumed') is False else 'unconfirmed'),
-                    'previousSessionId': resume.get('id'), 'actionsReplayed': False}
-                if created.get('resumed') is False and not payload.get('allowHistoryFallback'):
-                    raise ValueError('SDK did not confirm history and fallback was not authorized')
+            self.recovery_ack({'recovery_source': recovery_source}, created)
             self.store._exec("UPDATE router_bindings SET status='ready',local_id=? WHERE id=?", (local_id, sid))
         except (ValueError, KeyError, TypeError):
             self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))
@@ -284,6 +292,7 @@ class Routing:
                     continue
                 created = command["response"]
                 confirm(json.loads(binding.get('reasoning_snapshot') or '{}'), created)
+                self.recovery_ack(binding, created)
                 requested = SdkTools.model_validate(json.loads(binding['sdk_tools'] or '{}'))
                 if enabled(requested) and created.get('sdkTools') != requested.model_dump():
                     continue
