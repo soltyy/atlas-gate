@@ -1,8 +1,10 @@
 # Gate 0.4.20 — coordinator и managed API attempts
 
-**Кандидат, не поставлен.** Состояние документа на 03.11.2026. Gate #88 связан
-с Router #104 / кандидатом Router 0.8.19. Версия пакета и опубликованные wire
-fixtures не являются доказательством установки или installed SDK qualification.
+**Поставлен 03.11.2026.** Gate #88 / Router #104: Gate 0.4.20 и оба Router 0.8.19.
+Runtime commit `9d49db75f34027c556c7d60c025c6263b671f3db`; wheel SHA256
+`91a268b3325ece72ac2c3af98c0061e8c5ba86cede071b6022aea06915dbad2d`.
+Guard, native SDK web и HTTPS postflight прошли; [проверки и ограничения](https://github.com/soltyy/atlas-gate/issues/88#issuecomment-6590421898).
+Клиентские Harness #504 / EDT #222 этим серверным выпуском не устанавливаются.
 
 ## Серверный контракт
 

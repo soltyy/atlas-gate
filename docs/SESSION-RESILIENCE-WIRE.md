@@ -1,11 +1,14 @@
-# HTTP-карта recovery: кандидат Gate 0.4.20 / Router 0.8.19
+# HTTP-карта recovery: Gate 0.4.20 / Router 0.8.19
 
 Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), сверка кода 03.11.2026.
 Исходная база RFC — Gate **0.4.19** / Router **0.8.18**. Ниже отдельно описан
-реализованный код кандидатов **Gate 0.4.20 / Router 0.8.19**, ещё **не поставленных**.
-Номер версии, документация и fixture не подтверждают установленный runtime.
+поставленный серверный runtime **Gate 0.4.20 / оба Router 0.8.19**. Guard,
+native SDK web и HTTPS postflight завершены; [квитанция поставки](https://github.com/soltyy/atlas-gate/issues/88#issuecomment-6590421898).
+Это подмножество RFC: ограничения Claude cold restore, continuation и клиентской
+локальной транзакции перечислены ниже. Версия или fixture сами по себе не доказывают
+поддержку другого развёрнутого узла: клиент проверяет подписанный профиль и exact case.
 
-Точные request schemas: [OpenAPI кандидата](fixtures/session-recovery-openapi.json).
+Точные request schemas: [OpenAPI wire v1](fixtures/session-recovery-openapi.json).
 Примеры, capability, headers и canonical JSON vectors:
 [session-recovery-v1.json](fixtures/session-recovery-v1.json). В опубликованном
 снимке `6740fca` и текущем коде совпадают 12 recovery/API-attempt путей и 18 схем.
