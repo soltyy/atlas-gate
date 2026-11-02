@@ -77,6 +77,21 @@ class Routing:
         self.store._exec("UPDATE router_bindings SET status='rejected',rejection_status=?,rejection_body=? WHERE id=?",
                          (status, body, sid))
 
+    def accept_creation(self, sid, local_id, created):
+        # The foreground create and background command reconciliation may both
+        # observe the same Router ACK. Publish ready+body atomically; only the
+        # first observation owns the immutable bytes, including extension fields.
+        raw = json.dumps(created)
+        with self.store._lock:
+            db = self.store._db
+            saved = dict(db.execute('SELECT * FROM router_bindings WHERE id=?', (sid,)).fetchone())
+            cached = self.creation_response(saved)
+            if cached is not None:
+                return cached
+            db.execute("UPDATE router_bindings SET status='ready',local_id=?,response=? WHERE id=?",
+                       (local_id, raw, sid))
+        return 200, raw.encode()
+
     def get(self, sid, device, *, include_closed=False):
         # Только чтение durable events/media может наблюдать закрытую привязку.
         # Это не меняет её lifecycle и не разрешает команды/возобновление SDK.
@@ -260,13 +275,11 @@ class Routing:
             if not isinstance(local_id, str) or not local_id:
                 raise ValueError("invalid session id")
             self.recovery_ack({'recovery_source': recovery_source}, created)
-            self.store._exec("UPDATE router_bindings SET status='ready',local_id=? WHERE id=?", (local_id, sid))
         except (ValueError, KeyError, TypeError):
             self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))
             raise GateError(502, "command_outcome_unknown", "Router вернул неверный ответ создания")
         created["id"] = sid
-        self.store._exec("UPDATE router_bindings SET response=? WHERE id=?", (json.dumps(created), sid))
-        return response.status_code, json.dumps(created).encode()
+        return self.accept_creation(sid, local_id, created)
 
     async def reconcile(self, binding_id=None):
         # Старые rejected без ответа сверяются только по явному повтору ключа.
@@ -300,7 +313,7 @@ class Routing:
                 if not isinstance(local, str) or not local:
                     continue
                 created = dict(created, id=binding["id"])
-                self.store._exec("UPDATE router_bindings SET status='ready',local_id=?,response=? WHERE id=?", (local, json.dumps(created), binding["id"]))
+                self.accept_creation(binding['id'], local, created)
             except (GateError, ValueError, KeyError, TypeError):
                 continue
 
