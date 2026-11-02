@@ -171,6 +171,8 @@ class Nodes:
             raise GateError(503, "node_unavailable", "идентичность Router не подтверждена", node_id=node_id)
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
+        if method == "GET" and path.endswith(("/files", "/sdk-tools")):
+            headers["X-Atlas-Input-Recovery"] = "1"
         if request_id:
             headers["Idempotency-Key"] = request_id
         try:
