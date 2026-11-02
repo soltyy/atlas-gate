@@ -41,7 +41,7 @@ class Routing:
 
     @staticmethod
     def creation_response(binding):
-        if binding["status"] == "ready" and binding["response"]:
+        if binding["status"] in ('ready', 'closed', 'closing') and binding["response"]:
             return 200, binding["response"].encode()
         if (binding["status"] == "rejected" and binding["rejection_status"] is not None
                 and binding["rejection_body"] is not None):
@@ -125,20 +125,28 @@ class Routing:
                 if resume["route"] != route or resume["model"] != model:
                     raise GateError(403, "policy_denied", "resume требует прежнего маршрута и модели")
             candidates = []
+            excluded = []
+            model_compatible = False
             reasoning_failure, reasoning_compatible = None, False
             loads = self.nodes.reserved() if hasattr(self.nodes, "reserved") else {n: i.get("activeTurns", 0) for n, i in self.nodes.snapshots.items()}
             for node_id, info in self.nodes.snapshots.items():
                 n = self.nodes.config[node_id]
-                if not supports(info.get('sdkTools'), SdkTools.model_validate(payload.get('sdkTools') or {})):
-                    continue
                 if not n.enabled or device.org not in n.orgs or route not in n.routes:
                     continue
                 if resume and node_id != resume["node_id"]:
                     continue
+                if not supports(info.get('sdkTools'), SdkTools.model_validate(payload.get('sdkTools') or {})):
+                    excluded.append('sdk_tools_unavailable')
+                    continue
                 if not info.get("ready") or info.get("draining"):
+                    auth = (info.get('authentication') or {}).get('state')
+                    excluded.append('sdk_auth_required' if auth == 'required' else
+                                    'sdk_auth_unknown' if auth == 'unknown' else 'node_not_ready')
                     continue
                 if model not in {m.get("value") for m in info["models"]}:
+                    excluded.append('model_unavailable')
                     continue
+                model_compatible = True
                 try:
                     validate_node(info, model, reasoning_snapshot)
                     reasoning_compatible = True
@@ -173,11 +181,41 @@ class Routing:
             if not candidates:
                 if reasoning_failure is not None and not reasoning_compatible:
                     raise GateError(422, reasoning_failure.code, str(reasoning_failure))
+                if excluded and not model_compatible:
+                    # A pre-admission refusal does not replace a previous unknown
+                    # create receipt. Reprobe on the next existing create attempt.
+                    reason = ('sdk_auth_required' if set(excluded) == {'sdk_auth_required'} else
+                              'model_unavailable' if set(excluded) == {'model_unavailable'} else
+                              'sdk_auth_unknown' if 'sdk_auth_unknown' in excluded else 'node_not_ready')
+                    messages = {'sdk_auth_required': 'Войдите в подписку SDK; после входа создание сессии можно продолжить',
+                                'sdk_auth_unknown': 'SDK не подтвердил состояние входа; проверка будет повторена',
+                                'model_unavailable': 'Модель отсутствует в текущем каталоге закреплённого Router',
+                                'node_not_ready': 'Совместимый Router пока не готов к созданию сессии'}
+                    raise GateError(422 if reason == 'model_unavailable' else 503, reason, messages[reason],
+                                    outcome='not_sent', phase='session_create', retryable=reason != 'model_unavailable')
                 raise GateError(503, "capacity_exceeded", "нет доступного совместимого Router")
             best = min(row[:-1] for row in candidates)
             ties = [row[-1] for row in candidates if row[:-1] == best]
             import secrets
             node_id = secrets.choice(ties)
+            if resume and resume.get('local_id'):
+                # Same pinned node, read-only journal check before a NEW transport.
+                # Never resurrect a live/pending turn, or lose its tool ACKs.
+                previous = await self.nodes.request(node_id, 'GET', '/v1/sessions/' + resume['local_id'] + '/reconcile')
+                if previous.status_code not in (200, 404):
+                    raise GateError(503, 'session_recovery_unavailable', 'Состояние прежней сессии не подтверждено', outcome='not_sent')
+                if previous.status_code == 200:
+                    saved = previous.json()
+                    if (saved.get('id') != resume['local_id'] or saved.get('nodeId') != node_id or
+                            saved.get('bootId') != self.nodes.snapshots[node_id]['bootId'] or
+                            saved.get('sdkSessionId') != resume['sdk_id']):
+                        raise GateError(409, 'router_identity_mismatch', 'Прежняя история не подтверждена')
+                    if (saved.get('sessionRecovery') or {}).get('busy'):
+                        raise GateError(409, 'session_recovery_pending', 'Сначала требуется сверить незавершённый ход прежней сессии')
+                    if not saved.get('sessionRecovery') and self.store._one(
+                            'SELECT id FROM router_operations WHERE session_id=? AND turn_id IS NOT NULL AND finished=0 LIMIT 1',
+                            (resume['id'],)):
+                        raise GateError(409, 'session_recovery_pending', 'Прежний Router не подтвердил завершение хода')
             body = dict(payload, model=model)
             if reasoning_snapshot['selected'] is not None:
                 body['reasoning'] = reasoning_snapshot['selected']
@@ -206,6 +244,12 @@ class Routing:
             local_id = created["id"]
             if not isinstance(local_id, str) or not local_id:
                 raise ValueError("invalid session id")
+            if resume:
+                created['sessionRecovery'] = {'version': 1,
+                    'mode': 'resumed' if created.get('resumed') is True else 'history_fallback',
+                    'previousSessionId': resume.get('id'), 'actionsReplayed': False}
+                if created.get('resumed') is not True and not payload.get('allowHistoryFallback'):
+                    raise ValueError('SDK did not confirm history and fallback was not authorized')
             self.store._exec("UPDATE router_bindings SET status='ready',local_id=? WHERE id=?", (local_id, sid))
         except (ValueError, KeyError, TypeError):
             self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))

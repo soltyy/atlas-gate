@@ -178,6 +178,9 @@ async def test_explicit_history_fallback_keeps_original_node_affinity(tmp_path):
         sent=[]
         original=nodes.request
         async def request(node_id, method, path, **kwargs):
+            if method == 'GET' and path.endswith('/reconcile'):
+                return httpx.Response(200, json={'id':first['local_id'],'nodeId':node_id,
+                    'bootId':nodes.snapshots[node_id]['bootId'],'sdkSessionId':'native-sdk','closed':True})
             sent.append((node_id,json.loads(kwargs['content'])))
             response = await original(node_id,method,path,**kwargs)
             return httpx.Response(response.status_code, json={**response.json(), "id": "fallback-local-id"})
