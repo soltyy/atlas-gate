@@ -8,6 +8,11 @@ import weakref
 from .errors import GateError
 
 
+def body_sha256(body):
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
 class Operations:
     def __init__(self, store):
         self.store = store
@@ -26,6 +31,70 @@ class Operations:
             store._exec("ALTER TABLE router_operations ADD COLUMN accounted INTEGER NOT NULL DEFAULT 0")
         if "boot_id" not in columns:
             store._exec("ALTER TABLE router_operations ADD COLUMN boot_id TEXT")
+        if 'body_sha256' not in columns:
+            store._exec('ALTER TABLE router_operations ADD COLUMN body_sha256 TEXT')
+        store._exec('''CREATE TABLE IF NOT EXISTS router_admission_fences(
+            id TEXT PRIMARY KEY, device_id TEXT NOT NULL, org TEXT NOT NULL,
+            session_id TEXT NOT NULL, turn_id TEXT NOT NULL, body_sha256 TEXT NOT NULL,
+            response TEXT NOT NULL, created REAL NOT NULL,
+            UNIQUE(device_id,session_id,turn_id))''')
+        # Preserve the safety invariant even if an older Gate is rolled back onto
+        # this database: its admission INSERT must fail before any forwarding.
+        store._exec('''CREATE TRIGGER IF NOT EXISTS router_operation_admission_fence
+            BEFORE INSERT ON router_operations WHEN EXISTS (
+              SELECT 1 FROM router_admission_fences f WHERE f.id=NEW.id OR
+              (f.device_id=NEW.device_id AND f.session_id=NEW.session_id AND f.turn_id=NEW.turn_id))
+            BEGIN SELECT RAISE(ABORT,'admission_fenced'); END''')
+
+    def fence(self, device, binding, request_id):
+        return self.store._one('SELECT * FROM router_admission_fences WHERE id=? AND device_id=? AND org=? AND session_id=?',
+                              (self.key(device, request_id), device.device_id, device.org, binding['id']))
+
+    def resolve_prompt(self, device, binding, request_id, turn_id, digest):
+        """Linearization point shared with begin; never calls Router or SDK."""
+        rid = self.key(device, request_id)
+        with self.store._lock:
+            db = self.store._db
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                old = db.execute('SELECT * FROM router_operations WHERE id=?', (rid,)).fetchone()
+                if old:
+                    if (old['device_id'] != device.device_id or old['session_id'] != binding['id'] or
+                            old['turn_id'] != turn_id or not old['path'].endswith('/prompt')):
+                        raise GateError(409, 'idempotency_conflict', 'Команда относится к другому запросу')
+                    if old['body_sha256'] and old['body_sha256'] != digest:
+                        raise GateError(409, 'idempotency_conflict', 'SHA тела команды не совпадает')
+                    result = {'version': 1, 'outcome': 'unknown', 'commandId': rid,
+                              'requestId': request_id, 'sessionId': binding['id'], 'turnId': turn_id,
+                              'receiptState': old['state'], 'reason': 'observe_existing_command'}
+                    db.execute('COMMIT')
+                    return result
+                sealed = db.execute('SELECT * FROM router_admission_fences WHERE id=? OR (device_id=? AND session_id=? AND turn_id=?)',
+                                    (rid, device.device_id, binding['id'], turn_id)).fetchone()
+                if sealed:
+                    if (sealed['id'] != rid or sealed['org'] != device.org or sealed['device_id'] != device.device_id or
+                            sealed['session_id'] != binding['id'] or sealed['turn_id'] != turn_id or sealed['body_sha256'] != digest):
+                        raise GateError(409, 'idempotency_conflict', 'Отрицательная квитанция относится к другому intent')
+                    result = json.loads(sealed['response'])
+                elif db.execute('SELECT id FROM router_operations WHERE device_id=? AND session_id=? AND turn_id=?',
+                                (device.device_id, binding['id'], turn_id)).fetchone():
+                    result = {'version': 1, 'outcome': 'unknown', 'commandId': rid,
+                              'reason': 'turn_exists_under_another_key'}
+                else:
+                    result = {'version': 1, 'outcome': 'not_sent', 'proofType': 'admission_fence',
+                              'proofId': str(uuid.uuid4()), 'commandId': rid, 'requestId': request_id,
+                              'deviceId': device.device_id, 'org': device.org, 'sessionId': binding['id'],
+                              'turnId': turn_id, 'bodySha256': digest, 'nodeId': binding['node_id'],
+                              'bootId': binding['boot_id'], 'route': binding['route'], 'model': binding['model'],
+                              'sealed': True, 'requiresNewIntent': True}
+                    db.execute('INSERT INTO router_admission_fences VALUES (?,?,?,?,?,?,?,?)',
+                               (rid, device.device_id, device.org, binding['id'], turn_id, digest,
+                                json.dumps(result, ensure_ascii=False), time.time()))
+                db.execute('COMMIT')
+                return result
+            except BaseException:
+                db.execute('ROLLBACK')
+                raise
 
     def delivery_lock(self, rid):
         # Один Gate/SQLite; Router дополнительно защищает durable Idempotency-Key.
@@ -37,22 +106,33 @@ class Operations:
             raise GateError(422, 'invalid_request', 'request_id должен содержать 1..200 знаков')
         return hashlib.sha256((device.device_id + ':' + request_id).encode()).hexdigest()
 
-    def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None, validate_new=None):
+    def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None, validate_new=None, body_digest=None):
         # Ходы имеют стабильный ID протокола, поэтому даже старый клиент не запускает дубль prompt.
         rid = request_id or (f"prompt:{binding['id']}:{turn_id}" if turn_id else str(uuid.uuid4()))
         rid = self.key(device, rid)
         fingerprint = hashlib.sha256((method + path + json.dumps(body, sort_keys=True)).encode()).hexdigest()
-        old = self.store._one("SELECT * FROM router_operations WHERE id=?", (rid,))
-        if old:
-            if old["fingerprint"] != fingerprint or old["session_id"] != binding["id"]:
-                raise GateError(409, "idempotency_conflict", "request_id использован с другими параметрами")
-            return old, False
-        if validate_new is not None:
-            validate_new()
         with self.store._lock:
             db = self.store._db
             db.execute("BEGIN IMMEDIATE")
             try:
+                old = db.execute('SELECT * FROM router_operations WHERE id=?', (rid,)).fetchone()
+                if old:
+                    if (old['fingerprint'] != fingerprint or old['session_id'] != binding['id'] or
+                            (body_digest and old['body_sha256'] and body_digest != old['body_sha256'])):
+                        raise GateError(409, 'idempotency_conflict', 'request_id использован с другими параметрами')
+                    db.execute('COMMIT')
+                    return dict(old), False
+                sealed = db.execute('SELECT * FROM router_admission_fences WHERE id=? OR (device_id=? AND session_id=? AND turn_id=?)',
+                                    (rid, device.device_id, binding['id'], turn_id)).fetchone()
+                if sealed:
+                    if (sealed['id'] != rid or sealed['device_id'] != device.device_id or sealed['org'] != device.org or
+                            sealed['session_id'] != binding['id'] or sealed['turn_id'] != turn_id or
+                            sealed['body_sha256'] != (body_digest or body_sha256(body))):
+                        raise GateError(409, 'idempotency_conflict', 'Intent закрыт для других параметров')
+                    raise GateError(409, 'command_not_sent', 'Intent закрыт до допуска; старый запрос исполняться не будет',
+                                    recovery=json.loads(sealed['response']))
+                if validate_new is not None:
+                    validate_new()
                 units = 1
                 if (turn_id or path.endswith("/compact")) and nodes:
                     node = nodes.config[binding["node_id"]]
@@ -79,6 +159,7 @@ class Operations:
                 db.execute("INSERT INTO router_operations(id,device_id,session_id,turn_id,fingerprint,node_id,method,path,state,quota_day,created) VALUES (?,?,?,?,?,?,?,?,'prepared',?,?)",
                     (rid, device.device_id, binding["id"], turn_id, fingerprint, binding["node_id"], method, path, quota_day, time.time()))
                 db.execute("UPDATE router_operations SET units=?,boot_id=? WHERE id=?", (units, binding.get("boot_id"), rid))
+                db.execute('UPDATE router_operations SET body_sha256=? WHERE id=?', (body_digest or body_sha256(body), rid))
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")

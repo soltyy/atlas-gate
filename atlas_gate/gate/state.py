@@ -194,6 +194,10 @@ class GateState:
                 caps = {(m.route_id, m.model): route_attachments(self, org.id, m.route_id, m.model)
                         for m in org.models if (r := org.route(m.route_id)) and r.kind == 'router-agent'}
                 body, warn = build_body(org, self.public_url, down, org_agent_ids if agent_ids is not None else None, caps)
+                body['commandRecovery'] = {'version': 1, 'protocol': 'admission-fence-v1', 'scope': 'prompt',
+                    'resolvePath': '/harness/agent/sessions/{sessionId}/commands/reconcile',
+                    'canonicalBody': 'json-sort-keys-compact-utf8-v1', 'lateAdmissionBlocked': True,
+                    'requiresNewIntent': True}
                 for model in body['models']:
                     route = org.route(model['route_id'])
                     if route and route.kind == 'router-agent':
