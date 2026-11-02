@@ -1,0 +1,970 @@
+{
+  "version": 1,
+  "protocol": "session-recovery-coordinator-v1",
+  "status": "Gate88 server contract; Harness504 and EDT222 client wiring are separate deliveries",
+  "capability": {
+    "version": 1,
+    "supported": true,
+    "protocol": "session-recovery-coordinator-v1",
+    "inventoriesPath": "/harness/recovery/inventories",
+    "casesPath": "/harness/recovery/cases",
+    "operations": [
+      "inventory",
+      "seal",
+      "read_receipts",
+      "seal_prompt",
+      "client_apply",
+      "apply_api_receipt",
+      "cancel",
+      "transport"
+    ],
+    "sourceKinds": [
+      "managed_session",
+      "api_attempt"
+    ],
+    "businessReplayAllowed": false,
+    "clientAppliedRequired": true,
+    "retention": {
+      "caseReceipts": "until_explicit_retirement",
+      "proofPayload": "source_retention"
+    },
+    "canonicalBody": "json-sort-keys-compact-utf8-v1",
+    "exactPinnedPath": true,
+    "exactPinnedPathMeaning": "native actions require exact node/boot/transport proof; not a union resume guarantee",
+    "continuation": {
+      "supported": false,
+      "reason": "terminal_continuation_adapter_not_qualified"
+    }
+  },
+  "capabilityRules": [
+    "exactPinnedPath is an action-time guarantee for the pinned node/boot/transport, not resume support on every node",
+    "SDK model.sessionRecovery.nodes is an intersection with the current connector protocol, never a union admission permit",
+    "API attempts require their own explicit opt-in; legacy proxy POSTs have no durable inference dedup guarantee"
+  ],
+  "profileProjectionExample": {
+    "sessionRecoveryCoordinator": {
+      "version": 1,
+      "supported": true,
+      "protocol": "session-recovery-coordinator-v1",
+      "inventoriesPath": "/harness/recovery/inventories",
+      "casesPath": "/harness/recovery/cases",
+      "operations": [
+        "inventory",
+        "seal",
+        "read_receipts",
+        "seal_prompt",
+        "client_apply",
+        "apply_api_receipt",
+        "cancel",
+        "transport"
+      ],
+      "sourceKinds": [
+        "managed_session",
+        "api_attempt"
+      ],
+      "businessReplayAllowed": false,
+      "clientAppliedRequired": true,
+      "retention": {
+        "caseReceipts": "until_explicit_retirement",
+        "proofPayload": "source_retention"
+      },
+      "canonicalBody": "json-sort-keys-compact-utf8-v1",
+      "exactPinnedPath": true,
+      "exactPinnedPathMeaning": "native actions require exact node/boot/transport proof; not a union resume guarantee",
+      "continuation": {
+        "supported": false,
+        "reason": "terminal_continuation_adapter_not_qualified"
+      }
+    },
+    "models": [
+      {
+        "route_id": "subscription-route",
+        "model": "sdk-model",
+        "sessionRecovery": {
+          "nodes": {
+            "node-example": {
+              "version": 1,
+              "supported": true,
+              "readReceipts": true,
+              "durableCases": true,
+              "resumeTransport": true,
+              "scope": "exact_session",
+              "historyProof": "journal_and_runtime",
+              "coldHistoryInspection": false,
+              "businessReplayAllowed": false,
+              "terminalContinuation": false,
+              "native": {},
+              "transportSupported": true
+            }
+          },
+          "version": 1,
+          "scope": "pinned_node"
+        }
+      }
+    ],
+    "apiAttemptRecovery": {
+      "version": 1,
+      "header": "X-Atlas-API-Attempt-Contract",
+      "keyHeader": "Idempotency-Key",
+      "savedResult": true,
+      "detach": true,
+      "receiptEndpoint": "/harness/llm/attempts/{attemptId}",
+      "receiptByKeyEndpoint": "/harness/llm/attempts/lookup",
+      "receiptByKeyQuery": [
+        "requestId",
+        "route_id",
+        "model",
+        "bodySha256"
+      ],
+      "reconcileEndpoint": "/harness/llm/attempts/reconcile",
+      "admissionFence": {
+        "version": 1,
+        "scope": "managed_api_contract_1",
+        "negativeProof": true,
+        "protectsLegacy": false
+      },
+      "resultEndpoint": "/harness/llm/attempts/{attemptId}/result",
+      "upstreamRetrieve": false,
+      "upstreamCancel": false,
+      "providerKeyScope": "gate_attempt",
+      "providerRetry": false,
+      "retention": "until_explicit_retirement",
+      "storage": "private_gate_database",
+      "selectedChoiceHeader": "X-Atlas-Choice-Index"
+    }
+  },
+  "headers": {
+    "mutation": {
+      "Authorization": "Bearer <device-token>",
+      "Idempotency-Key": "<immutable-recovery-command-key>"
+    },
+    "promptAfterRecovery": {
+      "X-Atlas-Conversation-Id": "conversation-example",
+      "X-Atlas-Branch-Id": "branch-example",
+      "X-Atlas-Recovery-Inventory": "inventory-example",
+      "X-Atlas-Recovery-Generation": "12",
+      "X-Atlas-Control-Epoch": "4"
+    },
+    "apiAttemptOptIn": {
+      "X-Atlas-API-Attempt-Contract": "1",
+      "Idempotency-Key": "original-api-call-key",
+      "X-Atlas-Conversation-Id": "conversation-example",
+      "X-Atlas-Branch-Id": "branch-example"
+    }
+  },
+  "requests": {
+    "inventoryCreate": {
+      "method": "POST",
+      "path": "/harness/recovery/inventories",
+      "body": {
+        "version": 1,
+        "conversationId": "conversation-example",
+        "branchId": "branch-example",
+        "clientStoreEpoch": "client-store-example",
+        "checkpointInventoryVersion": 2,
+        "sources": [
+          {
+            "kind": "managed_session",
+            "sourceRef": "managed-source",
+            "sourceRunId": "run-old",
+            "sessionId": "session-old"
+          },
+          {
+            "kind": "api_attempt",
+            "sourceRef": "api-source",
+            "sourceRunId": "api-run-old",
+            "attemptId": "attempt-example"
+          }
+        ]
+      }
+    },
+    "inventorySeal": {
+      "method": "POST",
+      "path": "/harness/recovery/inventories/inventory-example/seal",
+      "body": {
+        "version": 1
+      }
+    },
+    "managedCaseCreate": {
+      "method": "POST",
+      "path": "/harness/recovery/cases",
+      "body": {
+        "version": 1,
+        "inventoryId": "inventory-example",
+        "sourceRef": "managed-source",
+        "conversationId": "conversation-example",
+        "branchId": "branch-example",
+        "sourceRunId": "run-old",
+        "sourceCheckpointVersion": 3,
+        "trigger": "open_conversation",
+        "source": {
+          "kind": "managed_session",
+          "gateRoot": "https://gate.example",
+          "sessionId": "session-old",
+          "historyAlias": "history-alias",
+          "routeId": "subscription-route",
+          "model": "sdk-model"
+        },
+        "operations": [
+          {
+            "kind": "prompt",
+            "requestId": "old-prompt-key",
+            "turnId": "turn-old",
+            "bodySha256": "1a8fbe724fdae14c20dcc4fa41e0c852a88212f74d0c2624d09cdfe5e71d9ba8"
+          },
+          {
+            "kind": "tool_result",
+            "requestId": "old-result-key",
+            "turnId": "turn-old",
+            "callId": "call-old",
+            "bodySha256": "6dc00e185cea108f2a957abd4d7e2dc909e9cf80884e9d09deeb8c89a68d2582",
+            "localState": "output_durable",
+            "outputRef": "local-output-example"
+          }
+        ],
+        "observation": {
+          "lastAppliedSeq": 0
+        },
+        "permissions": {
+          "allowedRecovery": [
+            "read_receipt",
+            "apply_saved_ack",
+            "resolve_source_checkpoint",
+            "resume_transport"
+          ],
+          "businessReplayAllowed": false
+        },
+        "transportGoal": "ready"
+      }
+    },
+    "apiCaseCreate": {
+      "method": "POST",
+      "path": "/harness/recovery/cases",
+      "body": {
+        "version": 1,
+        "inventoryId": "inventory-example",
+        "sourceRef": "api-source",
+        "conversationId": "conversation-example",
+        "branchId": "branch-example",
+        "sourceRunId": "api-run-old",
+        "sourceCheckpointVersion": 2,
+        "source": {
+          "kind": "api_attempt",
+          "gateRoot": "https://gate.example",
+          "attemptId": "attempt-example",
+          "routeId": "api-route",
+          "model": "api-model"
+        },
+        "operations": [
+          {
+            "kind": "api_attempt",
+            "requestId": "original-api-call-key",
+            "bodySha256": "ead47ee81cfedc0e499c2dd062e87fecb02d7054cf7922d79a468d085b184a6e"
+          }
+        ],
+        "permissions": {
+          "allowedRecovery": [
+            "read_receipt",
+            "apply_api_receipt",
+            "resolve_source_checkpoint"
+          ],
+          "businessReplayAllowed": false
+        }
+      }
+    },
+    "caseGet": {
+      "method": "GET",
+      "path": "/harness/recovery/cases/case-example"
+    },
+    "clientAck": {
+      "method": "POST",
+      "path": "/harness/recovery/cases/case-example/ack",
+      "body": {
+        "version": 1,
+        "ackKey": "client-apply-example",
+        "planId": "plan-example-7",
+        "planRevision": 7,
+        "sourceManifestSha256": "c9ebe9badd7754cbd16e945dcbf473f697c13c0e4079a57abbafe80ce4b170ec",
+        "clientStoreEpoch": "client-store-example",
+        "sourceRunId": "run-old",
+        "sourceSessionId": "session-old",
+        "sourceCheckpointVersion": 3,
+        "appliedActions": [
+          {
+            "actionId": "apply-ack",
+            "evidenceSha256": "fa1e71cd6664c686575868847062fa1a755a16e15453935947ffaf32b6ad6772"
+          },
+          {
+            "actionId": "resolve-old",
+            "evidenceSha256": "5afa90371a28dd17ee07a3f8f9c6275b7e50413845f3b18e12e727da83a085b3"
+          }
+        ],
+        "localCommitRef": "client-commit-example",
+        "localCommitSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    },
+    "serverApply": {
+      "method": "POST",
+      "path": "/harness/recovery/cases/case-example/apply",
+      "body": {
+        "version": 1,
+        "planId": "plan-with-native-action",
+        "expectedRevision": 8,
+        "sourceManifestSha256": "c9ebe9badd7754cbd16e945dcbf473f697c13c0e4079a57abbafe80ce4b170ec",
+        "branchFence": {
+          "recoveryGeneration": 12,
+          "controlEpoch": 4
+        },
+        "actionIds": [
+          "opaque-server-action-id"
+        ]
+      }
+    },
+    "evidenceClaim": {
+      "method": "POST",
+      "path": "/harness/recovery/cases/case-example/evidence",
+      "body": {
+        "version": 1,
+        "kind": "executor_claim",
+        "claim": {
+          "outputRef": "local-output-example"
+        }
+      }
+    },
+    "cancel": {
+      "method": "POST",
+      "path": "/harness/recovery/cases/case-example/cancel",
+      "body": {
+        "version": 1,
+        "expectedRevision": 7,
+        "sourceManifestSha256": "c9ebe9badd7754cbd16e945dcbf473f697c13c0e4079a57abbafe80ce4b170ec",
+        "branchFence": {
+          "recoveryGeneration": 12,
+          "controlEpoch": 4
+        }
+      }
+    },
+    "apiClientAck": {
+      "method": "POST",
+      "path": "/harness/recovery/cases/api-case-example/ack",
+      "body": {
+        "version": 1,
+        "ackKey": "api-apply-example",
+        "planId": "api-plan-example",
+        "planRevision": 3,
+        "sourceManifestSha256": "0f440e6ed65cac4c35e6d01c354d79d39239b8af4478a8f3b7d835371183ab06",
+        "clientStoreEpoch": "client-store-example",
+        "sourceRunId": "api-run-old",
+        "sourceCheckpointVersion": 2,
+        "appliedActions": [
+          {
+            "actionId": "apply_api_receipt-example",
+            "evidenceSha256": "7401023eac501bc6d2d7a368f0a783063b0e270d53479ab03613fe7abea34d0e"
+          },
+          {
+            "actionId": "resolve_source_checkpoint-example",
+            "evidenceSha256": "7401023eac501bc6d2d7a368f0a783063b0e270d53479ab03613fe7abea34d0e"
+          }
+        ],
+        "localCommitRef": "client-commit-example",
+        "localCommitSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sourceAttemptId": "attempt-example"
+      }
+    },
+    "apiAdmissionReconcile": {
+      "method": "POST",
+      "path": "/harness/llm/attempts/reconcile",
+      "headers": {
+        "X-Atlas-API-Attempt-Contract": "1"
+      },
+      "body": {
+        "version": 1,
+        "requestId": "original-api-call-key",
+        "routeId": "api-route",
+        "model": "api-model",
+        "endpoint": "/responses",
+        "bodySha256": "ead47ee81cfedc0e499c2dd062e87fecb02d7054cf7922d79a468d085b184a6e",
+        "conversationId": "conversation-example",
+        "branchId": "branch-example"
+      }
+    },
+    "apiLookup": {
+      "method": "GET",
+      "path": "/harness/llm/attempts/lookup",
+      "query": {
+        "requestId": "original-api-call-key",
+        "route_id": "api-route",
+        "model": "api-model",
+        "bodySha256": "ead47ee81cfedc0e499c2dd062e87fecb02d7054cf7922d79a468d085b184a6e"
+      }
+    }
+  },
+  "responses": {
+    "casePlan": {
+      "version": 1,
+      "recoveryId": "case-example",
+      "revision": 7,
+      "planId": "plan-example-7",
+      "sourceManifestSha256": "c9ebe9badd7754cbd16e945dcbf473f697c13c0e4079a57abbafe80ce4b170ec",
+      "sourceKind": "managed_session",
+      "state": "plan_ready",
+      "branchFence": {
+        "recoveryGeneration": 12,
+        "controlEpoch": 4
+      },
+      "inventory": {
+        "id": "inventory-example",
+        "version": 2,
+        "sealed": true,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "operations": [
+        {
+          "kind": "prompt",
+          "requestId": "old-prompt-key",
+          "outcome": "terminal_success"
+        },
+        {
+          "kind": "tool_result",
+          "requestId": "old-result-key",
+          "outcome": "accepted"
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply-ack",
+          "executor": "harness",
+          "kind": "apply_saved_ack",
+          "evidenceId": "evidence-tool_result",
+          "evidenceSha256": "fa1e71cd6664c686575868847062fa1a755a16e15453935947ffaf32b6ad6772",
+          "sourceRunId": "run-old",
+          "sourceSessionId": "session-old",
+          "sourceCheckpointVersion": 3
+        },
+        {
+          "id": "resolve-old",
+          "executor": "harness",
+          "kind": "resolve_source_checkpoint",
+          "evidenceId": "evidence-prompt",
+          "evidenceSha256": "5afa90371a28dd17ee07a3f8f9c6275b7e50413845f3b18e12e727da83a085b3",
+          "sourceRunId": "run-old",
+          "sourceSessionId": "session-old",
+          "sourceCheckpointVersion": 3
+        }
+      ],
+      "resume": {
+        "businessReplayAllowed": false,
+        "history": "recorded",
+        "supported": true,
+        "replacementRequired": false
+      },
+      "next": {
+        "state": "source_unresolved",
+        "reason": "source_unresolved",
+        "businessDispatchAllowed": false,
+        "independentBranchAllowed": false,
+        "effectReplayAllowed": false
+      },
+      "evidence": [
+        {
+          "evidenceId": "evidence-prompt",
+          "evidenceSha256": "5afa90371a28dd17ee07a3f8f9c6275b7e50413845f3b18e12e727da83a085b3",
+          "body": {
+            "version": 1,
+            "issuer": "gate",
+            "kind": "prompt",
+            "storeEpoch": "gate-store-example",
+            "payload": {
+              "sessionId": "session-old",
+              "turnId": "turn-old",
+              "terminal": {
+                "type": "result",
+                "id": "turn-old",
+                "ok": true,
+                "seq": 1,
+                "text": "saved answer",
+                "costUsd": 1e-06
+              },
+              "seq": 1,
+              "events": [
+                {
+                  "type": "result",
+                  "id": "turn-old",
+                  "ok": true,
+                  "seq": 1,
+                  "text": "saved answer",
+                  "costUsd": 1e-06
+                }
+              ],
+              "payloadUnavailable": false
+            }
+          },
+          "canonicalPayloadUTF8": "{\"issuer\":\"gate\",\"kind\":\"prompt\",\"payload\":{\"events\":[{\"costUsd\":1e-06,\"id\":\"turn-old\",\"ok\":true,\"seq\":1,\"text\":\"saved answer\",\"type\":\"result\"}],\"payloadUnavailable\":false,\"seq\":1,\"sessionId\":\"session-old\",\"terminal\":{\"costUsd\":1e-06,\"id\":\"turn-old\",\"ok\":true,\"seq\":1,\"text\":\"saved answer\",\"type\":\"result\"},\"turnId\":\"turn-old\"},\"storeEpoch\":\"gate-store-example\",\"version\":1}"
+        },
+        {
+          "evidenceId": "evidence-tool_result",
+          "evidenceSha256": "fa1e71cd6664c686575868847062fa1a755a16e15453935947ffaf32b6ad6772",
+          "body": {
+            "version": 1,
+            "issuer": "gate",
+            "kind": "tool_result",
+            "storeEpoch": "gate-store-example",
+            "payload": {
+              "operation": {
+                "kind": "tool_result",
+                "requestId": "old-result-key",
+                "turnId": "turn-old",
+                "callId": "call-old",
+                "bodySha256": "6dc00e185cea108f2a957abd4d7e2dc909e9cf80884e9d09deeb8c89a68d2582",
+                "localState": "output_durable",
+                "outputRef": "local-output-example"
+              },
+              "status": 200,
+              "response": {
+                "ok": true,
+                "callId": "call-old",
+                "status": "accepted"
+              }
+            }
+          },
+          "canonicalPayloadUTF8": "{\"issuer\":\"gate\",\"kind\":\"tool_result\",\"payload\":{\"operation\":{\"bodySha256\":\"6dc00e185cea108f2a957abd4d7e2dc909e9cf80884e9d09deeb8c89a68d2582\",\"callId\":\"call-old\",\"kind\":\"tool_result\",\"localState\":\"output_durable\",\"outputRef\":\"local-output-example\",\"requestId\":\"old-result-key\",\"turnId\":\"turn-old\"},\"response\":{\"callId\":\"call-old\",\"ok\":true,\"status\":\"accepted\"},\"status\":200},\"storeEpoch\":\"gate-store-example\",\"version\":1}"
+        }
+      ],
+      "claims": [],
+      "knownServerOperations": [],
+      "serverSteps": []
+    },
+    "lateAck": {
+      "version": 1,
+      "recoveryId": "case-example",
+      "ackKey": "client-apply-example",
+      "state": "historical-applied",
+      "planId": "plan-example-7",
+      "businessDispatchAllowed": false
+    },
+    "transportPlan": {
+      "version": 1,
+      "recoveryId": "case-example",
+      "revision": 8,
+      "planId": "plan-with-native-action",
+      "sourceManifestSha256": "c9ebe9badd7754cbd16e945dcbf473f697c13c0e4079a57abbafe80ce4b170ec",
+      "sourceKind": "managed_session",
+      "state": "plan_ready",
+      "branchFence": {
+        "recoveryGeneration": 12,
+        "controlEpoch": 4
+      },
+      "inventory": {
+        "id": "inventory-example",
+        "version": 2,
+        "sealed": true,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "operations": [
+        {
+          "kind": "prompt",
+          "requestId": "old-prompt-key",
+          "outcome": "terminal_success"
+        },
+        {
+          "kind": "tool_result",
+          "requestId": "old-result-key",
+          "outcome": "accepted"
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply-ack",
+          "executor": "harness",
+          "kind": "apply_saved_ack",
+          "evidenceId": "evidence-tool_result",
+          "evidenceSha256": "fa1e71cd6664c686575868847062fa1a755a16e15453935947ffaf32b6ad6772",
+          "sourceRunId": "run-old",
+          "sourceSessionId": "session-old",
+          "sourceCheckpointVersion": 3
+        },
+        {
+          "id": "resolve-old",
+          "executor": "harness",
+          "kind": "resolve_source_checkpoint",
+          "evidenceId": "evidence-prompt",
+          "evidenceSha256": "5afa90371a28dd17ee07a3f8f9c6275b7e50413845f3b18e12e727da83a085b3",
+          "sourceRunId": "run-old",
+          "sourceSessionId": "session-old",
+          "sourceCheckpointVersion": 3
+        },
+        {
+          "id": "opaque-server-action-id",
+          "executor": "gate",
+          "kind": "resume_transport",
+          "routerCaseId": "opaque-router-case-id",
+          "routerActionId": "resume-transport-1",
+          "routerRevision": 1
+        }
+      ],
+      "resume": {
+        "businessReplayAllowed": false,
+        "history": "recorded",
+        "supported": true,
+        "replacementRequired": false
+      },
+      "next": {
+        "state": "transport_recovery_required",
+        "reason": "transport_recovery_required",
+        "businessDispatchAllowed": false,
+        "independentBranchAllowed": false,
+        "effectReplayAllowed": false
+      },
+      "evidence": [
+        {
+          "evidenceId": "evidence-prompt",
+          "evidenceSha256": "5afa90371a28dd17ee07a3f8f9c6275b7e50413845f3b18e12e727da83a085b3",
+          "body": {
+            "version": 1,
+            "issuer": "gate",
+            "kind": "prompt",
+            "storeEpoch": "gate-store-example",
+            "payload": {
+              "sessionId": "session-old",
+              "turnId": "turn-old",
+              "terminal": {
+                "type": "result",
+                "id": "turn-old",
+                "ok": true,
+                "seq": 1,
+                "text": "saved answer",
+                "costUsd": 1e-06
+              },
+              "seq": 1,
+              "events": [
+                {
+                  "type": "result",
+                  "id": "turn-old",
+                  "ok": true,
+                  "seq": 1,
+                  "text": "saved answer",
+                  "costUsd": 1e-06
+                }
+              ],
+              "payloadUnavailable": false
+            }
+          },
+          "canonicalPayloadUTF8": "{\"issuer\":\"gate\",\"kind\":\"prompt\",\"payload\":{\"events\":[{\"costUsd\":1e-06,\"id\":\"turn-old\",\"ok\":true,\"seq\":1,\"text\":\"saved answer\",\"type\":\"result\"}],\"payloadUnavailable\":false,\"seq\":1,\"sessionId\":\"session-old\",\"terminal\":{\"costUsd\":1e-06,\"id\":\"turn-old\",\"ok\":true,\"seq\":1,\"text\":\"saved answer\",\"type\":\"result\"},\"turnId\":\"turn-old\"},\"storeEpoch\":\"gate-store-example\",\"version\":1}"
+        },
+        {
+          "evidenceId": "evidence-tool_result",
+          "evidenceSha256": "fa1e71cd6664c686575868847062fa1a755a16e15453935947ffaf32b6ad6772",
+          "body": {
+            "version": 1,
+            "issuer": "gate",
+            "kind": "tool_result",
+            "storeEpoch": "gate-store-example",
+            "payload": {
+              "operation": {
+                "kind": "tool_result",
+                "requestId": "old-result-key",
+                "turnId": "turn-old",
+                "callId": "call-old",
+                "bodySha256": "6dc00e185cea108f2a957abd4d7e2dc909e9cf80884e9d09deeb8c89a68d2582",
+                "localState": "output_durable",
+                "outputRef": "local-output-example"
+              },
+              "status": 200,
+              "response": {
+                "ok": true,
+                "callId": "call-old",
+                "status": "accepted"
+              }
+            }
+          },
+          "canonicalPayloadUTF8": "{\"issuer\":\"gate\",\"kind\":\"tool_result\",\"payload\":{\"operation\":{\"bodySha256\":\"6dc00e185cea108f2a957abd4d7e2dc909e9cf80884e9d09deeb8c89a68d2582\",\"callId\":\"call-old\",\"kind\":\"tool_result\",\"localState\":\"output_durable\",\"outputRef\":\"local-output-example\",\"requestId\":\"old-result-key\",\"turnId\":\"turn-old\"},\"response\":{\"callId\":\"call-old\",\"ok\":true,\"status\":\"accepted\"},\"status\":200},\"storeEpoch\":\"gate-store-example\",\"version\":1}"
+        }
+      ],
+      "claims": [],
+      "knownServerOperations": [],
+      "serverSteps": []
+    },
+    "apiCasePlan": {
+      "version": 1,
+      "recoveryId": "api-case-example",
+      "revision": 3,
+      "planId": "api-plan-example",
+      "sourceManifestSha256": "0f440e6ed65cac4c35e6d01c354d79d39239b8af4478a8f3b7d835371183ab06",
+      "sourceKind": "api_attempt",
+      "state": "plan_ready",
+      "branchFence": {
+        "recoveryGeneration": 12,
+        "controlEpoch": 4
+      },
+      "inventory": {
+        "id": "inventory-example",
+        "version": 2,
+        "sealed": true,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "operations": [
+        {
+          "kind": "api_attempt",
+          "requestId": "original-api-call-key",
+          "outcome": "api_terminal",
+          "attemptId": "attempt-example",
+          "apiReceipt": {
+            "version": 1,
+            "attemptId": "attempt-example",
+            "routeId": "api-route",
+            "model": "api-model",
+            "endpoint": "/responses",
+            "conversationId": "conversation-example",
+            "branchId": "branch-example",
+            "state": "complete",
+            "terminalKnown": true,
+            "outcome": "completed",
+            "runState": "response-ready",
+            "resultAvailable": true,
+            "resultSha256": "09c26af8fc632ba6988c4264e8cda3b0b82f722977b8f20b31be0a8213e6dfb3",
+            "resultPath": "/harness/llm/attempts/attempt-example/result",
+            "receiptPath": "/harness/llm/attempts/attempt-example",
+            "hostExecutionAllowed": false
+          }
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply_api_receipt-example",
+          "executor": "harness",
+          "kind": "apply_api_receipt",
+          "evidenceId": "api-evidence-example",
+          "evidenceSha256": "7401023eac501bc6d2d7a368f0a783063b0e270d53479ab03613fe7abea34d0e",
+          "sourceRunId": "api-run-old",
+          "sourceAttemptId": "attempt-example",
+          "sourceCheckpointVersion": 2
+        },
+        {
+          "id": "resolve_source_checkpoint-example",
+          "executor": "harness",
+          "kind": "resolve_source_checkpoint",
+          "evidenceId": "api-evidence-example",
+          "evidenceSha256": "7401023eac501bc6d2d7a368f0a783063b0e270d53479ab03613fe7abea34d0e",
+          "sourceRunId": "api-run-old",
+          "sourceAttemptId": "attempt-example",
+          "sourceCheckpointVersion": 2
+        }
+      ],
+      "resume": {
+        "businessReplayAllowed": false,
+        "history": "unconfirmed",
+        "supported": false,
+        "replacementRequired": false
+      },
+      "next": {
+        "state": "source_unresolved",
+        "reason": "source_unresolved",
+        "businessDispatchAllowed": false,
+        "independentBranchAllowed": false,
+        "effectReplayAllowed": false
+      },
+      "evidence": [
+        {
+          "evidenceId": "api-evidence-example",
+          "evidenceSha256": "7401023eac501bc6d2d7a368f0a783063b0e270d53479ab03613fe7abea34d0e",
+          "body": {
+            "version": 1,
+            "issuer": "gate",
+            "kind": "api_attempt",
+            "storeEpoch": "gate-store-example",
+            "payload": {
+              "attempt": {
+                "version": 1,
+                "attemptId": "attempt-example",
+                "routeId": "api-route",
+                "model": "api-model",
+                "endpoint": "/responses",
+                "conversationId": "conversation-example",
+                "branchId": "branch-example",
+                "state": "complete",
+                "terminalKnown": true,
+                "outcome": "completed",
+                "runState": "response-ready",
+                "resultAvailable": true,
+                "resultSha256": "09c26af8fc632ba6988c4264e8cda3b0b82f722977b8f20b31be0a8213e6dfb3",
+                "resultPath": "/harness/llm/attempts/attempt-example/result",
+                "receiptPath": "/harness/llm/attempts/attempt-example",
+                "hostExecutionAllowed": false
+              },
+              "operation": {
+                "kind": "api_attempt",
+                "requestId": "original-api-call-key",
+                "bodySha256": "ead47ee81cfedc0e499c2dd062e87fecb02d7054cf7922d79a468d085b184a6e"
+              },
+              "resultPath": "/harness/llm/attempts/attempt-example/result",
+              "resultSha256": "09c26af8fc632ba6988c4264e8cda3b0b82f722977b8f20b31be0a8213e6dfb3",
+              "hostExecutionAllowed": false,
+              "taskVerified": false
+            }
+          },
+          "canonicalPayloadUTF8": "{\"issuer\":\"gate\",\"kind\":\"api_attempt\",\"payload\":{\"attempt\":{\"attemptId\":\"attempt-example\",\"branchId\":\"branch-example\",\"conversationId\":\"conversation-example\",\"endpoint\":\"/responses\",\"hostExecutionAllowed\":false,\"model\":\"api-model\",\"outcome\":\"completed\",\"receiptPath\":\"/harness/llm/attempts/attempt-example\",\"resultAvailable\":true,\"resultPath\":\"/harness/llm/attempts/attempt-example/result\",\"resultSha256\":\"09c26af8fc632ba6988c4264e8cda3b0b82f722977b8f20b31be0a8213e6dfb3\",\"routeId\":\"api-route\",\"runState\":\"response-ready\",\"state\":\"complete\",\"terminalKnown\":true,\"version\":1},\"hostExecutionAllowed\":false,\"operation\":{\"bodySha256\":\"ead47ee81cfedc0e499c2dd062e87fecb02d7054cf7922d79a468d085b184a6e\",\"kind\":\"api_attempt\",\"requestId\":\"original-api-call-key\"},\"resultPath\":\"/harness/llm/attempts/attempt-example/result\",\"resultSha256\":\"09c26af8fc632ba6988c4264e8cda3b0b82f722977b8f20b31be0a8213e6dfb3\",\"taskVerified\":false},\"storeEpoch\":\"gate-store-example\",\"version\":1}"
+        }
+      ],
+      "claims": [],
+      "knownServerOperations": [],
+      "serverSteps": []
+    },
+    "apiAdmissionFence": {
+      "version": 1,
+      "attemptId": "attempt-example",
+      "routeId": "api-route",
+      "model": "api-model",
+      "endpoint": "/responses",
+      "state": "rejected_not_sent",
+      "outcome": "sealed-not-sent",
+      "terminalKnown": true,
+      "scope": "managed_api_admission_fence",
+      "notSentProven": true,
+      "providerDispatch": false,
+      "bodySha256": "ead47ee81cfedc0e499c2dd062e87fecb02d7054cf7922d79a468d085b184a6e",
+      "hostExecutionAllowed": false,
+      "proofId": "api-admission:attempt-example"
+    },
+    "apiLookupMissing": {
+      "error": {
+        "code": "api_attempt_not_found",
+        "message": "API attempt not found; absence is not proof",
+        "deliveryState": "unknown",
+        "notSentProven": false
+      }
+    }
+  },
+  "rawSourcePayloads": {
+    "managedPrompt": {
+      "id": "turn-old",
+      "text": "saved original intent"
+    },
+    "managedToolResult": {
+      "callId": "call-old",
+      "content": "saved exact output"
+    },
+    "apiRequest": {
+      "model": "api-model",
+      "input": "saved API input"
+    }
+  },
+  "canonicalVectors": [
+    {
+      "input": {
+        "costUsd": 1e-06
+      },
+      "canonicalUTF8": "{\"costUsd\":1e-06}",
+      "sha256": "ad0c182337440bd0f900913ea529bb91e3a1e14f491912920100504962ff657b"
+    },
+    {
+      "input": {
+        "costUsd": 1.0
+      },
+      "canonicalUTF8": "{\"costUsd\":1.0}",
+      "sha256": "f9fd571ddbff22389db641a7191c49b53827aac221c0a7a877d4e67dd365384d"
+    },
+    {
+      "input": {
+        "costUsd": -0.0
+      },
+      "canonicalUTF8": "{\"costUsd\":-0.0}",
+      "sha256": "a842ca23f9996237d48fc0034da705c9e8e9cd09b9d609ce78020881c68c9f4b"
+    },
+    {
+      "input": {
+        "items": [
+          1e-06,
+          1.0,
+          -0.0
+        ],
+        "😀": "astral",
+        "": "bmp"
+      },
+      "canonicalUTF8": "{\"items\":[1e-06,1.0,-0.0],\"\":\"bmp\",\"😀\":\"astral\"}",
+      "sha256": "a95aabaacd7b87081a2f9598edf502a0eeff1704ecf56d4540b792dccc33404d"
+    },
+    {
+      "input": {
+        "𐀀": "astral-plane1",
+        "�": "bmp-replacement",
+        "numbers": [
+          1e+20,
+          1e+21,
+          1e-07,
+          1e-06
+        ]
+      },
+      "canonicalUTF8": "{\"numbers\":[1e+20,1e+21,1e-07,1e-06],\"�\":\"bmp-replacement\",\"𐀀\":\"astral-plane1\"}",
+      "sha256": "13d98a15f8f23421851c53d167527cf19d75710b47cf312f6e5dba6ad1a7cbbe"
+    },
+    {
+      "input": {
+        "line": " \nx",
+        "emoji": "😀",
+        "slash": "/",
+        "controls": "\b\t",
+        "negativeZero": -0.0
+      },
+      "canonicalUTF8": "{\"controls\":\"\\b\\t\",\"emoji\":\"😀\",\"line\":\" \\nx\",\"negativeZero\":-0.0,\"slash\":\"/\"}",
+      "sha256": "2d2faa0104b14ee2d4c42f8ae706eb3c0526db7e0e8ed2c103e902f8701302f7"
+    }
+  ],
+  "rules": [
+    "Persist the full local checkpoint inventory before the first source case; seal only after every source was registered",
+    "A case contains one old Run and one old source binding/attempt; a new model or Run does not rewrite it",
+    "Hash the exact original manifest using Python-compatible json-sort-keys-compact-utf8-v1, without adding defaults",
+    "Hash evidence canonicalPayloadUTF8 bytes directly; decoding body never grants executor permission",
+    "ACK is a monotonic historical fact and uses ackKey; it carries planRevision rather than expectedRevision and no current branchFence",
+    "apply accepts only immutable server actionIds and requires current planId/expectedRevision/source hash/branchFence plus Idempotency-Key",
+    "Partial ACK does not settle other required action kinds, including equal API evidence hashes",
+    "After registration, prompt/API dispatch requires the full current inventory/generation/control fence; legacy unregistered branches retain v1 behavior",
+    "A cancelled recovery keeps receipts and unresolved effects; historical ACK cannot revive it",
+    "transportGoal defaults to ready; released requires an explicit release_idle_transport permission; none requests only reconciliation",
+    "Native state=outcome_unknown cannot be changed into rejected by a completed HTTP error receipt",
+    "Terminal continuation is unsupported in Gate88; no SDK/model/tool business replay is performed",
+    "For api_attempt ACK replace sourceSessionId with sourceAttemptId and retain the same sourceRun/checkpoint/store identity",
+    "API complete/terminalKnown is a provider-attempt outcome, not task success or a host tool execution permit",
+    "An API attempt missing its original bodySha256 is legacy evidence_unavailable; unknown/partial outcomes do not authorize paid retry",
+    "Native transport planning closes admission until the required transport action has a durable native step proof; it does not alternate ready/release goals",
+    "Only an original managed API contract-1 request may use the API admission fence; it does not protect legacy proxy requests",
+    "GET API lookup 404 is not a not-sent proof. POST reconcile atomically observes the existing attempt or fences a truly absent/prepared managed key",
+    "A proven managed API admission fence creates an api_attempt source with resolve_source_checkpoint only; it never dispatches to a provider",
+    "A proven transport-only sdk_writer_busy or local capacity_exceeded refusal can receive a fresh native action ID; the old step receipt remains unchanged",
+    "A local policy rejection before native dispatch is a transport-only rejected_not_sent step; current permission checks run before the step becomes started"
+  ],
+  "apiAttemptRecovery": {
+    "version": 1,
+    "header": "X-Atlas-API-Attempt-Contract",
+    "keyHeader": "Idempotency-Key",
+    "savedResult": true,
+    "detach": true,
+    "receiptEndpoint": "/harness/llm/attempts/{attemptId}",
+    "receiptByKeyEndpoint": "/harness/llm/attempts/lookup",
+    "receiptByKeyQuery": [
+      "requestId",
+      "route_id",
+      "model",
+      "bodySha256"
+    ],
+    "reconcileEndpoint": "/harness/llm/attempts/reconcile",
+    "admissionFence": {
+      "version": 1,
+      "scope": "managed_api_contract_1",
+      "negativeProof": true,
+      "protectsLegacy": false
+    },
+    "resultEndpoint": "/harness/llm/attempts/{attemptId}/result",
+    "upstreamRetrieve": false,
+    "upstreamCancel": false,
+    "providerKeyScope": "gate_attempt",
+    "providerRetry": false,
+    "retention": "until_explicit_retirement",
+    "storage": "private_gate_database",
+    "selectedChoiceHeader": "X-Atlas-Choice-Index"
+  },
+  "runtimeStatus": "candidate-not-deployed",
+  "candidateVersions": {
+    "gate": "0.4.20",
+    "router": "0.8.19"
+  }
+}

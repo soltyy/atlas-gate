@@ -15,11 +15,12 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import __version__
 from ..auth import require_token
@@ -142,7 +143,7 @@ def _token_from(request: Request) -> str | None:
 
 
 # Архивная организация (#7): устройствам закрыты профиль, LLM-прокси и ход на подписке.
-ARCHIVED_BLOCKS = ("/harness/profile", "/harness/settings", "/harness/llm/", "/harness/agent/")
+ARCHIVED_BLOCKS = ("/harness/profile", "/harness/settings", "/harness/llm/", "/harness/agent/", "/harness/recovery/")
 
 
 async def require_device(request: Request) -> Device:
@@ -491,6 +492,10 @@ async def _llm_post(request: Request, device: Device, protocol: str, suffix: str
         model = doc.get("model")
     except Exception as bad:  # noqa: BLE001
         raise GateError(400, "invalid_request", "тело не JSON-объект с полем model") from bad
+    from .api_attempts import replay_request, opted_in
+    saved = await replay_request(request, device, org, model, protocol, suffix, raw)
+    if saved is not None:
+        return saved
     route = pick_route(state, device, org, model, protocol)
     image_request = suffix.startswith('/images/') or (suffix == '/responses' and
         any(t.get('type') == 'image_generation' for t in (doc.get('tools') or []) if isinstance(t, dict)))
@@ -499,8 +504,11 @@ async def _llm_post(request: Request, device: Device, protocol: str, suffix: str
         if not org.sdk_tools.imageGeneration or not configured or not configured.image_generation:
             raise GateError(403, 'policy_denied', 'генерация изображений не разрешена для API-модели', reason='image_generation_disabled')
     check_data_class(state, device, request, route.id)
-    check_quota(state, device, org)
+    if not opted_in(request.headers):
+        check_quota(state, device, org)
     configured = next((m for m in org.models if m.route_id == route.id and m.model == model), None)
+    request.state.api_model_name = str(model)
+    request.state.api_model_snapshot = configured.model_dump() if configured else None
     raw, reasoning = state.api_reasoning.apply(raw, doc, configured, suffix, device, request.headers)
     doc = json.loads(raw)
     body = with_usage_option(raw, doc) if protocol == "openai" and suffix == '/chat/completions' else raw
@@ -509,7 +517,86 @@ async def _llm_post(request: Request, device: Device, protocol: str, suffix: str
         from .api_reasoning import digest
         response.headers['X-Atlas-Reasoning-Decision'] = digest(reasoning)
         response.headers['X-Atlas-Configured-Reasoning'] = json.dumps(reasoning, separators=(',', ':'))
+        if attempt_id := response.headers.get('X-Atlas-API-Attempt-Id'):
+            state.api_attempts.add_response_headers(attempt_id, {
+                'X-Atlas-Reasoning-Decision': response.headers['X-Atlas-Reasoning-Decision'],
+                'X-Atlas-Configured-Reasoning': response.headers['X-Atlas-Configured-Reasoning']})
     return response
+
+
+def _own_api_attempt(request, device, attempt_id):
+    state = gate(request)
+    org = org_of(state, device)
+    row = state.api_attempts.owned(attempt_id, device)
+    route = org.route(row['route'])
+    if (route is None or not route.enabled or route.kind != 'gateway' or
+            not any(m.route_id == route.id and m.model == row['model'] and m.enabled for m in org.models)):
+        raise GateError(403, 'policy_denied', 'доступ к сохранённому API attempt запрещён текущей политикой')
+    check_data_class(state, device, request, route.id)
+    return state, row
+
+
+class ApiAttemptReconcile(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    version: Literal[1]
+    requestId: str = Field(min_length=1, max_length=200)
+    routeId: str = Field(min_length=1, max_length=200)
+    model: str = Field(min_length=1, max_length=200)
+    endpoint: Literal['/chat/completions', '/responses', '/messages', '/images/generations']
+    bodySha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    conversationId: str | None = Field(default=None, min_length=1, max_length=200)
+    branchId: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+@router.post('/harness/llm/attempts/reconcile')
+async def api_attempt_reconcile(body: ApiAttemptReconcile, request: Request,
+                                device: Device = Depends(require_device)):
+    if request.headers.get('x-atlas-api-attempt-contract') != '1':
+        raise GateError(422, 'api_attempt_contract_required', 'отрицательный proof относится только к managed API contract1')
+    state = gate(request)
+    org = org_of(state, device)
+    route = org.route(body.routeId)
+    if (route is None or not route.enabled or route.kind != 'gateway' or
+            not any(m.route_id == route.id and m.model == body.model and m.enabled for m in org.models)):
+        raise GateError(403, 'policy_denied', 'API route/model не разрешены текущим профилем')
+    check_data_class(state, device, request, route.id)
+    result = state.api_attempts.reconcile(device, route, body.model, body.endpoint, body.requestId,
+        body.bodySha256, conversation_id=body.conversationId, branch_id=body.branchId)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/harness/llm/attempts/lookup')
+async def api_attempt_lookup(request: Request, requestId: str, route_id: str, model: str,
+                             bodySha256: str, device: Device = Depends(require_device)):
+    import hashlib
+    import re
+    if not requestId or len(requestId) > 200 or not re.fullmatch('[a-f0-9]{64}', bodySha256):
+        raise GateError(422, 'invalid_request', 'нужны исходный requestId и canonical bodySha256')
+    state = gate(request)
+    row = state.store._one('SELECT * FROM api_attempts WHERE org=? AND device=? AND key_hash=?',
+        (device.org, device.device_id, hashlib.sha256(requestId.encode()).hexdigest()))
+    if row is None:
+        raise GateError(404, 'api_attempt_not_found', 'API attempt не найден; отсутствие записи не доказывает not_sent',
+                        deliveryState='unknown', notSentProven=False)
+    if (row['route'] != route_id or row['model'] != model or row['body_sha256'] != bodySha256):
+        raise GateError(409, 'recovery_source_conflict', 'API lookup не соответствует исходному запросу')
+    state, row = _own_api_attempt(request, device, row['id'])
+    from fastapi.responses import JSONResponse
+    return JSONResponse(state.api_attempts.snapshot(row['id'], device), headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/harness/llm/attempts/{attempt_id}')
+async def api_attempt_receipt(attempt_id: str, request: Request, device: Device = Depends(require_device)):
+    from fastapi.responses import JSONResponse
+    state, row = _own_api_attempt(request, device, attempt_id)
+    return JSONResponse(state.api_attempts.snapshot(attempt_id, device), headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/harness/llm/attempts/{attempt_id}/result')
+async def api_attempt_result(attempt_id: str, request: Request, device: Device = Depends(require_device)):
+    state, row = _own_api_attempt(request, device, attempt_id)
+    return state.api_attempts.replay(row, device, result=True)
 
 
 @router.get('/harness/llm/pricing/decision')
@@ -540,6 +627,17 @@ async def llm_models(request: Request, device: Device = Depends(require_device))
 
 
 # --- админка ----------------------------------------------------------------------------------
+
+
+@router.get('/harness/admin/runtime', dependencies=admin)
+async def admin_runtime(request: Request):
+    state = gate(request)
+    active = sum(not task.done() for task in state.api_attempts.tasks)
+    pending = state.store._all("SELECT state,COUNT(*) count FROM api_attempts WHERE state IN ('prepared','running','outcome_unknown') GROUP BY state")
+    return {'version': 1, 'gateVersion': __version__,
+            'apiAttemptContractVersion': 1,
+            'activeRequests': getattr(request.app.state, 'active_gate_requests', 0),
+            'activeApiAttempts': active, 'apiStates': {row['state']: row['count'] for row in pending}}
 
 
 def _public_device(d: dict[str, Any]) -> dict[str, Any]:
