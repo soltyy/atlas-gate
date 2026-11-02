@@ -85,7 +85,7 @@ def main():
         (backup/'qualification.json').write_text(json.dumps(qualification,indent=2));(backup/'qualification.json').chmod(0o600)
         token=str(uuid.uuid4());fd=os.open(FLAG,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o644)
         with os.fdopen(fd,'w') as f:f.write(token)
-        drained=[];stopped=False
+        drained=[];stopped=False;service_ready=True
         try:
             # The public listener proves the marker is active BEFORE stopping Gate.
             with httpx.Client(trust_env=False,timeout=20) as c:
@@ -94,21 +94,25 @@ def main():
                 assert response.headers.get('Retry-After') and 'X-Atlas-Command-State' not in response.headers
             for k in before:node(k,True);drained.append(k)
             assert_idle(states())
-            run(['systemctl','stop','atlas-gate']);stopped=True
+            run(['systemctl','stop','atlas-gate']);stopped=True;service_ready=False
             with sqlite3.connect('file:'+str(DATABASE)+'?mode=ro',uri=True) as src,sqlite3.connect(backup/'gate.db') as dst:src.backup(dst)
             (backup/'gate.db').chmod(0o600)
-            link(a.candidate);run(['systemctl','start','atlas-gate']);ready(version)
+            link(a.candidate);run(['systemctl','start','atlas-gate']);ready(version);service_ready=True
             after=states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
         except BaseException:
             if stopped:
                 run(['systemctl','stop','atlas-gate'])
                 if (ROOT/'gate').resolve()!=old:link(old)
-                run(['systemctl','start','atlas-gate']);ready(oldversion)
+                service_ready=False
+                run(['systemctl','start','atlas-gate']);ready(oldversion);service_ready=True
             raise
         finally:
-            for k in drained:node(k,False)
-            assert FLAG.read_text()==token,'Maintenance ownership changed; do not clear another rollout'
-            FLAG.unlink()
+            if service_ready:
+                for k in drained:node(k,False)
+                assert FLAG.read_text()==token,'Maintenance ownership changed; do not clear another rollout'
+                FLAG.unlink()
+            else:
+                print(json.dumps({'status':'recovery_required','maintenanceRetained':True,'backup':str(backup)}),flush=True)
         final=states();assert all(d['ready'] and not d['draining'] for d in final.values())
         proof={'status':'passed','version':version,'old':str(old),'new':str(a.candidate),'wheelSha256':a.sha256,
                'qualification':qualification,'backup':str(backup),'ingressMaintenanceVerified':True,

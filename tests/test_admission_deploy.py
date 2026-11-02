@@ -11,7 +11,7 @@ import zipfile
 import pytest
 
 
-@pytest.mark.parametrize('failure', [None,'busy','qualification','maintenance','startup'])
+@pytest.mark.parametrize('failure', [None,'busy','qualification','maintenance','startup','rollback'])
 @pytest.mark.skipif(os.name=='nt',reason='Linux systemd/symlink deployment guard')
 def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure):
     if os.name=='nt':monkeypatch.setitem(sys.modules,'fcntl',SimpleNamespace(LOCK_EX=1,LOCK_NB=2,flock=lambda *a:None))
@@ -43,7 +43,7 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure):
         if 'atlas_gate.admission_check' in args:
             if failure=='qualification':raise RuntimeError('failed qualification')
             return SimpleNamespace(stdout=json.dumps({'status':'passed','version':'0.4.17'}))
-        if args==['systemctl','start','atlas-gate'] and failure=='startup' and not failed:
+        if args==['systemctl','start','atlas-gate'] and failure in ('startup','rollback') and (not failed or failure=='rollback'):
             failed=True;raise RuntimeError('failed startup')
         return SimpleNamespace()
     class Client:
@@ -63,7 +63,9 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure):
         assert (root/'gate').resolve()==old
     else:
         m.main();assert (root/'gate').resolve()==candidate
-    assert not m.FLAG.exists() and not draining
+    if failure=='rollback':
+        assert m.FLAG.exists() and draining=={'router','router-claude'}
+    else:assert not m.FLAG.exists() and not draining
     if failure in ('busy','qualification','maintenance'):
         assert not any(e[:1]==('systemctl',) for e in events)
     if failure=='startup':assert ('ready','0.4.16') in events
