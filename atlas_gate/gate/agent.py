@@ -185,9 +185,24 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     await state.nodes.refresh()
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
+    def validate_admission():
+        _policy(state, device, binding, request)
+        validate_new_prompt(state, binding, device)
+        def integer(name):
+            value = request.headers.get(name)
+            try:
+                return None if value is None else int(value)
+            except ValueError as error:
+                raise GateError(422, 'recovery_fence_invalid', 'неверный recovery fence') from error
+        state.recovery.check_admission(device, binding,
+            conversation_id=request.headers.get('x-atlas-conversation-id'),
+            branch_id=request.headers.get('x-atlas-branch-id'),
+            inventory_id=request.headers.get('x-atlas-recovery-inventory'),
+            generation=integer('x-atlas-recovery-generation'),
+            control_epoch=integer('x-atlas-control-epoch'), db=state.store._db)
     operation, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/prompt"), body.model_dump(),
         request.headers.get("idempotency-key"), body.id, day, org_of(state, device).quota.agent_turns_per_day, state.nodes,
-        validate_new=lambda: validate_new_prompt(state, binding, device),
+        validate_new=validate_admission,
         body_digest=body_sha256(await request.json()))
     response = await _deliver_operation(state, binding, operation, fresh,
                                        body.model_dump_json().encode(), {"mode": "async"})

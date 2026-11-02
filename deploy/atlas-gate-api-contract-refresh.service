@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh managed API admission contract after Gate startup
+After=atlas-gate.service
+
+[Service]
+Type=oneshot
+User=root
+TimeoutStartSec=0
+ExecStart=/usr/bin/flock /run/lock/atlas-deploy.lock /opt/atlas/gate/.venv/bin/python /usr/local/sbin/atlas-gate-deploy --refresh-api-contract

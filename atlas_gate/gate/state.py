@@ -65,6 +65,39 @@ class GateState:
         self.operations = Operations(self.store)
         from .api_reasoning import ApiReasoning
         self.api_reasoning = ApiReasoning(self.store)
+        from .recovery import Recovery
+        from .api_attempts import ApiAttempts
+        self.recovery = Recovery(self)
+        self.api_attempts = ApiAttempts(self.store)
+        def api_admission(request, device, route, attempt_id, *, db=None):
+            from .api import org_of, check_data_class
+            from .errors import GateError
+            current_org = org_of(self, device)
+            current_route = current_org.route(route.id)
+            current_model = next((m for m in current_org.models if m.route_id == route.id
+                and m.model == getattr(request.state, 'api_model_name', None)), None)
+            if (current_route is None or not current_route.enabled or current_route.model_dump() != route.model_dump()
+                    or current_model is None or not current_model.enabled
+                    or current_model.model_dump() != getattr(request.state, 'api_model_snapshot', None)):
+                raise GateError(409, 'api_policy_changed_before_dispatch', 'профиль изменился до API dispatch; запрос не отправлен',
+                                deliveryState='not_sent')
+            check_data_class(self, device, request, route.id)
+            def integer(name):
+                value = request.headers.get(name)
+                if value is None:
+                    return None
+                try:
+                    return int(value)
+                except ValueError as error:
+                    raise GateError(422, 'recovery_fence_invalid', 'неверный recovery fence') from error
+            self.recovery.check_admission(device,
+                conversation_id=request.headers.get('x-atlas-conversation-id'),
+                branch_id=request.headers.get('x-atlas-branch-id'),
+                inventory_id=request.headers.get('x-atlas-recovery-inventory'),
+                generation=integer('x-atlas-recovery-generation'),
+                control_epoch=integer('x-atlas-control-epoch'),
+                admitting_api_attempt_id=attempt_id, db=db)
+        self.api_attempts.admission = api_admission
         from .context_windows import ContextWindows
         self.context_windows = ContextWindows(self)
         self.watchers: set[asyncio.Task] = set()
@@ -117,6 +150,7 @@ class GateState:
         for task in self.watchers:
             task.cancel()
         await asyncio.gather(*self.watchers, return_exceptions=True)
+        await self.api_attempts.aclose()
         await self.nodes.close()
         await self.http.aclose()
         self.store.close()
@@ -200,12 +234,23 @@ class GateState:
                     'resolvePath': '/harness/agent/sessions/{sessionId}/commands/reconcile',
                     'canonicalBody': 'json-sort-keys-compact-utf8-v1', 'lateAdmissionBlocked': True,
                     'requiresNewIntent': True}
+                from .recovery import CAPABILITY as RECOVERY_CAPABILITY
+                from .api_attempts import api_attempt_contract
+                body['sessionRecoveryCoordinator'] = dict(RECOVERY_CAPABILITY)
+                body['apiAttemptRecovery'] = api_attempt_contract()
                 for model in body['models']:
+                    model.setdefault('sessionRecovery', None)
                     route = org.route(model['route_id'])
                     if route and route.kind == 'router-agent':
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
                         from .reasoning import project_capabilities
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
+                        model['sessionRecovery'] = {'version': 1, 'scope': 'pinned_node', 'nodes': {
+                            nid: {**(info.get('sessionRecoveryProofs') or {'supported': False}),
+                                  'transportSupported': node.transport == 'direct' or info.get('connectorProtocol') == 2}
+                            for nid, info in self.nodes.snapshots.items()
+                            if (node := self.nodes.config[nid]).enabled and org.id in node.orgs
+                            and route.id in node.routes and model['model'] in {m.get('value') for m in info.get('models', [])}}}
                     options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
                         if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
                         and model['route_id'] in self.nodes.config[node_id].routes

@@ -84,14 +84,21 @@
           "nodes": {
             "node-example": {
               "version": 1,
+              "supported": true,
               "readReceipts": true,
+              "durableCases": true,
               "resumeTransport": true,
               "scope": "exact_session",
-              "transportSupported": true,
-              "transportProtocol": 2,
-              "bootId": "boot-example"
+              "historyProof": "journal_and_runtime",
+              "coldHistoryInspection": false,
+              "businessReplayAllowed": false,
+              "terminalContinuation": false,
+              "native": {},
+              "transportSupported": true
             }
-          }
+          },
+          "version": 1,
+          "scope": "pinned_node"
         }
       }
     ],

@@ -32,9 +32,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.node_mtls = False
     app.include_router(router)
+    from .gate.recovery import router as recovery_router
+    app.include_router(recovery_router)
     from .gate.node_channel import router as node_router, NodeBodyLimit
     app.include_router(node_router)
     app.add_middleware(NodeBodyLimit)
+    from .gate.activity import GateActivity
+    app.add_middleware(GateActivity)
     return app
 
 

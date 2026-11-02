@@ -1,8 +1,19 @@
-# HTTP-карта существующей системы и целевого recovery
+# HTTP-карта recovery: кандидат Gate 0.4.20 / Router 0.8.19
 
-Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md). Исходная база: Gate0.4.19,
-Router0.8.18; это индекс проверенного кода, не новый OpenAPI runtime.
-Полные wire schemas остаются в source/OpenAPI и профильных документах.
+Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), сверка кода 03.11.2026.
+Исходная база RFC — Gate **0.4.19** / Router **0.8.18**. Ниже отдельно описан
+реализованный код кандидатов **Gate 0.4.20 / Router 0.8.19**, ещё **не поставленных**.
+Номер версии, документация и fixture не подтверждают установленный runtime.
+
+Точные request schemas: [OpenAPI кандидата](fixtures/session-recovery-openapi.json).
+Примеры, capability, headers и canonical JSON vectors:
+[session-recovery-v1.json](fixtures/session-recovery-v1.json). В опубликованном
+снимке `6740fca` и текущем коде совпадают 12 recovery/API-attempt путей и 18 схем.
+Остальные v1 paths сохраняются в source/OpenAPI и профильных документах.
+
+Gate #88 / Router #104 реализуют серверную часть. Harness #504 / EDT #222 —
+отдельная клиентская проводка inventory, локального commit и ACK. Сервер не
+изменяет SQLite клиента и не снимает его local binding guard без обращения клиента.
 
 ## 1. Вход, каталог и наблюдение
 
@@ -79,13 +90,13 @@ Gate вычисляет/связывает собственные ID, клиен
 | POST/GET `/documents`, GET/DELETE `/documents/{id}` | Производные страницы/поиск/текст с авторизацией document IDs |
 | GET `/media`, GET `/media/{id}` | Созданные artifacts; durable payload reading отдельно от новой image generation |
 
-Current files/sdk-tools могут требовать transport recovery; это важно отличать от
-pure journal receipts. При **direct** доставке Gate запрашивает
-`X-Atlas-Input-Recovery: 1` у Router и заменяет internal proof IDs публичными aliases.
-В текущем исходящем connector этот request header отфильтровывается; Router тогда
-не выдаёт соответствующий proof, а Gate допускает отсутствие proof как legacy.
-Нельзя объявлять input-recovery доказанным для connector по одному direct тесту.
-Старый Gate получает legacy ответ.
+Files/sdk-tools могут требовать transport recovery; это отличается от pure journal
+receipts. Gate запрашивает `X-Atlas-Input-Recovery: 1` у Router и заменяет internal
+proof IDs публичными aliases. В базе G19/R18 connector отбрасывал этот header.
+Кандидат connector protocol 2 передаёт его; старый worker по-прежнему может вернуть
+legacy ответ без proof. Отсутствие proof не превращается в empty-confirmed.
+Холодное восстановление через эти пути зависит от backend: для Claude безопасный
+history-only restore в R19 не квалифицирован, `historyOnlyRestore=false`.
 Ни empty-confirmed proof, ни наличие original file не доказывают запуск business prompt.
 
 ## 4. Просто API через Gate — отдельный транспорт и ledger
@@ -107,9 +118,51 @@ Pricing v1 для соответствующих маршрутов требуе
 `X-Harness-Model-Call`. Configured reasoning/price decisions могут возвращаться
 в договорных headers. Эти snapshots фиксируют **настройки**, не provider result.
 
-**В текущем API proxy повтор того же POST даже с тем же key может повторно вызвать
-провайдера.** Gateway pricing fingerprint не является inference dedup/result cache.
-Нельзя переносить сюда replay гарантии `/harness/agent/sessions/*`.
+**Legacy API proxy без `X-Atlas-API-Attempt-Contract: 1` сохраняет прежнее поведение:**
+повтор POST даже с тем же key может повторно вызвать провайдера. Pricing fingerprint
+не является inference dedup/result cache; гарантии managed sessions сюда не переносятся.
+
+### Managed API attempts в кандидате G20
+
+Подписанный профиль объявляет отдельный `apiAttemptRecovery.version=1`. Клиент
+согласует contract **до исходной отправки**: `X-Atlas-API-Attempt-Contract: 1` и
+неизменный `Idempotency-Key` (допускается прежний `X-Harness-Model-Call`). Для
+ветви передаются `X-Atlas-Conversation-Id` / `X-Atlas-Branch-Id`; после recovery —
+также три admission fence headers из §6. Выбранный choice задаётся
+`X-Atlas-Choice-Index`, по умолчанию 0, и входит в identity запроса.
+
+Gate хранит исходный body hash, producer/dispatch state, приватные result chunks,
+terminal summary, result hash и usage receipt. Один producer переживает disconnect
+consumer. Повтор того же opt-in POST получает сохранённый результат либо состояние
+того же attempt; changed body/target/branch — conflict. Unknown не создаёт второй
+provider attempt. Это сохранённые байты Gate, а не upstream retrieve/cancel.
+
+| Кандидатный путь | Точная роль |
+|---|---|
+| `GET /harness/llm/attempts/{attempt_id}` | Owner-bound receipt/state, без inference |
+| `GET /harness/llm/attempts/{attempt_id}/result` | Сохранённые raw bytes, в том числе доступный partial при unknown; читать state и summary отдельно |
+| `GET /harness/llm/attempts/lookup` | Query: `requestId`, **`route_id`**, `model`, `bodySha256`; поиск своего исходного key, без новой отправки |
+| `POST /harness/llm/attempts/reconcile` | Atomic admission fence только contract 1; observe существующего либо seal отсутствующего/доказанно prepared запроса |
+
+Body reconcile: `version:1`, `requestId`, **`routeId`**, `model`, `endpoint`,
+`bodySha256`; `conversationId` / `branchId` необязательны. Endpoint — один из
+`/chat/completions`, `/responses`, `/messages`, `/images/generations`.
+Header `X-Atlas-API-Attempt-Contract: 1` обязателен. Здесь `requestId` — старый
+API key, а не новый key recovery case. Lookup 404 возвращает unknown, **не** not-sent.
+
+Negative proof имеет `scope=managed_api_admission_fence`, `notSentProven=true`,
+`providerDispatch=false` и exact key/body/route/model/endpoint. Prepared attempt
+запечатывается под прежним attempt ID; running/unknown/complete не выдаются за
+неотправленные. Поздний исходный managed POST получает сохранённый отказ. Этот
+fence **не защищает legacy API POST**, для которого contract 1 не был согласован.
+
+`terminalKnown`, provider outcome, `runState`, `toolCallsComplete` и usage certainty
+различаются. HTTP 200, Responses `completed` или сохранённые SDK/API raw frames
+не дают host-execution permit. `hostExecutionAllowed=false`: исполнитель клиента
+проверяет завершённость/schema/call ID, текущие права и собственный effect ledger.
+Failed/incomplete/refused/paused/tool_calls не выдаются за проверенный успех задачи.
+В coordinator API source имеет `kind=api_attempt`; ACK этого source использует
+`sourceAttemptId`, а не SDK `sourceSessionId`.
 
 Provider retrieve/cancel/background/WS пути не возникают автоматически из наличия
 POST Responses. Для их объявления нужны adapter-specific endpoints/capability,
@@ -119,32 +172,120 @@ owner-bound result ledger, data retention policy и conformance. До этого
 
 ## 5. Gate↔Router direct/connector и эксплуатация
 
-Direct transport и исходящий connector предназначены для доставки logical команд
-на закреплённый node, но **полной wire parity в этой базе нет**. Сертификат/nodeId/bootId и org/route registration
-проверяются Gate. Relay lease, HTTP timeout и receipt retention не становятся
+Direct transport и исходящий connector доставляют logical команды на закреплённый
+node. Сертификат/nodeId/bootId и org/route registration проверяются Gate.
+Relay lease, HTTP timeout и receipt retention не становятся
 ограничением общего времени SDK задачи. Outgoing ACK replay не выполняет SDK вновь.
 
-Проверенные ограничения: request allowlist в Router connector пропускает только
-ограниченный набор headers и не включает `X-Atlas-Input-Recovery`; path allowlist
-не допускает будущие `/v1/recovery/cases*`. Gate node_channel реконструирует response
-без исходных protocol headers, включая `Retry-After`. Сохранность body/ACK не
-доказывает сохранность всех рекомендаций retry/capability negotiation.
+В G20/R19 protocol 2 расширяет allowlist для `/v1/recovery/cases*`, передаёт input
+proof header и сохраняет разрешённые response headers: `Retry-After`, command/create
+state, configured reasoning и transport contract. Auth/cookies и произвольные headers
+не туннелируются. Gate сохраняет headers вместе с relay response; повтор не сдвигает
+первоначальный Retry-After. Новые recovery work требуют protocol 2 и не выдаются
+legacy worker; это не утверждение о полной поддержке новых функций старым connector.
 
-Целевой transport conformance проверяет разрешённые paths/methods, request/response
-headers (proof versions, command/create state, retry timing, configured settings),
-status/body/stream framing и ошибки в обоих направлениях. Allowlist расширяется
-явно, без произвольного tunnel к admin/чужому URL. Capability вычисляется по
-пересечению **Gate–connector–Router**, закрепляется на exact node/boot/transport
-version; legacy fallback допустим, но не выдаётся за полное self-healing. При потере
-Retry-After из наблюдения нельзя выдумать нулевую паузу или переписать исходный срок.
+Capability — пересечение **Gate–connector–Router**. В подписанном профиле
+`model.sessionRecovery={version:1,scope:pinned_node,nodes:{...}}`; каждый node имеет
+свои proof capabilities и `transportSupported`. `exactPinnedPath=true` у coordinator
+означает проверку конкретного node/boot/transport на действии, а не resume на любом
+узле из общего discovery. При потере рекомендации retry нельзя выдумывать нулевую паузу.
 
 Документированные процедуры: [Router onboarding](ROUTER-ONBOARDING.md),
 [deployment](DEPLOYMENT.md), [HA](HA-ADR.md). Admin drain/reload/enrollment не являются
 обычными пользовательскими recovery actions и требуют соответствующих прав.
 
-## 6. Где начинается новый контракт
+Drain учитывает также `nativeClosingUnits`, `nativePendingUnits`,
+`unsettledCloseUnits` и входящий I/O, включая cold GET/context. Lease ставится до
+первого await SDK open. Незарегистрированный transport с неопределённым close
+удерживает резерв процесса. Эти counters служат наблюдению/guard, не являются
+публичной model capability или durable доказательством освобождения SDK. После
+crash/restart пустой registry и нулевые counters требуют сверки ownership/history,
+а не означают, что прежний writer исчез.
 
-Все `/harness/recovery/inventories*`, `/harness/recovery/cases*` и `/v1/recovery/cases*` из RFC — **предложение**, их нет
-в указанной базе. Это общий orchestration слой над существующими receipts и adapters,
-а не переименование старого `/commands/reconcile`. Договорные v1 paths сохраняются.
-При реализации OpenAPI, capability, клиент, Router и end-to-end proofs меняются вместе.
+## 6. Coordinator v1 в коде кандидата G20
+
+Подписанная capability — `sessionRecoveryCoordinator.version=1`, protocol
+`session-recovery-coordinator-v1`. Это отдельный слой над прежними receipts,
+не переименование `commandRecovery` и не автоматическое обновление старого клиента.
+
+| Метод/путь | Результат |
+|---|---|
+| `POST /harness/recovery/inventories` | Durable snapshot всех pending sources ветви и закрытие нового admission |
+| `POST /harness/recovery/inventories/{inventory_id}/seal` | Барьер регистрации всех sources; сам по себе не разрешает prompt |
+| `POST /harness/recovery/cases` | Один immutable manifest на один source Run и binding/attempt |
+| `GET /harness/recovery/cases/{case_id}` | Текущий snapshot, evidence и сохранённый plan; без SDK/model dispatch |
+| `POST .../{case_id}/evidence` | Append-only клиентский claim, не техническое доказательство исполнения |
+| `POST .../{case_id}/apply` | Выполнить разрешённые server action IDs сохранённого плана под CAS/fence |
+| `POST .../{case_id}/ack` | Зафиксировать локальное применение immutable client actions после commit |
+| `POST .../{case_id}/cancel` | Прекратить auto recovery, поднять control epoch и запретить ещё не отправленные шаги |
+
+Inventory body содержит `version`, `conversationId`, `branchId`, `clientStoreEpoch`,
+`checkpointInventoryVersion`, `sources`. Source reference: `sourceRef`, `sourceRunId`
+и либо `kind=managed_session` + `sessionId`, либо `kind=api_attempt` + `attemptId`.
+Cases связываются через `inventoryId/sourceRef`. Несколько sources — несколько cases
+под одним branch generation/control epoch. Unresolved source нельзя потерять при
+смене snapshot; завершение первого case до seal не открывает ветвь.
+
+Create/seal/evidence/apply/cancel используют устойчивый `Idempotency-Key` и неизменный
+body. ACK использует `ackKey` в body. **Pending apply повторяется с тем же key и тем
+же body**, включая старые `planId`, `expectedRevision`, source hash, `branchFence`
+и `actionIds`. Нельзя заменить pending body данными свежего snapshot. Принятый шаг
+сверяется по своему ledger; новый plan/action/key нужен после доказанного отказа,
+а не для обхода unknown. `apply` не принимает новый SDK payload, prompt или tool body.
+
+ACK содержит `planId`, **`planRevision`**, `sourceManifestSha256`, `clientStoreEpoch`,
+`sourceRunId`, один из `sourceSessionId/sourceAttemptId`, `sourceCheckpointVersion`,
+`appliedActions[{actionId,evidenceSha256}]`, `localCommitRef/localCommitSha256`.
+Он не требует текущего `branchFence/expectedRevision`: первый поздний ACK принимается
+как historical-applied после продвижения revision/Stop. Неизменные descriptors
+проверяются; partial ACK не закрывает остальные обязательные действия. Равный hash
+у API receipt и checkpoint resolution не делает их одним action kind.
+
+После регистрации recovery ветви новый prompt/managed API dispatch предъявляет
+`X-Atlas-Recovery-Inventory`, `X-Atlas-Recovery-Generation`, `X-Atlas-Control-Epoch`.
+Для новой binding/API запроса передаются также `X-Atlas-Conversation-Id` и
+`X-Atlas-Branch-Id`. Legacy ветви без регистрации продолжают прежний протокол;
+старое окно зарегистрированной ветви без актуального fence получает recovery_required.
+
+Stop/cancel не разрешает продолжение отменённого intent. После него остаются
+чтение/сверка receipts и ACK уже применённых фактов; historical ACK не открывает
+новый transport/model dispatch. Cancel case не подменяет SDK interrupt. Старый
+`/interrupt` остаётся session-scoped; target-aware late Stop не объявляется
+реализованным этим выпуском.
+
+Canonical body — прежний `json-sort-keys-compact-utf8-v1`, с Python float formatting
+и сортировкой Unicode code points, без добавления defaults. Это не RFC8785/JCS.
+Evidence предоставляет `canonicalPayloadUTF8`: hash можно проверить по точным UTF-8
+bytes этой строки. Hash не заменяет проверку source tuple, action kind и полномочий.
+
+## 7. Router proof adapter и пределы кандидата
+
+При включённом durable journal R19 реализует `POST /v1/recovery/cases`,
+`GET /v1/recovery/cases/{case_id}`, `POST .../{case_id}/apply`.
+Create body: `version`, стабильный `id`, локальный `sessionId`, optional `turnId`,
+`expectedBootId`, `sourceManifestSha256`, `generation`, `controlEpoch`.
+Apply body: `version`, `actionId`, `expectedRevision`, `generation`, `controlEpoch`.
+SDK IDs остаются Router/Gate-внутренними; публичная SDK alias — другой namespace.
+
+Read/create proof не открывают SDK. History `recorded` означает journal mapping,
+а `confirmed` — соответствующий живой runtime; это не универсальная проверка всего
+transcript. Lifecycle change делает старый case stale и не разрешает его старый action.
+Native шаги ограничены `resume_transport` / `release_idle_transport` для доказанно
+собственного idle transport, с проверкой pending turns/tools/children/compact/input I/O.
+Cold resume объявлен для Codex/stub; Claude `historyOnlyRestore=false` и
+`noActionRestoreQualified=false`. Для Claude есть origin/drain/reset accounting,
+но это не доказательство безопасного холодного resume без inference.
+
+`sdk_writer_busy` и локальный pre-SDK `capacity_exceeded` могут иметь точный
+`rejected_not_sent`, `scope=transport_only`, `retryable=true`. Это отказ transport
+шага, не отрицательное доказательство business prompt. Остальные неизвестные native
+исходы не очищаются по HTTP status. Complete resume допускает подтверждение точного
+postcondition без SDK RPC; отсутствие registry entry не доказывает завершённый close.
+
+Gate #77 / Router #96 terminal continuation остаётся **unsupported**. Ни native
+resume, ни SDK/API raw frames, ни accepted tool ACK не дают разрешения повторить
+prompt/инструмент или объявить бизнес-задачу выполненной. Прямой Router клиент имеет
+node-token контракт, прямой API без Gate — собственный клиентский ledger; coordinator
+Gate не появляется в этих топологиях автоматически. Cross-account/node/device
+migration, восстановление утраченной SQLite клиента и произвольные внешние effects
+этим серверным кандидатом не реализованы.

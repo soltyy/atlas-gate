@@ -10,6 +10,7 @@ LiteLLM снят: гейт сам подставляет ключ провайд
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -22,6 +23,7 @@ from fastapi.responses import Response, StreamingResponse
 from .errors import GateError
 from .orgs import OrgConfig, Route
 from .state import Device, GateState
+from .api_attempts import ApiAttempts, ResponseFacts, opted_in, selected_choice
 
 log = logging.getLogger("atlas_gate")
 
@@ -168,6 +170,12 @@ class UsageTap:
 
 async def proxy(request: Request, state: GateState, device: Device, org: OrgConfig, route: Route,
                 model: str, suffix: str, body: bytes, stream: bool) -> Response:
+    if opted_in(request.headers):
+        return await _managed_proxy(request, state, device, org, route, model, suffix, body, stream)
+    return await _legacy_proxy(request, state, device, org, route, model, suffix, body, stream)
+
+
+def _prepare_request(request, state, device, org, route, model, suffix, body):
     # Capture once before provider IO. Reload/time-window changes cannot reprice an active call.
     from datetime import datetime, timezone
     from ..pricing import selected
@@ -206,6 +214,10 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
     headers = [(k, v) for k, v in request.headers.items()
                  if k.lower() not in DROP_REQUEST and not k.lower().startswith("x-harness-")
                  and k.lower() != 'x-atlas-reasoning-scope'
+                 and not k.lower().startswith('x-atlas-api-attempt-')
+                 and not k.lower().startswith('x-atlas-recovery-')
+                 and k.lower() not in ('x-atlas-choice-index', 'x-atlas-conversation-id', 'x-atlas-branch-id',
+                                       'x-atlas-generation', 'x-atlas-control-epoch')
                  and not k.lower().startswith('x-atlas-pricing-')]
     if route.protocol == "anthropic":
         headers.append(("x-api-key", key))
@@ -217,6 +229,12 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
     url = route.upstream() + suffix
     timeout = httpx.Timeout(route.timeout_s, connect=min(route.timeout_s, 10.0))
     upstream_req = state.http.build_request("POST", url, headers=headers, content=body, timeout=timeout)
+    return upstream_req, price_decision, period, schedule
+
+
+async def _legacy_proxy(request, state, device, org, route, model, suffix, body, stream):
+    upstream_req, price_decision, period, schedule = _prepare_request(
+        request, state, device, org, route, model, suffix, body)
     try:
         resp = await state.http.send(upstream_req, stream=True)
     except httpx.TimeoutException as failed:
@@ -278,3 +296,173 @@ async def proxy(request: Request, state: GateState, device: Device, org: OrgConf
             record(tap.usage)
 
     return StreamingResponse(relay(), status_code=resp.status_code, headers=out_headers)
+
+
+async def _managed_proxy(request, state, device, org, route, model, suffix, body, stream):
+    """One producer per admitted attempt; disconnection only detaches its consumer."""
+    manager: ApiAttempts = state.api_attempts
+    # Early API replay uses this exact original input, before mutable defaults,
+    # reasoning policy normalization or Chat include_usage injection.
+    original = await request.body()
+    row, fresh = manager.claim(device, route, model, suffix, original, request.headers,
+                               branch=request.headers.get('x-atlas-branch-id'))
+    if not fresh:
+        return manager.replay(row, device)
+    aid = row['id']
+    try:
+        check_quota(state, device, org)
+        upstream_req, price_decision, period, schedule = _prepare_request(
+            request, state, device, org, route, model, suffix, body)
+        # A shared provider account must never deduplicate two different owners'
+        # identical client keys. This does not assert provider retry guarantees.
+        upstream_req.headers['Idempotency-Key'] = 'atlas-gate-' + aid
+    except GateError as failed:
+        raw = json.dumps({'error': {'code': failed.code, 'message': failed.message, **failed.extra}},
+                         ensure_ascii=False).encode()
+        manager.response_headers(aid, failed.status, {'content-type': 'application/json'})
+        manager.append(aid, raw)
+        manager.finish(aid, {'outcome': 'rejected-not-sent', 'terminalKnown': True,
+                            'usageStatus': 'unknown', 'error': {'code': failed.code, 'category': 'admission'},
+                            'retry': {'allowed': False, 'scope': 'new_intent_after_condition'}},
+                       state='rejected_not_sent')
+        return manager.replay(manager.owned(aid, device), device)
+
+    ready = asyncio.Event()
+    entry = next((m for m in org.models if m.route_id == route.id and m.model == model), None)
+    # Compatibility alone does not attest provider admission-rejection semantics.
+    dialect = getattr(entry, 'reasoningDialect', None) or 'compatible'
+    facts = ResponseFacts(suffix, dialect, selected_choice(request.headers))
+    static_price = next((p.model_dump() for p in org.pricing if p.route_id == route.id and p.model == model), None)
+
+    def normalized_usage():
+        if not facts.usage_complete:
+            return None
+        try:
+            raw_usage = facts.usage or {}
+            required = ('input_tokens', 'output_tokens') if suffix == '/messages' else (
+                'prompt_tokens' if 'prompt_tokens' in raw_usage else 'input_tokens',
+                'completion_tokens' if 'completion_tokens' in raw_usage else 'output_tokens')
+            if any(type(raw_usage.get(k)) is not int or raw_usage[k] < 0 for k in required):
+                return None
+            if suffix == '/messages' and any(type(v) is not int or v < 0 for k, v in raw_usage.items()
+                    if k in ('cache_read_input_tokens', 'cache_creation_input_tokens')):
+                return None
+            usage = (anthropic_usage(facts.usage, None) if suffix == '/messages'
+                     else openai_usage(facts.usage, strict=True))
+            if usage is None or any(type(v) is not int or v < 0 for v in usage.values()) or usage['cached'] > usage['prompt']:
+                return None
+            return usage
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            return None
+
+    async def produce():
+        resp = None
+        failure = None
+        headers = {}
+        admission_rejected = False
+        try:
+            # Fence and dispatch marker share one short SQLite transaction.
+            # No await or upstream IO occurs while that transaction is open.
+            if not manager.dispatched(aid, request=request, device=device, route=route):
+                admission_rejected = True  # Reconcile sealed a queued attempt; preserve its receipt.
+                return
+            resp = await state.http.send(upstream_req, stream=True)
+            headers = {k: v for k, v in resp.headers.items() if k.lower() not in DROP_RESPONSE
+                       and not k.lower().startswith('x-atlas-api-attempt-')}
+            if price_decision:
+                headers['X-Atlas-Pricing-Decision'] = json.dumps(price_decision, separators=(',', ':'), ensure_ascii=True)
+            manager.response_headers(aid, resp.status_code, headers)
+            ready.set()
+            raw = []
+            def capture(chunk):
+                manager.append(aid, chunk)  # No unsaved bytes reach the consumer.
+                if stream and resp.status_code < 400:
+                    facts.feed(chunk)
+                else:
+                    raw.append(chunk)
+            if resp.is_stream_consumed:
+                capture(resp.content)
+            else:
+                async for chunk in resp.aiter_raw():
+                    capture(chunk)
+            if not stream or resp.status_code >= 400:
+                facts.nonstream(b''.join(raw))
+        except GateError as failed:
+            admission_rejected = True
+            try:
+                raw = json.dumps({'error': {'code': failed.code, 'message': failed.message, **failed.extra}},
+                                 ensure_ascii=False).encode()
+                manager.response_headers(aid, failed.status, {'content-type': 'application/json'})
+                manager.append(aid, raw)
+                manager.finish(aid, {'outcome': 'rejected-not-sent', 'terminalKnown': True, 'deliveryState': 'not_sent',
+                                    'usageStatus': 'unknown', 'error': {'code': failed.code, 'category': 'admission'},
+                                    'retry': {'allowed': False, 'scope': 'new_intent_after_condition'}},
+                               state='rejected_not_sent')
+            except Exception:
+                manager.producer_failed(aid, 'admission_receipt_persistence_error')
+        except asyncio.CancelledError:
+            failure = 'producer_interrupted'
+        except httpx.HTTPError as failed:
+            failure = 'upstream_timeout' if isinstance(failed, httpx.TimeoutException) else 'upstream_transport_error'
+        except Exception as failed:
+            # A failed persistence operation is not permission to replay inference.
+            failure = 'output_persistence_error'
+            log.error('сохранение API attempt %s не завершено: %s', aid, type(failed).__name__)
+        finally:
+            try:
+                if admission_rejected:
+                    return
+                if resp is not None:
+                    await resp.aclose()
+                current = manager.owned(aid, device)
+                if current['status'] is None:
+                    status = 504 if failure == 'upstream_timeout' else 502
+                    manager.response_headers(aid, status, {'content-type': 'application/json'})
+                    manager.append(aid, json.dumps({'error': {'code': failure or 'upstream_unknown',
+                                   'message': 'исход API attempt неизвестен', 'attemptId': aid,
+                                   'deliveryState': 'unknown'}}).encode())
+                    current = manager.owned(aid, device)
+                usage = normalized_usage()
+                summary = facts.summary(current['status'], headers, usage)
+                if failure:
+                    summary['error'] = {'code': failure, 'category': 'transport_or_persistence'}
+                    summary['retry'] = {'allowed': False, 'scope': 'reconcile', 'owner': 'agent_loop'}
+                    # A durable native terminal is still valid if only the usage
+                    # tail or connection close failed afterwards.
+                    if not facts.terminal:
+                        summary.update(outcome='partial' if current['status'] == 200 else 'unknown',
+                                       terminalKnown=False, runState='waiting-recovery')
+                usage_row = None
+                cost = None
+                if usage is not None:
+                    image_billing = suffix.startswith('/images/') or (suffix == '/responses' and
+                        any(t.get('type') == 'image_generation' for t in (json.loads(body).get('tools') or []) if isinstance(t, dict)))
+                    cache_write = suffix == '/messages' and bool((facts.usage or {}).get('cache_creation_input_tokens'))
+                    if not image_billing and not cache_write:
+                        if period:
+                            cost = period.rates.cost(usage)
+                        elif static_price:
+                            cost = ((usage['prompt'] - usage['cached']) * static_price['input_uncached']
+                                    + usage['cached'] * static_price['input_cached']
+                                    + usage['completion'] * static_price['output']) / 1_000_000
+                    usage_row = dict(org=org.id, user_id=device.user_id, device_id=device.device_id, kind='gateway',
+                                     model=model, prompt_tokens=usage['prompt'], completion_tokens=usage['completion'],
+                                     cached_tokens=usage['cached'], cost=cost, route=route.id,
+                                     session_id=request.headers.get('x-harness-session'), model_call=aid)
+                summary.update(cost=cost, costKind='estimate', costStatus='estimate' if cost is not None else 'unknown',
+                               costCoverage='model_tokens_only', pricingDecision=price_decision, staticPrice=static_price)
+                terminal_state = 'complete' if summary['terminalKnown'] or summary['outcome'] == 'accepted-running' else 'outcome_unknown'
+                manager.finish(aid, summary, state=terminal_state, usage_row=usage_row, pricing_decision=price_decision)
+            except Exception as failed:
+                log.error('квитанция API attempt %s недоступна: %s', aid, type(failed).__name__)
+                manager.producer_failed(aid, 'receipt_persistence_error')
+            finally:
+                ready.set()
+
+    producer = manager.start(produce())
+    await ready.wait()
+    current = manager.owned(aid, device)
+    if not stream or current['status'] is None or current['status'] >= 400:
+        await asyncio.shield(producer)
+        return manager.replay(manager.owned(aid, device), device)
+    return StreamingResponse(manager.stream(aid), status_code=current['status'], headers=manager.headers(current))

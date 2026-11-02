@@ -17,6 +17,27 @@ from .errors import GateError, GateRoute
 
 BODY_LIMIT = 64 * 1024 * 1024
 RESULT_LIMIT = 96 * 1024 * 1024
+RESPONSE_HEADERS = frozenset({
+    'content-type', 'retry-after', 'x-atlas-command-state', 'x-atlas-create-outcome',
+    'x-atlas-create-key', 'x-atlas-input-recovery', 'x-atlas-node', 'x-atlas-boot',
+    'x-atlas-configured-reasoning', 'x-atlas-reasoning-decision',
+    'x-atlas-transport-contract',
+})
+
+
+def result_headers(value):
+    """Bounded protocol metadata only; never relay auth/cookies or arbitrary headers."""
+    if not isinstance(value, dict):
+        raise ValueError('invalid response headers')
+    out = {}
+    for name, val in value.items():
+        name = name.lower() if isinstance(name, str) else ''
+        if name not in RESPONSE_HEADERS:
+            continue
+        if not isinstance(val, str) or len(val) > 16384 or any(c in val for c in '\r\n\x00'):
+            raise ValueError('invalid response header value')
+        out[name] = val
+    return out
 
 
 class Channel:
@@ -31,6 +52,10 @@ class Channel:
             state TEXT NOT NULL, deadline REAL NOT NULL, lease REAL NOT NULL DEFAULT 0,
             status INTEGER, response BLOB, created REAL NOT NULL)""")
         store._exec("CREATE INDEX IF NOT EXISTS node_work_pending ON node_work(node_id,state,created)")
+        if 'response_headers' not in {r['name'] for r in store._all('PRAGMA table_info(node_work)')}:
+            store._exec("ALTER TABLE node_work ADD COLUMN response_headers TEXT NOT NULL DEFAULT '{}'")
+        if 'required_protocol' not in {r['name'] for r in store._all('PRAGMA table_info(node_work)')}:
+            store._exec("ALTER TABLE node_work ADD COLUMN required_protocol INTEGER NOT NULL DEFAULT 1")
 
     def discard_payload(self, rid):
         try: (self.payloads / (rid + '.bin')).unlink(missing_ok=True)
@@ -70,15 +95,17 @@ class Channel:
             envelope['body'] = base64.b64encode(content).decode()
         payload = json.dumps(envelope)
         now = time.time()
-        self.store._exec("INSERT INTO node_work(id,node_id,method,path,request,state,deadline,created) VALUES (?,?,?,?,?,'queued',?,?)", (rid, node_id, method, path, payload, now + 70, now))
+        required = 2 if path.startswith('/v1/recovery/') else 1
+        self.store._exec("INSERT INTO node_work(id,node_id,method,path,request,state,deadline,created,required_protocol) VALUES (?,?,?,?,?,'queued',?,?,?)", (rid, node_id, method, path, payload, now + 70, now, required))
         while time.time() < now + 70:
-            row = self.store._one("SELECT state,status,response FROM node_work WHERE id=?", (rid,))
+            row = self.store._one("SELECT state,status,response,response_headers FROM node_work WHERE id=?", (rid,))
             if row["state"] == "complete":
-                return httpx.Response(row["status"], content=row["response"], headers={"content-type": "application/json"}, request=httpx.Request(method, "http://router" + path))
+                headers = {'content-type': 'application/json', **json.loads(row['response_headers'] or '{}')}
+                return httpx.Response(row["status"], content=row["response"], headers=headers, request=httpx.Request(method, "http://router" + path))
             await asyncio.sleep(0.02)
         raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable", "канал Router не подтвердил ответ")
 
-    async def poll(self, node_id, wait=25, disconnected=None, authorized=None):
+    async def poll(self, node_id, wait=25, disconnected=None, authorized=None, protocol=1):
         self.last_poll[node_id] = time.monotonic()
         end = time.monotonic() + wait
         while True:
@@ -94,7 +121,7 @@ class Channel:
                     db.execute("UPDATE node_work SET state='expired' WHERE deadline<? AND state IN ('queued','leased')", (now,))
                     obsolete = db.execute("SELECT id FROM node_work WHERE created<? AND state IN ('complete','expired')", (now - 86400,)).fetchall()
                     db.execute("DELETE FROM node_work WHERE created<? AND state IN ('complete','expired')", (now - 86400,))
-                    row = db.execute("SELECT * FROM node_work WHERE node_id=? AND deadline>? AND (state='queued' OR (state='leased' AND lease<?)) ORDER BY created LIMIT 1", (node_id, now, now)).fetchone()
+                    row = db.execute("SELECT * FROM node_work WHERE node_id=? AND deadline>? AND required_protocol<=? AND (state='queued' OR (state='leased' AND lease<?)) ORDER BY created LIMIT 1", (node_id, now, protocol, now)).fetchone()
                     if row:
                         db.execute("UPDATE node_work SET state='leased',lease=? WHERE id=?", (now + 40, row["id"]))
                     db.execute("COMMIT")
@@ -115,17 +142,21 @@ class Channel:
                 return None
             await asyncio.sleep(0.05)
 
-    def complete(self, node_id, rid, status, body):
+    def complete(self, node_id, rid, status, body, headers=None):
+        headers = result_headers(headers or {})
         row = self.store._one("SELECT * FROM node_work WHERE id=? AND node_id=?", (rid, node_id))
         if not row:
             raise GateError(404, "not_found", "команда принадлежит другому узлу или отсутствует")
+        if row['required_protocol'] >= 2 and headers.get('x-atlas-transport-contract') != '2':
+            raise GateError(409, 'node_protocol_error', 'Recovery требует согласованный connector protocol2')
         if row["state"] == "complete":
-            if row["status"] != status or row["response"] != body:
+            if row["status"] != status or row["response"] != body or json.loads(row['response_headers'] or '{}') != headers:
                 raise GateError(409, "idempotency_conflict", "ответ уже зафиксирован")
             return
         if row["state"] != "leased" or row["deadline"] < time.time():
             raise GateError(410, "expired", "срок команды истёк; сверить журнал Router")
-        self.store._exec("UPDATE node_work SET state='complete',status=?,response=? WHERE id=?", (status, body, rid))
+        self.store._exec("UPDATE node_work SET state='complete',status=?,response=?,response_headers=? WHERE id=?",
+                         (status, body, json.dumps(headers, sort_keys=True), rid))
         self.discard_payload(rid)
 
 
@@ -227,7 +258,10 @@ async def work(request: Request):
     def authorized():
         credential = state(request).store._one("SELECT revoked,expires FROM node_credentials WHERE node_id=?", (node_id,))
         return bool(credential and not credential["revoked"] and credential["expires"] > time.time() and state(request).nodes.config[node_id].enabled)
-    return {"work": await state(request).channel.poll(node_id, disconnected=request.is_disconnected, authorized=authorized)}
+    protocol = request.query_params.get('protocol', '1')
+    if protocol not in ('1', '2'):
+        raise GateError(422, 'node_protocol_error', 'неподдержанная версия connector')
+    return {"work": await state(request).channel.poll(node_id, disconnected=request.is_disconnected, authorized=authorized, protocol=int(protocol))}
 
 
 class NodeBodyLimit:
@@ -269,9 +303,10 @@ async def result(rid: str, request: Request):
     try:
         raw = base64.b64decode(body["body"], validate=True)
         status = int(body["status"])
+        headers = result_headers(body.get('headers', {}))
         if len(raw) > RESULT_LIMIT or not 100 <= status <= 599:
             raise ValueError("result limit")
     except (ValueError, KeyError, TypeError):
         raise GateError(422, "invalid_request", "неверный ответ команды")
-    state(request).channel.complete(node_id, rid, status, raw)
+    state(request).channel.complete(node_id, rid, status, raw, headers)
     return {"ok": True}

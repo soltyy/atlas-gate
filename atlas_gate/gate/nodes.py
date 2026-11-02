@@ -128,6 +128,7 @@ class Nodes:
             response = await self.clients[node_id].get("/v1/node")
             response.raise_for_status()
             info = response.json()
+            info['connectorProtocol'] = (2 if response.headers.get('x-atlas-transport-contract') == '2' else 1) if self.config[node_id].transport == 'connector' else None
             if self.config[node_id].backend and info.get("backend") != self.config[node_id].backend:
                 self.probe_errors[node_id] = "Router использует другого поставщика. Проверьте ATLAS_BACKEND."
                 self.snapshots.pop(node_id, None)
