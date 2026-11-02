@@ -78,3 +78,19 @@ def test_paused_input_keeps_retry_hint_without_reclassifying_protocol():
     assert reply.status_code==503 and reply.headers['Retry-After']=='1'
     import json
     assert json.loads(reply.body)==body
+
+
+async def test_writer_wait_is_durable_rejection_without_unknown_success(network,monkeypatch):
+    client,gate,routers,_,creds,other=network
+    from atlas_router.backends.codex import WriterBusy
+    async def occupied(*args,**kwargs):raise WriterBusy('busy')
+    for node in routers:monkeypatch.setattr(node.state.backend,'open_session',occupied)
+    body={'model':'stub-fast','tools':[]};headers={'Idempotency-Key':'writer-busy-create'}
+    first=await client.post('/harness/agent/sessions',json=body,headers=headers)
+    assert first.status_code==409,first.text
+    assert first.json()['error']['code']=='sdk_writer_busy'
+    assert first.json()['error']['outcome']=='not_sent'
+    assert first.headers['X-Atlas-Create-Outcome']=='rejected'
+    again=await client.post('/harness/agent/sessions',json=body,headers=headers)
+    assert first.content==again.content
+    assert again.headers['X-Atlas-Create-Outcome']=='rejected'

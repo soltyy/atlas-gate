@@ -237,8 +237,11 @@ class Routing:
                             saved.get('bootId') != self.nodes.snapshots[node_id]['bootId'] or
                             saved.get('sdkSessionId') != resume['sdk_id']):
                         raise GateError(409, 'router_identity_mismatch', 'Прежняя история не подтверждена')
-                    if (saved.get('sessionRecovery') or {}).get('busy'):
-                        raise GateError(409, 'session_recovery_pending', 'Сначала требуется сверить незавершённый ход прежней сессии')
+                    writer = self.nodes.snapshots[node_id].get('writerRecovery') or {}
+                    if ((saved.get('sessionRecovery') or {}).get('busy')
+                            and not (writer.get('version') == 1 and writer.get('idleHandoff') is True)):
+                        raise GateError(409, 'session_recovery_pending', 'Сначала требуется сверить незавершённый ход прежней сессии',
+                            phase='session_create', outcome='not_sent', retryable=True)
                     if (not saved.get('sessionRecovery') and
                             self.store._one("SELECT name FROM sqlite_master WHERE type='table' AND name='router_operations'") and self.store._one(
                             'SELECT id FROM router_operations WHERE session_id=? AND turn_id IS NOT NULL AND finished=0 LIMIT 1',
