@@ -19,6 +19,7 @@ Account groups разделяют подписочные аккаунты; об�
 resume/tools/interrupt/compact/events идут на сохранённый node.
 
 - [Реализация и задачи](docs/IMPLEMENTATION.md)
+- [Единый контракт восстановления Harness — Gate — Router (RFC)](docs/SESSION-RESILIENCE-CONTRACT.md)
 - [Открытый каталог и настройки харнеса](docs/HARNESS-DISCOVERY.md)
 - [Повторы, квитанции и неизвестный исход](docs/RETRY-RECEIPTS.md)
 - [Поставка Gate 0.4.7 и Router 0.8.4 на VDS](docs/RETRY60-DEPLOYMENT.md)
