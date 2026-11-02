@@ -15,7 +15,9 @@
    `session_recovery_pending` требует сверки прежнего хода; вход не разрешает replay.
 4. Новый транспорт сначала возобновляет прежний SDK ID. `resumed=true` означает
    подтверждённую историю. Ответ дополняется `sessionRecovery.version=1`,
-   `mode=resumed|history_fallback`, `previousSessionId`, `actionsReplayed=false`.
+   `mode=resumed|history_fallback|unconfirmed`, `previousSessionId`, `actionsReplayed=false`.
+   `unconfirmed` сохраняет совместимость с legacy ACK без поля `resumed` и не
+   подтверждает сохранение истории; клиент обязан сверить/восстановить контекст.
 5. Только явный `allowHistoryFallback=true` разрешает пустую SDK при подтверждённом
    отсутствии истории. Router Claude допускает fallback только для точного SDK
    отказа `No conversation found with session ID`, а не для auth/transport ошибок.

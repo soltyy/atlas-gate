@@ -212,9 +212,10 @@ class Routing:
                         raise GateError(409, 'router_identity_mismatch', 'Прежняя история не подтверждена')
                     if (saved.get('sessionRecovery') or {}).get('busy'):
                         raise GateError(409, 'session_recovery_pending', 'Сначала требуется сверить незавершённый ход прежней сессии')
-                    if not saved.get('sessionRecovery') and self.store._one(
+                    if (not saved.get('sessionRecovery') and
+                            self.store._one("SELECT name FROM sqlite_master WHERE type='table' AND name='router_operations'") and self.store._one(
                             'SELECT id FROM router_operations WHERE session_id=? AND turn_id IS NOT NULL AND finished=0 LIMIT 1',
-                            (resume['id'],)):
+                            (resume['id'],))):
                         raise GateError(409, 'session_recovery_pending', 'Прежний Router не подтвердил завершение хода')
             body = dict(payload, model=model)
             if reasoning_snapshot['selected'] is not None:
@@ -246,9 +247,10 @@ class Routing:
                 raise ValueError("invalid session id")
             if resume:
                 created['sessionRecovery'] = {'version': 1,
-                    'mode': 'resumed' if created.get('resumed') is True else 'history_fallback',
+                    'mode': ('resumed' if created.get('resumed') is True else
+                             'history_fallback' if created.get('resumed') is False else 'unconfirmed'),
                     'previousSessionId': resume.get('id'), 'actionsReplayed': False}
-                if created.get('resumed') is not True and not payload.get('allowHistoryFallback'):
+                if created.get('resumed') is False and not payload.get('allowHistoryFallback'):
                     raise ValueError('SDK did not confirm history and fallback was not authorized')
             self.store._exec("UPDATE router_bindings SET status='ready',local_id=? WHERE id=?", (local_id, sid))
         except (ValueError, KeyError, TypeError):
