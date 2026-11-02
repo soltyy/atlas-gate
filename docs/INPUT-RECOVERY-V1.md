@@ -40,3 +40,5 @@ reservedUnits: существующие guards не останавливают �
 Обязательная установленная проверка input_check использует собственные temp DB,
 оригиналы и новые native SDK threads:4uploads →cold restore до prompt →один
 инертный prompt →ещё cold restore; никаких пользовательских действий/истории.
+
+GET files/sdk-tools includes inputRecovery only with X-Atlas-Input-Recovery: 1 from the trusted Gate. Older Gate receives the legacy response without internal identities. New Gate replaces identifiers with public aliases. Reconcile is internal and always includes available proof.
