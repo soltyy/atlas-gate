@@ -117,7 +117,8 @@ class Operations:
             try:
                 old = db.execute('SELECT * FROM router_operations WHERE id=?', (rid,)).fetchone()
                 if old:
-                    if old['fingerprint'] != fingerprint or old['session_id'] != binding['id']:
+                    if (old['fingerprint'] != fingerprint or old['session_id'] != binding['id'] or
+                            (body_digest and old['body_sha256'] and body_digest != old['body_sha256'])):
                         raise GateError(409, 'idempotency_conflict', 'request_id использован с другими параметрами')
                     db.execute('COMMIT')
                     return dict(old), False

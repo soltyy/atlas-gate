@@ -61,6 +61,7 @@ def test_existing_unknown_or_complete_can_never_be_sealed(tmp_path):
         assert o.resolve_prompt(d,b,'k','t',body_sha256(body))['outcome']=='unknown'
         assert s._one('SELECT COUNT(*) n FROM router_admission_fences')['n']==0
     with pytest.raises(GateError):o.resolve_prompt(d,b,'k','t','0'*64)
+    with pytest.raises(GateError):o.begin(d,b,'POST','/v1/sessions/local/prompt',body,'k','t',body_digest='0'*64)
     assert o.resolve_prompt(d,b,'other-key','t',body_sha256(body))['outcome']=='unknown'
     s.close()
 
