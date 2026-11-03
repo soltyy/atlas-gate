@@ -10,6 +10,16 @@ def count(value):
     return value if type(value) is int and value >= 0 else None
 
 
+def accountable_terminal(event):
+    if event.get('type') == 'result':
+        return True
+    usage = event.get('usage')
+    return (event.get('type') == 'error' and event.get('usageIncomplete') is True
+            and event.get('usageSource') == 'completed_sdk_results' and isinstance(usage, dict)
+            and any(count(usage.get(key)) is not None for key in
+                    ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens')))
+
+
 def sdk_usage(result):
     usage = result.get("usage")
     usage = usage if isinstance(usage, dict) else {}
@@ -23,7 +33,7 @@ def sdk_usage(result):
             if isinstance(values, dict):
                 models[model] = {key: count(values.get(key)) for key in
                     ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "outputTokens")}
-    return {
+    detail = {
         "source": "router-sdk", "uncachedInputTokens": uncached,
         "cacheReadTokens": read, "cacheWriteTokens": write,
         "totalInputTokens": sum((uncached, read, write)) if None not in (uncached, read, write) else None,
@@ -32,6 +42,11 @@ def sdk_usage(result):
         "status": "success" if result.get("ok") is True else "failed" if result.get("ok") is False else "unknown",
         "modelUsage": models,
     }
+    if result.get('usageIncomplete') is True:
+        detail['usageIncomplete'] = True
+    if result.get('usageSource') == 'completed_sdk_results':
+        detail['usageSource'] = 'completed_sdk_results'
+    return detail
 
 
 def usage_report(store, *, since, until, limit=50, before=None, **filters):
@@ -51,12 +66,14 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
         json_extract(a.payload,'$.durationMs') AS durationMs,
         COALESCE(json_extract(a.payload,'$.source'),'legacy') AS source,
         COALESCE(json_extract(a.payload,'$.status'),'unknown') AS status,
+        json_extract(a.payload,'$.usageIncomplete') AS usageIncomplete,
+        json_extract(a.payload,'$.usageSource') AS usageSource,
         json_extract(a.payload,'$.modelUsage') AS modelUsage, p.decision AS pricingDecision
         FROM usage u LEFT JOIN devices d ON u.device_id = d.device_id
         LEFT JOIN agent_usage_details a ON u.kind = 'agent' AND u.session_id = a.session_id AND u.model_call = a.turn_id
         LEFT JOIN gateway_usage_pricing p ON u.rowid = p.usage_id
         WHERE """ + " AND ".join(conditions)
-    aggregate = "COUNT(*) AS records, SUM(source = 'legacy') AS legacyRecords, " + ", ".join(
+    aggregate = "COUNT(*) AS records, SUM(source = 'legacy') AS legacyRecords, COUNT(CASE WHEN usageIncomplete=1 THEN 1 END) AS incompleteRecords, " + ", ".join(
         f"SUM({name}) AS {name}, COUNT({name}) AS {name}Records" for name in METRICS)
     aggregate += """, COUNT(CASE WHEN totalInputTokens IS NOT NULL AND cacheReadTokens IS NOT NULL THEN 1 END) AS cacheComparableRecords,
         SUM(CASE WHEN cacheReadTokens IS NOT NULL THEN totalInputTokens END) AS cacheComparableInput,
@@ -85,6 +102,8 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
         item["cacheReadPercent"] = 100 * numerator / denominator if denominator and numerator is not None else None
     next_before = rows[limit - 1]["id"] if len(rows) > limit else None
     for row in rows[:limit]:
+        if row['usageIncomplete'] is not None:
+            row['usageIncomplete'] = bool(row['usageIncomplete'])
         row["modelUsage"] = json.loads(row["modelUsage"]) if row["modelUsage"] else {}
         row['pricingDecision'] = json.loads(row['pricingDecision']) if row['pricingDecision'] else None
     return {"since": since, "until": until, "summary": summary, "groups": groups, "rows": rows[:limit], "nextBefore": next_before}

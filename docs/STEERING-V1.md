@@ -86,6 +86,14 @@ POST steer**. Клиент сверяет исходный ключ, не соз
 запоздалым `accepted`, а доказанное `absorbed` не понижается последующим ACK.
 Чтение квитанций не создаёт SDK-транспорт и не вызывает модель.
 
+Gate 0.4.23 сохраняет известные измерения даже при terminal error после completed
+SDK results: требуются `usageIncomplete:true`, `usageSource:completed_sdk_results`
+и валидные nonnegative integer token counters. Это только известная часть:
+неизвестные cache/total/tail значения остаются null, стоимость не оценивается,
+событие остаётся error с исходным outcome. Те же markers сохраняются в historical
+receipt, usage details и отчёте (`incompleteRecords`); dedup/учёт terminal происходят
+один раз. Нет повторной генерации ради получения usage.
+
 ## Откат и startup
 
 Постоянный Nginx snippet блокирует managed POST steer и GET commands/by-key, если

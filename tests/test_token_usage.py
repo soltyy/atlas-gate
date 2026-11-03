@@ -85,6 +85,74 @@ def test_receipt_and_details_are_one_transaction(tmp_path):
     store.close()
 
 
+@pytest.mark.parametrize('extra,usage', [
+    ({}, {'input_tokens': 10}),
+    ({'usageIncomplete': True, 'usageSource': 'estimated'}, {'input_tokens': 10}),
+    ({'usageIncomplete': 1, 'usageSource': 'completed_sdk_results'}, {'input_tokens': 10}),
+    ({'usageIncomplete': True, 'usageSource': 'completed_sdk_results'}, {'input_tokens': True}),
+    ({'usageIncomplete': True, 'usageSource': 'completed_sdk_results'}, {'input_tokens': -1}),
+    ({'usageIncomplete': True, 'usageSource': 'completed_sdk_results'}, {'input_tokens': '10'}),
+    ({'usageIncomplete': True, 'usageSource': 'completed_sdk_results'}, {'costUsd': 0.1}),
+    ({'usageIncomplete': True, 'usageSource': 'completed_sdk_results'}, None),
+])
+def test_error_usage_requires_typed_completed_sdk_measurements(tmp_path, extra, usage):
+    store = Store(str(tmp_path / 'usage.db'))
+    try:
+        record(store, 'unknown', usage, type='error', **extra)
+        assert report(store)['summary']['records'] == 0
+        assert store._one('SELECT COUNT(*) n FROM router_usage_receipts')['n'] == 0
+    finally:
+        store.close()
+
+
+def test_known_partial_error_preserves_measures_and_incompleteness_after_restart(tmp_path):
+    path = str(tmp_path / 'usage.db')
+    store = Store(path)
+    event = {'type': 'error', 'usageIncomplete': True, 'usageSource': 'completed_sdk_results',
+             'outcomeUnknown': True, 'costUsd': 42}
+    record(store, 'partial', {'input_tokens': 10, 'output_tokens': 5}, **event)
+    store.close()
+    store = Store(path)
+    try:
+        record(store, 'partial', {'input_tokens': 10, 'output_tokens': 5}, **event)
+        data = report(store)
+        row = data['rows'][0]
+        assert data['summary']['records'] == 1 and data['summary']['incompleteRecords'] == 1
+        assert row['uncachedInputTokens'] == 10 and row['outputTokens'] == 5
+        assert row['totalInputTokens'] is None and row['cacheReadTokens'] is None
+        assert row['usageIncomplete'] is True and row['usageSource'] == 'completed_sdk_results'
+        assert row['status'] == 'unknown'
+        assert store._one('SELECT cost FROM usage')['cost'] is None
+    finally:
+        store.close()
+
+
+def test_partial_receipt_details_and_accounted_flag_commit_together(tmp_path):
+    from atlas_gate.gate.operations import Operations
+    store = Store(str(tmp_path / 'usage.db'))
+    device = SimpleNamespace(org='first', user_id='user', device_id='device')
+    binding = {'id': 'session', 'model': 'native', 'route': 'sub', 'node_id': 'node', 'boot_id': 'boot'}
+    try:
+        operation, _ = Operations(store).begin(device, binding, 'POST', '/v1/sessions/s/prompt',
+            {'id': 'partial'}, 'original', turn_id='partial')
+        event = {'type': 'error', 'usage': {'input_tokens': 10, 'output_tokens': 5},
+                 'usageIncomplete': True, 'usageSource': 'completed_sdk_results'}
+        store._exec("CREATE TRIGGER break_details BEFORE INSERT ON agent_usage_details BEGIN SELECT RAISE(ABORT, 'test'); END")
+        routing = Routing(store, None)
+        with pytest.raises(Exception):
+            routing.usage(binding, 'partial', event, device)
+        assert store._one('SELECT accounted FROM router_operations WHERE id=?', (operation['id'],))['accounted'] == 0
+        assert store._one('SELECT COUNT(*) n FROM router_usage_receipts')['n'] == 0
+        store._exec('DROP TRIGGER break_details')
+        routing.usage(binding, 'partial', event, device)
+        routing.usage(binding, 'partial', event, device)
+        assert store._one('SELECT finished,accounted FROM router_operations WHERE id=?',
+                          (operation['id'],)) == {'finished': 1, 'accounted': 1}
+        assert store._one('SELECT COUNT(*) n FROM usage')['n'] == 1
+    finally:
+        store.close()
+
+
 @pytest.mark.asyncio
 async def test_admin_api_authorization_validation_and_filters(configured):
     http, state, _ = configured
