@@ -123,8 +123,9 @@ export const gateApi = {
   nodeDrain: (id: string, enabled: boolean) => call<{ draining: boolean }>('POST', `/harness/admin/nodes/${encodeURIComponent(id)}/drain`, { enabled }),
   enrollments: () => call<{ enrollments: Enrollment[]; orgs: string[] }>('GET', '/harness/admin/enrollments?status=pending'),
   devices: () => call<{ devices: Device[] }>('GET', '/harness/admin/devices'),
-  approve: (user_code: string, org: string, user: { id: string; email: string; name: string }) =>
-    call<{ ok: boolean }>('POST', '/harness/enroll/approve', { user_code, org, user }),
+  approve: (user_code: string, org: string, user: { id: string; email: string; name: string }, recover_device_id?: string) =>
+    call<{ ok: boolean }>('POST', recover_device_id ? '/harness/auth/v1/enroll/approve' : '/harness/enroll/approve',
+      { user_code, org, user, recover_device_id }),
   deny: (user_code: string) => call<{ ok: boolean }>('POST', '/harness/enroll/deny', { user_code }),
   revoke: (device_id: string) => call<{ ok: boolean }>('POST', `/harness/devices/${encodeURIComponent(device_id)}/revoke`),
   reload: () => call<Reloaded>('POST', '/harness/admin/reload'),

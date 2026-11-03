@@ -44,6 +44,12 @@ from .schemas import (
     GateReloaded,
     GateRevoked,
     GateTokens,
+    GateTokenRecover,
+    GateRecoveryChallenge,
+    GateRecoveryChallengeResult,
+    GateRecoveryStart,
+    GateRecoveryApprove,
+    GateRotate,
 )
 from .state import Device, GateState
 from .discovery import Discovery, HarnessSettings, public_catalog, client_settings, json_snapshot
@@ -198,54 +204,64 @@ def check_data_class(state: GateState, device: Device, request: Request, route_i
 
 @router.post("/harness/enroll/start", response_model=GateEnrollStarted)
 async def enroll_start(body: GateEnrollStart, request: Request) -> Any:
+    return _enroll_start(body, request)
+
+
+@router.post('/harness/auth/v1/enroll/start', response_model=GateEnrollStarted)
+async def recovery_enroll_start(body: GateRecoveryStart, request: Request) -> Any:
+    return _enroll_start(body,request,recovery=True,expected_device_id=body.device_id)
+
+
+def _enroll_start(body, request, *, recovery=False, expected_device_id=None):
     state = gate(request)
     for _ in range(10):
         user_code = new_user_code()
         if state.store.enrollment_by_user_code(user_code) is None:
             break
     device_code = new_token("hdc_")
-    state.store.enrollment_create(device_code, user_code, body.device_name, body.platform, body.app_version, ENROLL_TTL_SEC)
+    state.store.enrollment_create(device_code, user_code, body.device_name, body.platform, body.app_version,
+        ENROLL_TTL_SEC,recovery=recovery,expected_device_id=expected_device_id)
     log.info("регистрация начата: %s (%s, %s) — код %s", body.device_name, body.platform, body.app_version, user_code)
     return {"device_code": device_code, "user_code": user_code,
             "verification_url": f"{state.public_url}/harness/admin/?user_code={user_code}",
             "interval": POLL_INTERVAL_SEC, "expires_in": ENROLL_TTL_SEC}
 
 
-def _issue_tokens(state: GateState, device_id: str) -> tuple[str, str, int]:
-    s = state.settings
-    ttl = min(s.ATLAS_GATE_DEVICE_TOKEN_TTL_SEC, 86400)
-    device_token, refresh_token = new_token("hdt_"), new_token("hrt_")
-    now = time.time()
-    state.store.tokens_set(device_id, sha256_hex(device_token), now + ttl,
-                           sha256_hex(refresh_token), now + s.ATLAS_GATE_REFRESH_TOKEN_TTL_SEC)
-    return device_token, refresh_token, ttl
-
-
 @router.post("/harness/enroll/poll", response_model=GateEnrollResult)
-async def enroll_poll(body: GateEnrollPoll, request: Request) -> Any:
+async def enroll_poll(body: GateEnrollPoll, request: Request, response: Response) -> Any:
+    return _enroll_poll(body,request,response)
+
+
+@router.post('/harness/auth/v1/enroll/poll', response_model=GateEnrollResult)
+async def recovery_enroll_poll(body: GateEnrollPoll, request: Request, response: Response) -> Any:
+    return _enroll_poll(body,request,response,recovery=True)
+
+
+def _enroll_poll(body, request, response, *, recovery=False):
+    response.headers['Cache-Control'] = 'no-store'
     state = gate(request)
     row = state.store.enrollment_by_device_code(body.device_code)
     if row is None:
         raise GateError(404, "not_found", "device_code неизвестен")
     status = row["status"]
-    if status == "pending" and row["expires_at"] < time.time():
+    if status.startswith('recovery_') != recovery and status not in ('denied','expired'):
+        raise GateError(409,'auth_contract_required','нужен исходный маршрут подтверждения устройства')
+    if status in ('pending','recovery_pending') and row["expires_at"] < time.time():
         state.store.enrollment_set(body.device_code, "expired")
         status = "expired"
-    if status == "pending":
+    if status in ('pending','recovery_pending'):
         return error_response(428, "enroll_pending", "администратор ещё не одобрил код",
                               headers={"Retry-After": str(POLL_INTERVAL_SEC)})
     if status == "denied":
         raise GateError(403, "enroll_denied", "администратор отклонил регистрацию")
-    if status in ("expired", "consumed"):
+    if status == "expired":
         raise GateError(410, "enroll_expired", "срок кода истёк" if status == "expired" else "код уже использован")
-    if not state.store.enrollment_consume(body.device_code):
-        raise GateError(410, "enroll_expired", "код уже использован")
+    from .auth_recovery import poll
+    credentials = poll(state, body.device_code)
     dev = state.store.device(row["device_id"])
     org = state.orgs.get(dev["org"])
-    device_token, refresh_token, ttl = _issue_tokens(state, dev["device_id"])
     log.info("устройство %s получило токены (%s, %s)", dev["device_id"], dev["user_email"], dev["org"])
-    return {"device_id": dev["device_id"], "device_token": device_token, "expires_in": ttl,
-            "refresh_token": refresh_token, "device_secret": state.keyring.open(dev["device_secret"]),
+    return {**credentials,
             "profile_signing_key": state.key.jwk(),
             "user": {"id": dev["user_id"], "email": dev["user_email"], "name": dev["user_name"]},
             "org": {"id": dev["org"], "name": org.name if org else dev["org"]}}
@@ -253,17 +269,39 @@ async def enroll_poll(body: GateEnrollPoll, request: Request) -> Any:
 
 @router.post("/harness/enroll/approve", dependencies=admin, response_model=GateOk)
 async def enroll_approve(body: GateEnrollApprove, request: Request) -> Any:
+    return await _enroll_approve(body,request)
+
+
+@router.post('/harness/auth/v1/enroll/approve', dependencies=admin, response_model=GateOk)
+async def recovery_enroll_approve(body: GateRecoveryApprove, request: Request) -> Any:
+    return await _enroll_approve(body,request,recovery=True)
+
+
+async def _enroll_approve(body, request, *, recovery=False):
     state = await ready_gate(request)
     row = state.store.enrollment_by_user_code(body.user_code.strip().upper())
     if row is None:
         raise GateError(404, "not_found", "user_code неизвестен")
-    if row["status"] != "pending" or row["expires_at"] < time.time():
+    if row["status"] != ('recovery_pending' if recovery else 'pending') or row["expires_at"] < time.time():
         raise GateError(410, "enroll_expired", f"регистрация не ожидает одобрения (состояние {row['status']})")
     org = state.orgs.get(body.org)
     if org is None:
         raise GateError(422, "profile_invalid", f"организация {body.org!r} не загружена")
     if org.archived:
         raise GateError(403, "org_archived", f"организация {body.org!r} в архиве — регистрации в неё не одобряются")
+    if recovery:
+        dev = state.store.device(body.recover_device_id)
+        if dev is None or dev['revoked_at'] is not None:
+            raise GateError(409, 'device_recovery_denied', 'прежнее устройство отсутствует или отозвано')
+        if dev['org'] != body.org or dev['user_id'] != body.user.id:
+            raise GateError(409, 'device_identity_mismatch', 'организация и сотрудник должны совпадать с прежним устройством')
+        intent = state.store._one('SELECT expected_device_id FROM auth_enrollment_intent WHERE device_code=?',(row['device_code'],))
+        if intent is None or intent['expected_device_id'] and intent['expected_device_id'] != dev['device_id']:
+            raise GateError(409,'device_identity_mismatch','заявка относится к другому устройству')
+        state.store.enrollment_set(row['device_code'], 'recovery_approved', user=body.user.model_dump(),
+            org=dev['org'], device_id=dev['device_id'])
+        log.info('подтверждено восстановление прежнего устройства %s', dev['device_id'])
+        return {'ok':True}
     device_id = str(uuid.uuid4())
     state.store.device_create({
         "device_id": device_id, "org": org.id, "user_id": body.user.id, "user_email": body.user.email,
@@ -281,7 +319,7 @@ async def enroll_approve(body: GateEnrollApprove, request: Request) -> Any:
 async def enroll_deny(body: GateEnrollDeny, request: Request) -> Any:
     state = gate(request)
     row = state.store.enrollment_by_user_code(body.user_code.strip().upper())
-    if row is None or row["status"] != "pending":
+    if row is None or row["status"] not in ('pending','recovery_pending'):
         raise GateError(404, "not_found", "ожидающей регистрации с таким кодом нет")
     state.store.enrollment_set(row["device_code"], "denied")
     return {"ok": True}
@@ -291,18 +329,31 @@ async def enroll_deny(body: GateEnrollDeny, request: Request) -> Any:
 
 
 @router.post("/harness/token/refresh", response_model=GateTokens)
-async def token_refresh(body: GateRefresh, request: Request) -> Any:
-    state = gate(request)
-    row = state.store.token_by_refresh_hash(sha256_hex(body.refresh_token))
-    if row is None:
-        raise GateError(401, "unauthorized", "refresh_token не распознан")
-    dev = state.store.device(row["device_id"])
-    if dev is None or dev["revoked_at"] is not None:
-        raise GateError(401, "device_revoked", "устройство отозвано")
-    if row["refresh_expires_at"] < time.time():
-        raise GateError(401, "token_expired", "срок refresh_token истёк — нужна повторная регистрация")
-    device_token, refresh_token, ttl = _issue_tokens(state, dev["device_id"])
-    return {"device_token": device_token, "expires_in": ttl, "refresh_token": refresh_token}
+async def token_refresh(body: GateRefresh, request: Request, response: Response) -> Any:
+    response.headers['Cache-Control'] = 'no-store'
+    from .auth_recovery import refresh
+    return refresh(gate(request), body.refresh_token, None)
+
+
+@router.post('/harness/auth/v1/rotate', response_model=GateTokens)
+async def token_rotate(body: GateRotate, request: Request, response: Response) -> Any:
+    response.headers['Cache-Control'] = 'no-store'
+    from .auth_recovery import refresh
+    return refresh(gate(request),body.refresh_token,body.rotation_id)
+
+
+@router.post('/harness/auth/v1/recover', response_model=GateTokens)
+async def token_recover(body: GateTokenRecover, request: Request, response: Response) -> Any:
+    response.headers['Cache-Control'] = 'no-store'
+    from .auth_recovery import recover
+    return recover(gate(request), body.device_id, body.request_id, body.proof, body.challenge)
+
+
+@router.post('/harness/auth/v1/challenge', response_model=GateRecoveryChallengeResult)
+async def token_challenge(body: GateRecoveryChallenge, request: Request, response: Response) -> Any:
+    response.headers['Cache-Control'] = 'no-store'
+    from .auth_recovery import challenge
+    return challenge(gate(request), body.device_id, body.request_id)
 
 
 async def revoke_device(state: GateState, device_id: str) -> dict[str, Any]:

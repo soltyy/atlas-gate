@@ -35,6 +35,8 @@ class Discovery(BaseModel):
     authentication: Connection = Field(default_factory=Connection)
     limits: HarnessLimits
     models: list[PublicModel]
+    auth_contract: dict[str, Any] = Field(default_factory=dict)
+    auth_contract_jws: str = ''
 
 
 class ProfileRoute(BaseModel):
@@ -91,6 +93,11 @@ def endpoints():
             'health': '/harness/health',
             'profile': '/harness/profile', 'enroll_start': '/harness/enroll/start',
             'enroll_poll': '/harness/enroll/poll', 'token_refresh': '/harness/token/refresh',
+            'token_rotate': '/harness/auth/v1/rotate',
+            'token_recover': '/harness/auth/v1/recover',
+            'token_challenge': '/harness/auth/v1/challenge',
+            'auth_enroll_start':'/harness/auth/v1/enroll/start',
+            'auth_enroll_poll':'/harness/auth/v1/enroll/poll',
             'quota': '/harness/quota', 'llm_models': '/harness/llm/v1/models',
             'chat_completions': '/harness/llm/v1/chat/completions',
             'messages': '/harness/llm/v1/messages', 'agent_sessions': '/harness/agent/sessions',
@@ -126,7 +133,13 @@ def public_catalog(state):
                 variants[identity].enabled |= enabled
             else:
                 variants[identity] = PublicModel(catalog_id=identity, enabled=enabled, **fields)
-    return Discovery(endpoints=endpoints(), limits=limits(state),
+    auth = {'version':1, 'purpose':'atlas-gate-auth-recovery',
+            'token_rotate':'/harness/auth/v1/rotate', 'token_recover':'/harness/auth/v1/recover',
+            'token_challenge':'/harness/auth/v1/challenge',
+            'enroll_start':'/harness/auth/v1/enroll/start', 'enroll_poll':'/harness/auth/v1/enroll/poll',
+            'same_device_confirmation':True}
+    return Discovery(endpoints=endpoints(), limits=limits(state), auth_contract=auth,
+                     auth_contract_jws=state.key.sign(auth),
                      models=sorted(variants.values(), key=lambda m: (m.model, m.catalog_id)))
 
 

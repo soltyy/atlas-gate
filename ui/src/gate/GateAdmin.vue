@@ -24,10 +24,10 @@ function applyToken() {
 }
 // Код из verification_url (?user_code=…) подсвечивается — его назвал сотрудник.
 const highlighted = new URLSearchParams(window.location.search).get('user_code')?.toUpperCase() ?? ''
-const forms = reactive<Record<string, { id: string; email: string; name: string; org: string }>>({})
+const forms = reactive<Record<string, { id: string; email: string; name: string; org: string; recover: string }>>({})
 
 function form(code: string) {
-  if (!forms[code]) forms[code] = { id: '', email: '', name: '', org: orgs.value[0] ?? '' }
+  if (!forms[code]) forms[code] = { id: '', email: '', name: '', org: orgs.value[0] ?? '', recover: '' }
   return forms[code]
 }
 
@@ -59,6 +59,16 @@ async function act(what: () => Promise<unknown>, done: string) {
 
 function approve(e: Enrollment) {
   const f = form(e.user_code)
+  if (e.status === 'recovery_pending' && !f.recover) { error.value = 'Выберите прежнее устройство; новое создаваться не будет'; return }
+  const previous = devices.value.find(d => d.device_id === f.recover && !d.revoked_at)
+  if (f.recover && !previous) { error.value = 'Прежнее устройство недоступно'; return }
+  if (previous) {
+    if (!window.confirm(`Восстановить вход для прежнего устройства ${previous.device_id} (${previous.user_email || previous.user_id}, ${previous.org})? Его чаты сохранят владельца.`)) return
+    void act(() => gateApi.approve(e.user_code, previous.org,
+      { id: previous.user_id, email: previous.user_email, name: previous.user_name }, previous.device_id),
+      `Вход для прежнего устройства ${previous.device_id} подтверждён`)
+    return
+  }
   if (!f.id.trim() || !f.org) {
     error.value = 'нужны идентификатор сотрудника и организация'
     return
@@ -126,13 +136,23 @@ onMounted(() => void refresh())
           <span class="muted">{{ e.platform }} · {{ e.app_version }} · до {{ when(e.expires_at) }}</span>
         </div>
         <form class="row" @submit.prevent="approve(e)">
+          <label v-if="e.status === 'recovery_pending'">Восстановление входа
+            <select v-model="form(e.user_code).recover" aria-label="Прежнее устройство">
+              <option value="">{{ e.status === 'recovery_pending' ? 'Выберите прежнее устройство' : 'Новое устройство' }}</option>
+              <option v-for="d in devices.filter(d => !d.revoked_at)" :key="d.device_id" :value="d.device_id">
+                {{ d.device_name }} · {{ d.user_email || d.user_id }} · {{ d.org }} · {{ d.device_id }}
+              </option>
+            </select>
+          </label>
+          <template v-if="e.status !== 'recovery_pending'">
           <input v-model="form(e.user_code).id" type="text" placeholder="id сотрудника" size="12" />
           <input v-model="form(e.user_code).email" type="text" placeholder="почта" size="18" />
           <input v-model="form(e.user_code).name" type="text" placeholder="имя" size="14" />
           <select v-model="form(e.user_code).org">
             <option v-for="o in orgs" :key="o" :value="o">{{ o }}</option>
           </select>
-          <button type="submit" class="primary" :disabled="busy">Одобрить</button>
+          </template>
+          <button type="submit" class="primary" :disabled="busy || (e.status === 'recovery_pending' && !form(e.user_code).recover)">Одобрить</button>
           <button type="button" class="danger" :disabled="busy" @click="deny(e)">Отклонить</button>
         </form>
       </div>

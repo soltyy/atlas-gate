@@ -34,6 +34,10 @@ class GateEnrollStart(BaseModel):
     platform: str = Field(min_length=1, max_length=50)
 
 
+class GateRecoveryStart(GateEnrollStart):
+    device_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class GateEnrollStarted(BaseModel):
     device_code: str
     user_code: str
@@ -76,6 +80,10 @@ class GateEnrollApprove(BaseModel):
     org: str
 
 
+class GateRecoveryApprove(GateEnrollApprove):
+    recover_device_id: str = Field(min_length=1, max_length=100)
+
+
 class GateEnrollDeny(BaseModel):
     user_code: str
 
@@ -84,7 +92,27 @@ class GateRefresh(BaseModel):
     refresh_token: str
 
 
+class GateRotate(GateRefresh):
+    rotation_id: str = Field(min_length=16, max_length=100)
+
+
+class GateRecoveryChallenge(BaseModel):
+    device_id: str = Field(min_length=1, max_length=100)
+    request_id: str = Field(min_length=16, max_length=100)
+
+
+class GateRecoveryChallengeResult(BaseModel):
+    challenge: str
+    expires_in: int
+
+
+class GateTokenRecover(GateRecoveryChallenge):
+    proof: str = Field(pattern=r'^[0-9a-f]{64}$')
+    challenge: str = Field(min_length=1, max_length=4096)
+
+
 class GateTokens(BaseModel):
+    device_id: str
     device_token: str
     expires_in: int
     refresh_token: str
