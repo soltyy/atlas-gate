@@ -33,6 +33,17 @@ class GateError(Exception):
         self.extra = extra
 
 
+class GateFreshNodeError(GateError):
+    """Internal provenance: Nodes rejected this exact request before client I/O.
+
+    A provider/relay error body or another GateError with the same public code
+    cannot establish this fact. Never construct this from an HTTP response.
+    """
+    def __init__(self, message: str, *, node_id: str, method: str, path: str, reason: str) -> None:
+        super().__init__(503, 'node_unavailable', message, node_id=node_id)
+        self.node_id, self.method, self.path, self.reason = node_id, method, path, reason
+
+
 def error_body(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, **extra}}
 
