@@ -19,6 +19,7 @@ from .state import Device
 from .attachments import node_attachments, validate_prompt, validate_tool_result
 from .reasoning import model_policy, validate_new_prompt
 from .operations import body_sha256
+from .token_usage import accountable_terminal
 
 log = logging.getLogger("atlas_gate")
 
@@ -84,8 +85,9 @@ async def _events(state, binding, turn, device, after=0, wait=0):
         receipt = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn, safe='')}/receipt"), expected_boot=binding["boot_id"])
         if receipt.status_code == 200:
             terminal = receipt.json()
-            if terminal.get("type") == "result":
+            if accountable_terminal(terminal):
                 state.routing.usage(binding, turn, terminal, device)
+            if terminal.get("type") == "result":
                 op = state.store._one('SELECT created FROM router_operations WHERE session_id=? AND turn_id=?',(binding['id'],turn))
                 if state.context_windows.observe(binding,terminal.get('context'),context_order,(op or {}).get('created',0)):
                     await state.publish_contexts()
@@ -105,7 +107,7 @@ async def _events(state, binding, turn, device, after=0, wait=0):
                 raise GateError(502, 'reasoning_confirmation_missing', str(failed)) from failed
     for ev in doc["events"]:
         state.nodes.observe_event(binding["node_id"], ev)
-        if ev.get("type") == "result":
+        if accountable_terminal(ev):
             state.routing.usage(binding, turn, ev, device)
     if doc.get("done"):
         state.store._exec("UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?", (binding["id"], turn))
@@ -719,8 +721,11 @@ async def agent_turn_receipt(sid: str, turn_id: str, request: Request, device: D
     if response.status_code != 200:
         return _response(response)
     terminal = state.routing.translate(binding, response.json())
-    if terminal.get('type') == 'result':
+    if accountable_terminal(terminal):
         state.routing.usage(binding, turn_id, terminal, device)
+    if terminal.get('type') in ('result', 'error'):
+        state.store._exec('UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?',
+                         (binding['id'], turn_id))
     return JSONResponse(terminal, headers={'Cache-Control': 'private, no-store'})
 
 

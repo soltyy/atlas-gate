@@ -398,7 +398,9 @@ class Routing:
         return data
 
     def usage(self, binding, turn, result, device):
-        from .token_usage import sdk_usage
+        from .token_usage import sdk_usage, accountable_terminal
+        if result.get('type') == 'error' and not accountable_terminal(result):
+            return  # Error/unknown is not a token estimate or a zero measurement.
         detail = sdk_usage(result)
         cached = detail["cacheReadTokens"]
         prompt = detail["totalInputTokens"]
@@ -413,6 +415,10 @@ class Routing:
                          time.time(), binding["route"], binding["id"], turn))
                     db.execute("INSERT INTO agent_usage_details VALUES (?,?,?)",
                         (binding["id"], turn, json.dumps(detail)))
+                if result.get('type') in ('result', 'error') and db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='router_operations'").fetchone():
+                    db.execute('UPDATE router_operations SET finished=1,accounted=1 WHERE session_id=? AND turn_id=?',
+                               (binding['id'], turn))
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
