@@ -364,6 +364,10 @@ async def test_different_key_cannot_turn_original_unknown_client_identity_into_n
     body = payload()
     first = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'original-key'))
     assert first.status_code == 503
+    for invalid in ({'Idempotency-Key': 'original-key'},
+                    {'Idempotency-Key': 'original-key', 'X-Atlas-Steer-Contract': '1'}):
+        malformed = await client.post(prefix + '/steer', json=body, headers=invalid)
+        assert malformed.status_code == 422 and malformed.json()['error']['state'] == 'unknown'
     second = await client.post(prefix + '/steer', json=body, headers={
         **headers_for(client, prefix, 'new-key'), 'X-Atlas-Steer-Target-Boot': 'stale-target'})
     assert second.status_code == 409

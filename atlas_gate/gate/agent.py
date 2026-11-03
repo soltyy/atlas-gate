@@ -563,7 +563,7 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
         return await _delegate(request, device, sid, "POST", "/steer")
     if contract != '1' or body.expectedTurnId is None or not target_boot or len(target_boot) > 200:
         raise GateError(422, 'steer_contract_required', 'Точный steer требует contract1, target boot и paired IDs',
-                        state='not_applied', deliveryState='not_sent')
+                        state='unknown')  # A malformed retry cannot negate an already admitted key.
     state = gate(request)
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request)
