@@ -33,6 +33,8 @@ class Operations:
             store._exec("ALTER TABLE router_operations ADD COLUMN boot_id TEXT")
         if 'body_sha256' not in columns:
             store._exec('ALTER TABLE router_operations ADD COLUMN body_sha256 TEXT')
+        if 'steer' not in columns:
+            store._exec('ALTER TABLE router_operations ADD COLUMN steer TEXT')
         store._exec('''CREATE TABLE IF NOT EXISTS router_admission_fences(
             id TEXT PRIMARY KEY, device_id TEXT NOT NULL, org TEXT NOT NULL,
             session_id TEXT NOT NULL, turn_id TEXT NOT NULL, body_sha256 TEXT NOT NULL,
@@ -106,7 +108,7 @@ class Operations:
             raise GateError(422, 'invalid_request', 'request_id должен содержать 1..200 знаков')
         return hashlib.sha256((device.device_id + ':' + request_id).encode()).hexdigest()
 
-    def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None, validate_new=None, body_digest=None):
+    def begin(self, device, binding, method, path, body, request_id=None, turn_id=None, quota_day=None, quota_limit=None, nodes=None, validate_new=None, body_digest=None, steer=None):
         # Ходы имеют стабильный ID протокола, поэтому даже старый клиент не запускает дубль prompt.
         rid = request_id or (f"prompt:{binding['id']}:{turn_id}" if turn_id else str(uuid.uuid4()))
         rid = self.key(device, rid)
@@ -160,18 +162,36 @@ class Operations:
                     (rid, device.device_id, binding["id"], turn_id, fingerprint, binding["node_id"], method, path, quota_day, time.time()))
                 db.execute("UPDATE router_operations SET units=?,boot_id=? WHERE id=?", (units, binding.get("boot_id"), rid))
                 db.execute('UPDATE router_operations SET body_sha256=? WHERE id=?', (body_digest or body_sha256(body), rid))
+                if steer is not None:
+                    db.execute('UPDATE router_operations SET steer=? WHERE id=?', (json.dumps(steer), rid))
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
         return self.store._one("SELECT * FROM router_operations WHERE id=?", (rid,)), True
 
-    def complete(self, rid, response):
+    def complete(self, rid, response, *, steer_receipt=None):
         with self.store._lock:
             db = self.store._db
             db.execute("BEGIN IMMEDIATE")
             try:
                 old = db.execute("SELECT * FROM router_operations WHERE id=?", (rid,)).fetchone()
+                if old and old['steer']:
+                    saved = json.loads(old['steer'])
+                    try:
+                        reported = response.json().get('steer')
+                    except (ValueError, AttributeError):
+                        reported = None
+                    if steer_receipt is not None:
+                        # GET's current projection outranks the immutable old
+                        # HTTP ACK body, especially accepted -> unknown on reboot.
+                        reported = steer_receipt
+                    if reported is not None:
+                        from .steering import merge
+                        saved = merge(saved, reported)
+                        if steer_receipt is not None and reported.get('state') == 'unknown' and saved['state'] == 'unknown':
+                            saved['_lookupUnknown'] = True
+                    db.execute('UPDATE router_operations SET steer=? WHERE id=?', (json.dumps(saved), rid))
                 db.execute("UPDATE router_operations SET state='complete',status=?,response=?,finished=CASE WHEN path LIKE '%/compact' THEN 1 ELSE finished END WHERE id=?", (response.status_code, response.text, rid))
                 if old and old["state"] != "complete" and old["quota_day"] and response.status_code >= 400:
                     user = db.execute("SELECT user_id FROM devices WHERE device_id=?", (old["device_id"],)).fetchone()
@@ -185,8 +205,32 @@ class Operations:
     def unknown(self, rid):
         self.store._exec("UPDATE router_operations SET state='unknown' WHERE id=? AND state!='complete'", (rid,))
 
+    def observe_steer(self, rid, receipt):
+        with self.store._lock:
+            db = self.store._db
+            old = db.execute('SELECT steer FROM router_operations WHERE id=?', (rid,)).fetchone()
+            if old and old['steer']:
+                from .steering import merge
+                updated = merge(json.loads(old['steer']), receipt)
+                if receipt.get('state') == 'unknown' and updated['state'] == 'unknown':
+                    updated['_lookupUnknown'] = True
+                db.execute('UPDATE router_operations SET steer=? WHERE id=?', (json.dumps(updated), rid))
+
+    def absorbed(self, binding, event):
+        """Persist before delivering the event/cursor, including ACK/event reordering."""
+        if event.get('type') != 'steer_absorbed' or not event.get('uuid'):
+            return
+        for row in self.store._all('SELECT id,steer FROM router_operations WHERE session_id=? AND steer IS NOT NULL', (binding['id'],)):
+            saved = json.loads(row['steer'])
+            if saved['turnId'] == event.get('id') and saved['clientMessageId'] == event.get('clientMessageId'):
+                try:
+                    self.observe_steer(row['id'], {**saved, 'uuid': event['uuid'], 'state': 'absorbed'})
+                except ValueError:
+                    continue
+
     async def reconcile(self, nodes):
-        rows = self.store._all("SELECT * FROM router_operations WHERE state IN ('prepared','unknown')")
+        rows = self.store._all("""SELECT * FROM router_operations WHERE state IN ('prepared','unknown')
+            OR (steer IS NOT NULL AND json_extract(steer,'$.state') IN ('accepted','unknown'))""")
         for row in rows:
             try:
                 # Новое boot допускается только при чтении журнала, не исполнении старой команды.
@@ -195,8 +239,11 @@ class Operations:
                 if response.status_code != 200:
                     continue
                 from .receipts import completed_response
-                confirmed = completed_response(response.json(), row['id'])
+                saved = response.json()
+                if row.get('steer') and isinstance(saved, dict) and saved.get('steer') is not None:
+                    self.observe_steer(row['id'], saved['steer'])
+                confirmed = completed_response(saved, row['id'])
                 if confirmed is not None:
-                    self.complete(row['id'], confirmed)
+                    self.complete(row['id'], confirmed, steer_receipt=saved.get('steer'))
             except (GateError, ValueError, KeyError, TypeError):
                 continue

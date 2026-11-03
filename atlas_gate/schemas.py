@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
 
 def _empty_object_schema() -> dict[str, Any]:
@@ -215,7 +215,26 @@ class ToolResultRequest(BaseModel):
 class SteerRequest(BaseModel):
     """Реплика человека в идущий ход (issue #145 харнеса)."""
 
-    text: str
+    model_config = ConfigDict(extra='forbid')
+
+    text: StrictStr
+    expectedTurnId: StrictStr | None = None
+    clientMessageId: StrictStr | None = None
+    attachments: list[Attachment] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def exact_identity(self):
+        import uuid
+        if (self.expectedTurnId is None) != (self.clientMessageId is None):
+            raise ValueError('expectedTurnId и clientMessageId обязательны вместе')
+        if self.clientMessageId is not None:
+            if not self.expectedTurnId or len(self.expectedTurnId) > 200:
+                raise ValueError('expectedTurnId должен содержать 1..200 знаков')
+            if str(uuid.UUID(self.clientMessageId)) != self.clientMessageId:
+                raise ValueError('clientMessageId должен быть canonical UUID')
+        elif self.attachments:
+            raise ValueError('attachments требуют точную идентичность steer v1')
+        return self
 
 
 class SteerAccepted(BaseModel):

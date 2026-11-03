@@ -27,6 +27,7 @@ class ProfileModel(ModelContract):
     route_id: str
     # Private org projection; PublicModel/ModelContract must not expose node IDs.
     sessionRecovery: dict[str, Any] | None = None
+    steering: dict[str, Any] | None = None
 
 
 def project_model(model, attachments=None, kind="gateway"):
