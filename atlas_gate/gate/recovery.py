@@ -21,6 +21,7 @@ from .api import gate, org_of, require_device
 from .errors import GateError, GateRoute
 from .operations import body_sha256
 from .receipts import completed_response
+from .history_identity import CAPABILITY as SOURCE_HISTORY_IDENTITY
 
 CAPABILITY = {
     "version": 1, "supported": True, "protocol": "session-recovery-coordinator-v1",
@@ -34,6 +35,7 @@ CAPABILITY = {
     "exactPinnedPath": True,
     "exactPinnedPathMeaning": "native actions require exact node/boot/transport proof; not a union resume guarantee",
     "continuation": {"supported": False, "reason": "terminal_continuation_adapter_not_qualified"},
+    "sourceHistoryIdentity": dict(SOURCE_HISTORY_IDENTITY),
 }
 
 
@@ -1214,6 +1216,16 @@ async def cases(body: CaseCreate, request: Request, device=Depends(require_devic
 @router.get("/harness/recovery/cases/{case_id}")
 async def snapshot(case_id: str, request: Request, device=Depends(require_device)):
     return _response(await gate(request).recovery.observe(device, request, case_id))
+
+
+@router.get('/harness/agent/sessions/{sid}/history-identity')
+def history_identity(sid: str, request: Request, previousAlias: str | None = None,
+                     device=Depends(require_device)):
+    from .history_identity import identity
+    if previousAlias is not None and (not previousAlias or len(previousAlias) > 200):
+        raise GateError(422, 'history_identity_invalid', 'Нужен непустой opaque alias')
+    return JSONResponse(identity(gate(request).recovery, device, request, sid, previousAlias),
+                        headers={'Cache-Control': 'private, no-store', 'Vary': 'Authorization'})
 
 
 @router.post("/harness/recovery/cases/{case_id}/evidence")
