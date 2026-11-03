@@ -157,6 +157,8 @@ class Store:
             self._db.execute("PRAGMA synchronous=FULL")
             self._db.execute("PRAGMA busy_timeout=5000")
             self._db.executescript(SCHEMA)
+            from .auth_recovery import SCHEMA as AUTH_SCHEMA
+            self._db.executescript(AUTH_SCHEMA)
             row = self._db.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
                 self._db.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
@@ -190,12 +192,22 @@ class Store:
     # --- регистрации --------------------------------------------------------------------------
 
     def enrollment_create(self, device_code: str, user_code: str, device_name: str, platform: str,
-                          app_version: str, ttl: float) -> None:
+                          app_version: str, ttl: float, *, recovery: bool = False, expected_device_id: str | None = None) -> None:
         now = time.time()
-        self._exec(
-            "INSERT INTO enrollments(device_code,user_code,device_name,platform,app_version,status,created_at,expires_at)"
-            " VALUES (?,?,?,?,?,'pending',?,?)",
-            (device_code, user_code, device_name, platform, app_version, now, now + ttl))
+        with self._lock:
+            self._db.execute('BEGIN IMMEDIATE')
+            try:
+                self._db.execute(
+                    "INSERT INTO enrollments(device_code,user_code,device_name,platform,app_version,status,created_at,expires_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (device_code, user_code, device_name, platform, app_version,
+                     'recovery_pending' if recovery else 'pending', now, now + ttl))
+                if recovery:
+                    self._db.execute('INSERT INTO auth_enrollment_intent VALUES (?,?)',(device_code,expected_device_id))
+                self._db.execute('COMMIT')
+            except BaseException:
+                self._db.execute('ROLLBACK')
+                raise
 
     def enrollment_by_device_code(self, device_code: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM enrollments WHERE device_code=?", (device_code,))
@@ -205,6 +217,8 @@ class Store:
 
     def enrollments(self, status: str | None = None) -> list[dict[str, Any]]:
         if status:
+            if status == 'pending':
+                return self._all("SELECT * FROM enrollments WHERE status IN ('pending','recovery_pending') ORDER BY created_at")
             return self._all("SELECT * FROM enrollments WHERE status=? ORDER BY created_at", (status,))
         return self._all("SELECT * FROM enrollments ORDER BY created_at")
 
@@ -246,7 +260,8 @@ class Store:
                    (device_id, token_hash, expires_at, refresh_hash, refresh_expires_at))
 
     def token_by_hash(self, token_hash: str) -> dict[str, Any] | None:
-        return self._one("SELECT * FROM tokens WHERE device_token_hash=?", (token_hash,))
+        return self._one("SELECT * FROM tokens WHERE device_token_hash=?", (token_hash,)) or self._one(
+            "SELECT device_id,expires_at FROM auth_access WHERE token_hash=?", (token_hash,))
 
     def token_by_refresh_hash(self, refresh_hash: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM tokens WHERE refresh_token_hash=?", (refresh_hash,))

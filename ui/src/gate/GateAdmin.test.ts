@@ -17,6 +17,22 @@ afterEach(() => {
 })
 
 describe('GateAdmin', () => {
+  it('подтверждает прежнее устройство с прежней организацией и владельцем', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const approve = vi.fn(() => ({ ok: true }))
+    mockFetch({ 'GET /harness/admin/enrollments?status=pending': { ...pending,
+        enrollments: pending.enrollments.map(e => ({ ...e, status: 'recovery_pending' })) },
+      'GET /harness/admin/devices': devices, 'POST /harness/auth/v1/enroll/approve': approve })
+    const w = mount(GateAdmin)
+    await flush()
+    await w.find('select[aria-label="Прежнее устройство"]').setValue('d1')
+    await w.findAll('form')[1].trigger('submit')
+    await flush()
+    expect(approve).toHaveBeenCalledWith({ user_code: 'ABCD2345', org: 'test-org',
+      user: { id: 'u1', email: 'u1@x', name: 'Иван' }, recover_device_id: 'd1' })
+    expect(w.text()).toContain('Вход для прежнего устройства d1 подтверждён')
+    vi.restoreAllMocks()
+  })
   it('показывает ожидающие регистрации и устройства', async () => {
     mockFetch({ 'GET /harness/admin/enrollments?status=pending': pending, 'GET /harness/admin/devices': devices })
     const w = mount(GateAdmin)
