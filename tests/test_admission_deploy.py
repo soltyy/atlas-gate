@@ -26,6 +26,9 @@ def guard_module(monkeypatch,tmp_path):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     module.API_FLAG=tmp_path/'api-v1'
     module.STEER_FLAG=tmp_path/'steer-v1'
+    module.CONTRACT_LOCK=tmp_path/'contract.lock'
+    module.CONTRACT_EPOCH=tmp_path/'contract.epoch'
+    module.LOCK=tmp_path/'deployment.lock'
     return module
 
 
@@ -237,14 +240,59 @@ def test_startup_refresh_contracts_handles_reboot_then_old_gate_rollback(guard_m
 
 def test_activation_requires_persistent_startup_marker_cleanup(guard_module,monkeypatch):
     m=guard_module
-    pre='/usr/bin/rm -f '+ ' '.join(str(f)+suffix for f in (m.API_FLAG,m.STEER_FLAG) for suffix in ('','.pending'))
+    pre='/opt/atlas/gate/.venv/bin/python /usr/local/sbin/atlas-gate-deploy --reset-runtime-contracts'
     unit='ExecStartPre='+pre+'\nExecStartPost=/usr/bin/systemctl --no-block start atlas-gate-api-contract-refresh.service'
     monkeypatch.setattr(m,'run',lambda *a,**k:SimpleNamespace(stdout=unit))
     m.assert_contract_lifecycle()
-    unit=unit.replace(str(m.STEER_FLAG)+'.pending','')
+    unit=unit.replace('--reset-runtime-contracts','')
     with pytest.raises(RuntimeError,match='startup hooks'):m.assert_contract_lifecycle()
     template=(Path(__file__).parents[1]/'deploy/atlas-gate-api-contract.conf').read_text()
-    assert '/run/atlas-gate-steer-v1.pending' in template and 'ExecStartPre=+' in template
+    assert '--reset-runtime-contracts' in template and 'ExecStartPre=+' in template
+
+
+def test_captured_old_runtime_cannot_republish_after_startup_generation_reset(guard_module,monkeypatch):
+    m=guard_module
+    def captured():
+        state={'gateVersion':'0.4.22','steerContractVersion':1}
+        m.reset_contracts()  # Actual ExecStartPre linearization, no SDK/systemd.
+        m.API_FLAG.write_text('0.4.21')  # New publisher already confirmed old Gate API-v1.
+        return state
+    monkeypatch.setattr(m,'gate_runtime',captured)
+    with pytest.raises(m.ObsoleteContractGeneration):m.sync_steer_contract('0.4.22')
+    assert not m.STEER_FLAG.exists()
+    assert m.API_FLAG.read_text()=='0.4.21'  # Obsolete writer must not erase current evidence.
+
+
+def test_active_refresh_retries_new_generation_when_restart_ignored_same_oneshot_start(guard_module,monkeypatch):
+    m=guard_module
+    state={'gateVersion':'0.4.22','apiAttemptContractVersion':1,'steerContractVersion':1}
+    first=True
+    def probe():
+        nonlocal first,state
+        captured=state
+        if first:
+            first=False
+            m.reset_contracts()
+            state={'gateVersion':'0.4.21','apiAttemptContractVersion':1}
+        return captured
+    monkeypatch.setattr(m,'health',lambda:{'version':state['gateVersion']})
+    monkeypatch.setattr(m,'gate_runtime',probe)
+    result=m.refresh_api_contract(attempts=2)
+    assert result=={'status':'passed','gateVersion':'0.4.21','managedApiIngressAllowed':True,'steerIngressAllowed':False}
+    assert m.API_FLAG.read_text()=='0.4.21' and not m.STEER_FLAG.exists()
+
+
+def test_startup_reset_cli_uses_only_short_lifecycle_lock(guard_module,monkeypatch,capsys):
+    m=guard_module
+    monkeypatch.setattr(m.os,'geteuid',lambda:0,raising=False)
+    monkeypatch.setattr(sys,'argv',['guard','--reset-runtime-contracts'])
+    def forbidden(*a,**kw):raise AssertionError('startup reset must not probe or activate')
+    monkeypatch.setattr(m,'health',forbidden);monkeypatch.setattr(m,'run',forbidden)
+    m.API_FLAG.write_text('stale');m.STEER_FLAG.write_text('stale')
+    m.main()
+    result=json.loads(capsys.readouterr().out)
+    assert result['status']=='reset' and result['generation']==m.CONTRACT_EPOCH.read_text()
+    assert not m.API_FLAG.exists() and not m.STEER_FLAG.exists() and not m.LOCK.exists()
 
 
 @pytest.mark.parametrize('failure',['health','runtime','invalid_runtime'])

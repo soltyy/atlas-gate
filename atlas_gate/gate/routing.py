@@ -285,6 +285,11 @@ class Routing:
             self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))
             raise GateError(502, "command_outcome_unknown", "Router вернул неверный ответ создания")
         created["id"] = sid
+        if 'steering' in created:
+            from .steering import capability, negotiate
+            if capability(created['steering']).get('supported') is not False:
+                created['steering'] = await negotiate(self.nodes,
+                    {'node_id': node_id, 'boot_id': boot_id, 'local_id': local_id})
         return self.accept_creation(sid, local_id, created)
 
     async def reconcile(self, binding_id=None):
@@ -319,6 +324,10 @@ class Routing:
                 if not isinstance(local, str) or not local:
                     continue
                 created = dict(created, id=binding["id"])
+                if 'steering' in created:
+                    from .steering import capability, negotiate
+                    if capability(created['steering']).get('supported') is not False:
+                        created['steering'] = await negotiate(self.nodes, dict(binding, local_id=local))
                 self.accept_creation(binding['id'], local, created)
             except (GateError, ValueError, KeyError, TypeError):
                 continue

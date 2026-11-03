@@ -17,7 +17,9 @@ Gate #90 расширяет существующий `POST /harness/agent/sessio
 `PromptRequest.attachments`. Gate проверяет весь пакет до отправки: неподдержанное
 вложение не позволяет отправить отдельно caption. Флаги `attachments.images` и
 `attachments.documents` берутся из фактической квалификации backend/runtime;
-Gate дополнительно применяет negotiated attachment limits привязанного узла.
+Gate проверяет DTO, формат/base64/PDF и exact steering support flags. Общие числовые
+ceilings старого prompt/upload не выдаются за ограничения strong SDK input; фактические
+provider/runtime bounds остаются у выбранного adapter.
 
 Клиент захватывает `steering.requiredHeaders` из authenticated create/bound
 sdk-tools вместе с intent, сохраняет их в outbox и использует при POST **и**
@@ -32,13 +34,19 @@ Gate не добавляет defaults и передаёт эти байты Rout
 от существующего canonical JSON digest восстановления prompt; тот контракт не меняется.
 Contract/target boot дополнительно входят в source fingerprint; замена boot под
 прежним ключом конфликтует даже при байтово идентичном body. Повтор `clientMessageId`
-с новым ключом возвращает исходную проекцию: новый preflight отказ не доказывает
-неисполнение уже неизвестной оригинальной команды.
+с новым ключом проверяется по device+org+UUID, включая другие сессии/модели, и
+возвращает исходные public session/turn/state: новый preflight отказ не доказывает
+неисполнение уже неизвестной оригинальной команды. Обычный явный follow-up prompt
+остаётся отдельным intent; новые самостоятельные сообщения получают новые UUID.
 
 Для новой команды Gate проверяет владельца и организацию, текущие права исходного
 маршрута/модели/узла и data class. Узел остаётся привязанным в SQLite. Возможность
 должна быть объявлена свежим `/v1/node` и подтверждена точной сессией через
 `GET /v1/sessions/{id}/sdk-tools?steering=1`. Этот metadata-read не открывает SDK.
+Сам read также требует contract1 и исходные Node/Boot; так обнаруживается старый
+connector, который теряет новый header, до POST. Gate проверяет roundtrip до
+публикации usable bound capability в create ACK и sdk-tools, не выдаёт backend hint
+за доказанную работоспособность транспорта.
 После допуска Router атомарно проверяет ещё активность **того же** хода; Stop и
 завершение хода не переназначают реплику следующему prompt.
 Gate не делает `recover_boot` при новом strong admission: captured boot должен
@@ -86,11 +94,19 @@ POST steer**. Клиент сверяет исходный ключ, не соз
 `state:unknown` не является отрицательной квитанцией и не очищает старый intent.
 Legacy без новых заголовков сохраняет прежнее поведение.
 
-Постоянный systemd drop-in удаляет positive/pending markers перед **любым** стартом
-Gate, включая старый wheel. Отдельный root oneshot под общим deploy flock вызывает
+Постоянный systemd drop-in перед **любым** стартом Gate, включая старый wheel,
+вызывает `--reset-runtime-contracts`: под отдельным коротким lifecycle flock
+он меняет `/run/atlas-gate-contract-generation` и удаляет все positive/pending
+markers. Deployment flock в ExecStartPre не используется. Отдельный root oneshot
+под общим deploy flock вызывает
 `--refresh-api-contract`: он восстанавливает API и steer markers независимо по
 свежему authenticated runtime probe и actual Gate version. Старый Gate не содержит
 `steerContractVersion:1`, поэтому не сможет оставить положительный steer marker.
+Publisher захватывает generation до health/probe и публикует только при том же
+generation под коротким lifecycle lock; сетевого I/O под ним нет. Startup clear
+между probe и publish делает старого publisher obsolete. Активный oneshot повторяет
+health/probe нового generation, поэтому concurrent restart не теряет startup refresh.
+Это bookkeeping внешнего барьера, не журнал пользовательских действий/очередь.
 Activation guard проверяет наличие startup hook и внешний Nginx fence до cutover.
 Инфраструктура предназначена для отдельного steering release; в production этим PR
 ничего не устанавливается.

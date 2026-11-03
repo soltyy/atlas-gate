@@ -115,7 +115,7 @@ def test_current_unknown_receipt_outranks_the_saved_accepted_http_body(tmp_path)
         store.close()
 
 
-async def connector_node(client, state, tmp_path):
+async def connector_node(client, state, tmp_path, return_connector=False):
     from atlas_router.connector import Connector, private_key, csr_for, save_identity
     from atlas_gate.gate.node_channel import ChannelClient
     from atlas_gate.gate.nodes import Node
@@ -136,7 +136,8 @@ async def connector_node(client, state, tmp_path):
     identity = (await client.post('/node/enroll/poll', json={'invitation': invite})).json()
     save_identity(root, key, 'a', str(client.base_url), identity)
     connector = Connector(root, router_url, 'test-router')
-    return asyncio.create_task(connector.run())
+    task = asyncio.create_task(connector.run())
+    return (task, connector) if return_connector else task
 
 
 async def setup_native(network, monkeypatch):
@@ -379,6 +380,82 @@ async def test_different_key_cannot_turn_original_unknown_client_identity_into_n
     assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
 
 
+async def test_unknown_inbox_identity_cannot_move_to_another_session_or_model(network, monkeypatch):
+    import copy
+    _, calls = await setup_native(network, monkeypatch)
+    client, app, routers, *_ = network
+    state = app.state.gate
+    sid, prefix = await active(client)
+    binding = state.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+    upstream = state.nodes.clients[binding['node_id']]
+    original = upstream.request
+    async def lost(method, path, **kwargs):
+        if method == 'POST' and path.endswith('/steer'):
+            raise httpx.ReadError('original admission remains unknown')
+        return await original(method, path, **kwargs)
+    monkeypatch.setattr(upstream, 'request', lost)
+    body = payload()
+    first = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'original-card'))
+    assert first.status_code == 503
+    model = next(m for m in state.orgs['test-org'].models if m.route_id == binding['route'] and m.model == 'stub-fast')
+    state.orgs['test-org'].models.append(model.model_copy(update={'model': 'stub-slow'}))
+    projection = copy.deepcopy(next(m for m in state.bodies['test-org']['models'] if m['route_id'] == binding['route'] and m['model'] == 'stub-fast'))
+    projection['model'] = 'stub-slow'
+    state.bodies['test-org']['models'].append(projection)
+    created = await client.post('/harness/agent/sessions', json={'model': 'stub-slow', 'tools': [
+        {'name': 'echo', 'parameters': {'type': 'object'}}]})
+    assert created.status_code == 200, created.text
+    moved = '/harness/agent/sessions/' + created.json()['id']
+    await capture_target(client, moved)
+    assert (await client.post(moved + '/prompt?mode=async', json={'id': 'another-model-turn', 'text': 'call:echo'})).status_code == 202
+    candidate = dict(body, expectedTurnId='another-model-turn')
+    conflict = await client.post(moved + '/steer', json=candidate, headers=headers_for(client, moved, 'new-card-key'))
+    assert conflict.status_code == 409 and conflict.json()['error']['state'] == 'unknown'
+    proof = conflict.json()['error']['steer']
+    assert proof['sessionId'] == sid and proof['turnId'] == 'original' and proof['state'] == 'unknown'
+    assert not calls and state.store._one('SELECT COUNT(*) n FROM router_operations WHERE steer IS NOT NULL')['n'] == 1
+    # An explicit ordinary follow-up is a separate prompt intent, not another strong UUID admission.
+    assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
+    assert (await client.post(moved + '/interrupt', json={})).status_code == 200
+
+
+async def test_old_connector_header_loss_is_rejected_during_metadata_before_native_post(network, monkeypatch, tmp_path):
+    _, calls = await setup_native(network, monkeypatch)
+    client, app, routers, *_ = network
+    state = app.state.gate
+    task, connector = await connector_node(client, state, tmp_path, return_connector=True)
+    original = connector.router.request
+    native_posts = []
+    async def legacy_headers(method, path, **kwargs):
+        outgoing = dict(kwargs.get('headers') or {})
+        outgoing.pop('x-atlas-steer-contract', None)
+        outgoing.pop('X-Atlas-Steer-Contract', None)
+        kwargs['headers'] = outgoing
+        if method == 'POST' and path.endswith('/steer'):
+            native_posts.append(path)
+        return await original(method, path, **kwargs)
+    monkeypatch.setattr(connector.router, 'request', legacy_headers)
+    try:
+        created = await client.post('/harness/agent/sessions', json={'model': 'stub-fast', 'tools': [
+            {'name': 'echo', 'parameters': {'type': 'object'}}]})
+        assert created.status_code == 200 and created.json()['steering']['supported'] is False, created.text
+        sid = created.json()['id'];prefix = '/harness/agent/sessions/' + sid
+        binding = state.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+        assert (await client.get(prefix + '/sdk-tools')).json()['steering']['supported'] is False
+        assert (await client.post(prefix + '/prompt?mode=async', json={'id': 'original', 'text': 'call:echo'})).status_code == 202
+        # Simulate a capability cached before the connector rollback.
+        headers = {'Idempotency-Key': 'old-connector', 'X-Atlas-Steer-Contract': '1',
+                   'X-Atlas-Steer-Target-Boot': binding['boot_id']}
+        rejected = await client.post(prefix + '/steer', json=payload(), headers=headers)
+        assert rejected.status_code == 409 and rejected.json()['steer']['state'] == 'not_applied', rejected.text
+        assert rejected.json()['error']['code'] == 'steer_target_identity_required'
+        assert not calls and not native_posts
+        assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_lost_native_ack_is_observed_by_key_without_redelivery_and_stop_is_stronger(network, monkeypatch):
     consumed, calls = await setup_native(network, monkeypatch)
     client, app, routers, _, creds, other = network
@@ -488,6 +565,26 @@ async def test_supported_caption_and_document_share_one_native_identity(network,
     receipt = await client.get(prefix + '/commands', params={'requestId': 'caption-files'})
     assert receipt.json()['steer']['state'] == 'absorbed'
     assert receipt.json()['steer']['uuid'] == calls[0][1]
+    assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
+
+
+async def test_strong_input_does_not_inherit_legacy_prompt_upload_ceilings(network, monkeypatch):
+    _, calls = await setup_native(network, monkeypatch)
+    client, app, routers, *_ = network
+    sid, prefix = await active(client)
+    nodes = app.state.gate.nodes
+    original = nodes.probe
+    async def low_legacy_limits(node):
+        value = await original(node)
+        return {**value, 'attachments': {**value['attachments'], 'maxFiles': 1, 'maxRawBytes': 1,
+                                        'maxTotalBytes': 1, 'maxTextChars': 1}}
+    monkeypatch.setattr(nodes, 'probe', low_legacy_limits)
+    body = payload(text='caption beyond legacy prompt ceiling', attachments=[
+        {'kind': 'text', 'filename': 'first.txt', 'data': 'whole document'},
+        {'kind': 'text', 'filename': 'second.txt', 'data': 'second whole document'}])
+    result = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'provider-bounds'))
+    assert result.status_code == 200, result.text
+    assert len(calls) == 1 and len(calls[0][4]) == 2
     assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
 
 

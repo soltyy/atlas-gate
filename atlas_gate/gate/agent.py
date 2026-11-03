@@ -524,8 +524,12 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
         from .input_recovery import validate, public
         doc = response.json()
         if suffix == '/sdk-tools' and 'steering' in doc:
-            from .steering import bound_capability
-            doc['steering'] = bound_capability(doc['steering'], binding)
+            from .steering import bound_capability, capability, negotiate
+            if (request.query_params.get('steering') != '1'
+                    and capability(doc['steering']).get('supported') is not False):
+                doc['steering'] = await negotiate(state.nodes, binding)
+            else:
+                doc['steering'] = bound_capability(doc['steering'], binding)
         proof = doc.get('inputRecovery')
         sdk_id = binding.get('sdk_id')
         if proof is not None and not sdk_id:
@@ -589,7 +593,7 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
             preflight_error = failed
     metadata = {'version': 1, 'sessionId': binding['local_id'], 'turnId': body.expectedTurnId,
                 'clientMessageId': body.clientMessageId, 'uuid': None, 'state': 'unknown',
-                'bodySha256': digest, '_targetBoot': target_boot, '_contract': 1}
+                'bodySha256': digest, '_targetBoot': target_boot, '_contract': 1, '_org': device.org}
     op, fresh = state.operations.begin(device, binding, 'POST', _path(binding, '/steer'), original, key,
                                       body_digest=digest, steer=metadata)
     if fresh:
@@ -617,7 +621,7 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
             if caps['targetBootId'] != target_boot or caps['targetNodeId'] != binding['node_id']:
                 raise GateError(409, 'steer_target_boot_mismatch', 'Сессия подтвердила другой runtime')
             validate_prompt(PromptRequest(id=body.clientMessageId, text=body.text, attachments=body.attachments),
-                            node_attachments(info))
+                            None)  # Legacy prompt/upload ceilings are not strong SDK input limits.
         except GateError as failed:
             import httpx
             response = httpx.Response(failed.status, json={

@@ -37,6 +37,8 @@ class Operations:
             store._exec('ALTER TABLE router_operations ADD COLUMN steer TEXT')
         store._exec("""CREATE INDEX IF NOT EXISTS router_steer_identity ON router_operations(
             device_id,session_id,json_extract(steer,'$.clientMessageId')) WHERE steer IS NOT NULL""")
+        store._exec("""CREATE INDEX IF NOT EXISTS router_steer_owner_identity ON router_operations(
+            device_id,json_extract(steer,'$._org'),json_extract(steer,'$.clientMessageId')) WHERE steer IS NOT NULL""")
         store._exec('''CREATE TABLE IF NOT EXISTS router_admission_fences(
             id TEXT PRIMARY KEY, device_id TEXT NOT NULL, org TEXT NOT NULL,
             session_id TEXT NOT NULL, turn_id TEXT NOT NULL, body_sha256 TEXT NOT NULL,
@@ -133,16 +135,18 @@ class Operations:
                     db.execute('COMMIT')
                     return dict(old), False
                 if steer is not None:
-                    original = db.execute("""SELECT id,steer FROM router_operations WHERE device_id=?
-                        AND session_id=? AND steer IS NOT NULL AND json_extract(steer,'$.clientMessageId')=?""",
-                        (device.device_id, binding['id'], steer['clientMessageId'])).fetchone()
+                    original = db.execute("""SELECT id,session_id,steer FROM router_operations WHERE device_id=?
+                        AND steer IS NOT NULL AND json_extract(steer,'$.clientMessageId')=?
+                        AND (json_extract(steer,'$._org')=? OR
+                             (json_extract(steer,'$._org') IS NULL AND session_id=?))""",
+                        (device.device_id, steer['clientMessageId'], device.org, binding['id'])).fetchone()
                     if original:
                         from .steering import public
                         saved = json.loads(original['steer'])
                         raise GateError(409, 'steer_message_identity_conflict',
                             'Реплика уже принадлежит исходной команде; требуется сверка прежнего ключа',
                             state=saved['state'], originalCommandId=original['id'],
-                            steer=public(saved, binding['id']))
+                            steer=public(saved, original['session_id']))
                 sealed = db.execute('SELECT * FROM router_admission_fences WHERE id=? OR (device_id=? AND session_id=? AND turn_id=?)',
                                     (rid, device.device_id, binding['id'], turn_id)).fetchone()
                 if sealed:

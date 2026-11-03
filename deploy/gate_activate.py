@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Single-writer Gate activation with an ingress admission barrier. Run as root."""
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -18,6 +19,8 @@ ROOT=Path('/opt/atlas');FLAG=Path('/run/atlas-gate-maintenance')
 ADMISSION_FLAG=Path('/run/atlas-gate-admission')
 API_FLAG=Path('/run/atlas-gate-api-attempt-v1')
 STEER_FLAG=Path('/run/atlas-gate-steer-v1')
+CONTRACT_LOCK=Path('/run/lock/atlas-gate-contract.lock')
+CONTRACT_EPOCH=Path('/run/atlas-gate-contract-generation')
 SITE=Path('/etc/nginx/sites-enabled/atlas-gate');LOCK=Path('/run/lock/atlas-deploy.lock')
 BACKUPS=Path('/var/backups/atlas');DATABASE=Path('/var/lib/atlas-gate/gate.db')
 
@@ -66,55 +69,105 @@ def assert_gate_idle():
             raise RuntimeError('Busy Gate I/O or detached API producer; no restart')
 
 
-def _sync_contract(flag, field, expected_version=None):
+class ObsoleteContractGeneration(RuntimeError):
+    pass
+
+
+@contextmanager
+def contract_lock():
+    # Never the deployment lock: ExecStartPre runs while activation holds it.
+    with open(CONTRACT_LOCK,'a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        yield
+
+
+def _write_generation(value):
+    with CONTRACT_EPOCH.open('w') as stream:
+        stream.write(value);stream.flush();os.fsync(stream.fileno())
+
+
+def _generation_locked():
+    value=CONTRACT_EPOCH.read_text() if CONTRACT_EPOCH.exists() else ''
+    if not value:
+        value=uuid.uuid4().hex
+        _write_generation(value)
+    return value
+
+
+def contract_generation():
+    with contract_lock():return _generation_locked()
+
+
+def _clear_contracts_locked():
+    for flag in (API_FLAG, STEER_FLAG):
+        flag.unlink(missing_ok=True)
+        flag.with_name(flag.name+'.pending').unlink(missing_ok=True)
+
+
+def clear_contracts(generation=None):
+    with contract_lock():
+        if generation is not None and _generation_locked()!=generation:
+            raise ObsoleteContractGeneration('Gate restarted during contract probe')
+        _clear_contracts_locked()
+
+
+def reset_contracts():
+    """Persistent ExecStartPre: linearizes against every old publisher, no I/O."""
+    with contract_lock():
+        generation=uuid.uuid4().hex
+        _write_generation(generation)
+        _clear_contracts_locked()
+        return generation
+
+
+def _sync_contract(flag, field, expected_version=None, generation=None):
     """Publish capability only after a fresh probe during serialized cutover/startup.
 
     Absence is deliberately fail-closed in Nginx. An old positive marker or an
     orphaned staging file must never authorize inference on a legacy rollback.
     """
     pending=flag.with_name(flag.name+'.pending')
-    flag.unlink(missing_ok=True)
-    # The activation lock or systemd's serialized ExecStartPost excludes another
-    # lifecycle writer. .pending is staging, never capability evidence.
-    pending.unlink(missing_ok=True)
+    with contract_lock():
+        current=_generation_locked()
+        if generation is not None and generation!=current:
+            raise ObsoleteContractGeneration('Gate restarted before contract probe')
+        generation=current
+        flag.unlink(missing_ok=True);pending.unlink(missing_ok=True)
     state=gate_runtime()
     if state is not None and not isinstance(state,dict):
         raise RuntimeError('Invalid API contract runtime response')
-    if not state or type(state.get(field)) is not int or state[field]!=1:
-        return False
-    version=state.get('gateVersion')
-    if not isinstance(version,str) or not version or expected_version is not None and version!=expected_version:
-        raise RuntimeError('API contract runtime identity does not match ready Gate')
-    try:
-        fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o644)
-        with os.fdopen(fd,'w') as stream:
-            stream.write(version);stream.flush();os.fsync(stream.fileno())
-        os.replace(pending,flag)
-    finally:
-        pending.unlink(missing_ok=True)
+    with contract_lock():
+        if _generation_locked()!=generation:
+            raise ObsoleteContractGeneration('Gate restarted during contract probe')
+        if not state or type(state.get(field)) is not int or state[field]!=1:
+            return False
+        version=state.get('gateVersion')
+        if not isinstance(version,str) or not version or expected_version is not None and version!=expected_version:
+            raise RuntimeError('API contract runtime identity does not match ready Gate')
+        try:
+            fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o644)
+            with os.fdopen(fd,'w') as stream:
+                stream.write(version);stream.flush();os.fsync(stream.fileno())
+            os.replace(pending,flag)
+        finally:
+            pending.unlink(missing_ok=True)
     return True
 
 
-def sync_api_contract(expected_version=None):
-    return _sync_contract(API_FLAG, 'apiAttemptContractVersion', expected_version)
+def sync_api_contract(expected_version=None, generation=None):
+    return _sync_contract(API_FLAG, 'apiAttemptContractVersion', expected_version, generation)
 
 
-def sync_steer_contract(expected_version=None):
-    return _sync_contract(STEER_FLAG, 'steerContractVersion', expected_version)
-
-
-def clear_contracts():
-    for flag in (API_FLAG, STEER_FLAG):
-        flag.unlink(missing_ok=True)
-        flag.with_name(flag.name+'.pending').unlink(missing_ok=True)
+def sync_steer_contract(expected_version=None, generation=None):
+    return _sync_contract(STEER_FLAG, 'steerContractVersion', expected_version, generation)
 
 
 def assert_contract_lifecycle():
     """The external fence must survive starting an older wheel after rollback."""
     unit=run(['systemctl','show','atlas-gate','-p','ExecStartPre','-p','ExecStartPost'],
              capture_output=True,text=True).stdout
-    required=('/usr/bin/rm', str(API_FLAG), str(API_FLAG)+'.pending',
-              str(STEER_FLAG), str(STEER_FLAG)+'.pending', 'atlas-gate-api-contract-refresh.service')
+    required=('/usr/local/sbin/atlas-gate-deploy', '--reset-runtime-contracts',
+              'atlas-gate-api-contract-refresh.service')
     if not isinstance(unit,str) or not all(value in unit for value in required):
         raise RuntimeError('Persistent contract startup hooks are missing; no activation')
 
@@ -141,24 +194,30 @@ def refresh_api_contract(attempts=45):
     clear_contracts()
     version=None
     for attempt in range(attempts):
+        generation=contract_generation()
         try:
             state=health()
             if not isinstance(state,dict) or not isinstance(state.get('version'),str) or not state['version']:
                 return {'status':'blocked','reason':'invalid_startup_health','managedApiIngressAllowed':False,'steerIngressAllowed':False}
-            version=state['version'];break
+            version=state['version']
+            enabled=sync_api_contract(version,generation)
+            steering=sync_steer_contract(version,generation)
+            return {'status':'passed' if enabled else 'unsupported','gateVersion':version,
+                    'managedApiIngressAllowed':enabled,'steerIngressAllowed':steering}
+        except ObsoleteContractGeneration:
+            # ExecStartPost may have targeted this already active oneshot. Retry
+            # the NEW epoch instead of exiting and losing its startup refresh.
+            continue
         except httpx.HTTPError:
             if attempt+1<attempts:time.sleep(1)
-    if version is None:
-        return {'status':'blocked','reason':'startup_health_unavailable','managedApiIngressAllowed':False,'steerIngressAllowed':False}
-    try:
-        enabled=sync_api_contract(version)
-        steering=sync_steer_contract(version)
-    except (httpx.HTTPError,OSError,RuntimeError,ValueError) as failed:
-        clear_contracts()
-        return {'status':'blocked','gateVersion':version,'reason':type(failed).__name__,
-                'managedApiIngressAllowed':False,'steerIngressAllowed':False}
-    return {'status':'passed' if enabled else 'unsupported','gateVersion':version,
-            'managedApiIngressAllowed':enabled,'steerIngressAllowed':steering}
+        except (OSError,RuntimeError,ValueError) as failed:
+            try:clear_contracts(generation)
+            except ObsoleteContractGeneration:continue
+            return {'status':'blocked','gateVersion':version,'reason':type(failed).__name__,
+                    'managedApiIngressAllowed':False,'steerIngressAllowed':False}
+    try:clear_contracts(generation)
+    except ObsoleteContractGeneration:pass
+    return {'status':'blocked','reason':'startup_health_unavailable','managedApiIngressAllowed':False,'steerIngressAllowed':False}
 
 
 def drain_ingress():
@@ -215,9 +274,13 @@ def link(target):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--candidate',type=Path)
     p.add_argument('--wheel',type=Path);p.add_argument('--sha256')
-    p.add_argument('--tests-proof',type=Path);p.add_argument('--refresh-api-contract',action='store_true');a=p.parse_args()
+    p.add_argument('--tests-proof',type=Path);p.add_argument('--refresh-api-contract',action='store_true')
+    p.add_argument('--reset-runtime-contracts',action='store_true');a=p.parse_args()
     if os.geteuid()!=0:raise PermissionError('deployment and startup refresh require root')
     activation=(a.candidate,a.wheel,a.sha256,a.tests_proof)
+    if a.reset_runtime_contracts:
+        if a.refresh_api_contract or any(value is not None for value in activation):p.error('startup reset cannot activate or refresh')
+        print(json.dumps({'status':'reset','generation':reset_contracts()}),flush=True);return
     if a.refresh_api_contract:
         if any(value is not None for value in activation):p.error('startup refresh cannot activate a release')
         print(json.dumps(refresh_api_contract()),flush=True);return

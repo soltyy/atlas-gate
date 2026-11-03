@@ -47,6 +47,20 @@ def bound_capability(value, binding):
     return caps
 
 
+async def negotiate(nodes, binding):
+    """Prove the header roundtrip before publishing a usable bound capability."""
+    from urllib.parse import quote
+    try:
+        response = await nodes.request(binding['node_id'], 'GET',
+            '/v1/sessions/' + quote(binding['local_id'], safe='') + '/sdk-tools',
+            params={'steering': '1'}, expected_boot=binding['boot_id'])
+        if response.status_code == 200:
+            return bound_capability(response.json().get('steering'), binding)
+    except (GateError, ValueError, AttributeError, TypeError):
+        pass
+    return {'version': 1, 'supported': False}
+
+
 def merge(old, new):
     """Validate receipt identity; an ACK must never overwrite prior absorption."""
     if (not isinstance(new, dict) or new.get('version') != 1
