@@ -172,6 +172,17 @@ class Nodes:
             raise GateError(503, "node_unavailable", "идентичность Router не подтверждена", node_id=node_id)
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
+        steering_probe = (method == 'GET' and path.endswith('/sdk-tools')
+                          and dict(params or {}).get('steering') == '1')
+        if method == 'POST' and path.endswith('/steer') or steering_probe:
+            try:
+                strong = json.loads(content).get('expectedTurnId') is not None
+            except (ValueError, AttributeError):
+                strong = False
+            if strong or steering_probe:
+                if not expected_boot:
+                    raise GateError(422, 'steer_target_boot_required', 'Strong steer требует исходный boot')
+                headers['X-Atlas-Steer-Contract'] = '1'
         if method == "GET" and path.endswith(("/files", "/sdk-tools")):
             headers["X-Atlas-Input-Recovery"] = "1"
         if request_id:

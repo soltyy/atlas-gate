@@ -1,6 +1,7 @@
 """Сетевой агентный Gate: публичные IDs, владение, async producer и polling/SSE."""
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -92,6 +93,8 @@ async def _events(state, binding, turn, device, after=0, wait=0):
     if response.status_code >= 400:
         return response, None
     doc = response.json()
+    for event in doc.get('events', []):
+        state.operations.absorbed(binding, event)
     doc["events"] = [state.routing.translate(binding, ev) for ev in doc.get("events", [])]
     from .reasoning import confirm
     for event in doc['events']:
@@ -249,7 +252,8 @@ async def _bound_attachments(state, binding):
 
 async def _control_receipt(state, op):
     current = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
-    if current["state"] != "complete":
+    pending_steer = current.get('steer') and json.loads(current['steer'])['state'] in ('accepted', 'unknown')
+    if current["state"] != "complete" or pending_steer:
         current["receiptState"] = "unavailable"
         try:
             response = await state.nodes.request(op["node_id"], "GET", "/v1/commands/" + op["id"])
@@ -257,9 +261,11 @@ async def _control_receipt(state, op):
                 from .receipts import completed_response
                 saved = response.json()
                 current['receiptState'] = saved.get('state', 'unknown') if isinstance(saved, dict) else 'malformed'
+                if current.get('steer') and isinstance(saved, dict) and saved.get('steer') is not None:
+                    state.operations.observe_steer(op['id'], saved['steer'])
                 confirmed = completed_response(saved, op['id'])
                 if confirmed is not None:
-                    state.operations.complete(op['id'], confirmed)
+                    state.operations.complete(op['id'], confirmed, steer_receipt=saved.get('steer'))
                     current = state.store._one('SELECT * FROM router_operations WHERE id=?', (op['id'],))
                 elif current['receiptState'] == 'complete':
                     current['receiptState'] = 'malformed'
@@ -267,13 +273,17 @@ async def _control_receipt(state, op):
                 current['receiptState'] = 'missing'
         except (GateError, ValueError, KeyError, TypeError):
             pass
-    return current
+    return {**current, **(state.store._one('SELECT steer FROM router_operations WHERE id=?', (op['id'],)) or {})}
 
 
 def _pending_control(op):
-    return JSONResponse({"commandId": op["id"], "state": "pending",
+    body = {"commandId": op["id"], "state": "pending",
                          "sessionId": op["session_id"],
-                         "receiptState": op.get('receiptState', 'unconfirmed')}, status_code=202,
+                         "receiptState": op.get('receiptState', 'unconfirmed')}
+    if op.get('steer'):
+        from .steering import public
+        body['steer'] = public(json.loads(op['steer']), op['session_id'])
+    return JSONResponse(body, status_code=202,
                         headers={"Retry-After": "1"})
 
 
@@ -336,8 +346,16 @@ async def control_receipt(sid: str, command_id: str, request: Request,
         if sealed:
             return _admission_negative(json.loads(sealed['response']))
         raise GateError(404, "not_found", "команда не найдена")
+    from .steering import CONTRACT_HEADER, TARGET_HEADER
+    if request.headers.get(CONTRACT_HEADER) is not None or request.headers.get(TARGET_HEADER) is not None:
+        expected = json.loads(op.get('steer') or '{}').get('_targetBoot')
+        if (request.headers.get(CONTRACT_HEADER) != '1' or not expected or
+                request.headers.get(TARGET_HEADER) != expected):
+            raise GateError(409, 'steer_contract_mismatch', 'Сверка требует исходные заголовки intent', state='unknown')
     current = await _control_receipt(state, op)
     if current["state"] != "complete":
+        if current.get('steer'):
+            return _pending_control(current)  # Keep durable input evidence even if HTTP receipt is unavailable.
         if current.get("receiptState") in ('unknown', 'expired', 'malformed'):
             raise GateError(503, "command_outcome_unknown", "результат команды не подтверждён; требуется сверка",
                             command_id=op["id"], receiptState=current['receiptState'])
@@ -380,6 +398,16 @@ async def reconcile_prompt_admission(sid: str, body: PromptAdmissionResolve, req
 
 def _operation_response(response, op):
     result = _response(response)
+    if op.get('steer'):
+        try:
+            doc = json.loads(result.body)
+            if isinstance(doc, dict):
+                from .steering import public
+                doc['steer'] = public(json.loads(op['steer']), op['session_id'])
+                result = JSONResponse(doc, status_code=result.status_code,
+                                      headers={k: v for k, v in result.headers.items() if k != 'content-length'})
+        except (ValueError, TypeError):
+            pass
     result.headers['X-Atlas-Command-State'] = 'complete'
     result.headers['X-Atlas-Command-Id'] = op['id']
     return result
@@ -398,18 +426,26 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
     async with state.operations.delivery_lock(op["id"]):
         op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
         if op["state"] == "complete":
+            if op.get('steer'):
+                op = await _control_receipt(state, op)
             return httpx.Response(op["status"], content=op["response"].encode())
         try:
             if not fresh:
                 receipt = await state.nodes.request(binding["node_id"], "GET", "/v1/commands/" + op["id"])
                 if receipt.status_code == 200:
                     from .receipts import completed_response
-                    response = completed_response(receipt.json(), op['id'])
+                    saved = receipt.json()
+                    if op.get('steer') and isinstance(saved, dict) and saved.get('steer') is not None:
+                        state.operations.observe_steer(op['id'], saved['steer'])
+                    response = completed_response(saved, op['id'])
                     if response is not None:
-                        state.operations.complete(op["id"], response)
+                        state.operations.complete(op["id"], response, steer_receipt=saved.get('steer'))
                         return response
                     raise _tool_result_pending(op)
                 if receipt.status_code != 404:
+                    raise _tool_result_pending(op)
+                if op.get('steer'):
+                    # Absence is not proof of non-admission, even on the same boot.
                     raise _tool_result_pending(op)
                 # 404 разрешает повтор только при прежнем boot и durable дедупликации.
                 # Для старой записи без boot свидетельств недостаточно: ничего не посылаем.
@@ -427,6 +463,8 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
                 # отказ доставки, в отличие от потерянного ответа принятой команды.
                 response = httpx.Response(503, json={'error':{
                     'code':failed.code, 'message':failed.message, 'deliveryState':'not_sent'}})
+                if op.get('steer'):
+                    state.operations.observe_steer(op['id'], {**json.loads(op['steer']), 'state': 'not_applied'})
                 state.operations.complete(op['id'], response)
                 return response
             state.operations.unknown(op["id"])
@@ -439,7 +477,11 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
         except (ValueError, KeyError, TypeError, AttributeError) as failed:
             state.operations.unknown(op["id"])
             raise _tool_result_pending(op) from failed
-        state.operations.complete(op["id"], response)
+        try:
+            state.operations.complete(op["id"], response)
+        except (ValueError, KeyError, TypeError, AttributeError) as failed:
+            state.operations.unknown(op['id'])
+            raise _tool_result_pending(op) from failed
         return response
 
 
@@ -480,7 +522,15 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
             await state.publish_contexts()
     if method == 'GET' and suffix in ('/files', '/sdk-tools') and response.status_code == 200:
         from .input_recovery import validate, public
-        proof = response.json().get('inputRecovery')
+        doc = response.json()
+        if suffix == '/sdk-tools' and 'steering' in doc:
+            from .steering import bound_capability, capability, negotiate
+            if (request.query_params.get('steering') != '1'
+                    and capability(doc['steering']).get('supported') is not False):
+                doc['steering'] = await negotiate(state.nodes, binding)
+            else:
+                doc['steering'] = bound_capability(doc['steering'], binding)
+        proof = doc.get('inputRecovery')
         sdk_id = binding.get('sdk_id')
         if proof is not None and not sdk_id:
             saved = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/reconcile'),
@@ -494,9 +544,8 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
             sdk_id = metadata.get('sdkSessionId')
         validate(proof, binding['local_id'], sdk_id)
         if proof is not None:
-            doc = response.json()
             doc['inputRecovery'] = public(proof, binding)
-            return JSONResponse(doc)
+        return JSONResponse(doc)
     return _response(response)
 
 
@@ -512,7 +561,78 @@ async def agent_interrupt(sid: str, request: Request, device: Device = Depends(r
 
 @router.post("/harness/agent/sessions/{sid}/steer")
 async def agent_steer(sid: str, body: SteerRequest, request: Request, device: Device = Depends(require_device)):
-    return await _delegate(request, device, sid, "POST", "/steer")
+    from .steering import capability, validate, CONTRACT_HEADER, TARGET_HEADER
+    contract, target_boot = request.headers.get(CONTRACT_HEADER), request.headers.get(TARGET_HEADER)
+    if body.expectedTurnId is None and contract is None and target_boot is None:
+        return await _delegate(request, device, sid, "POST", "/steer")
+    if contract != '1' or body.expectedTurnId is None or not target_boot or len(target_boot) > 200:
+        raise GateError(422, 'steer_contract_required', 'Точный steer требует contract1, target boot и paired IDs',
+                        state='unknown')  # A malformed retry cannot negate an already admitted key.
+    state = gate(request)
+    binding = state.routing.get(sid, device)
+    _policy(state, device, binding, request)
+    key = request.headers.get('idempotency-key')
+    rid = state.operations.key(device, key)  # strong v1 requires the original stable key
+    raw = await request.body()
+    original = json.loads(raw)
+    # Steering identity is over immutable outbox HTTP bytes, including omission
+    # of defaults and Unicode encoding; prompt recovery keeps its own old rule.
+    digest = hashlib.sha256(raw).hexdigest()
+    existing = state.store._one('SELECT id FROM router_operations WHERE id=?', (rid,))
+    info, preflight_error = None, None
+    if existing is None:
+        try:
+            # The target was captured by the client before admission. A restart
+            # cannot make a fresh steer target a newly restored SDK transport.
+            if binding['boot_id'] != target_boot:
+                raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime сессии изменился')
+            info = await state.nodes.probe(binding['node_id'])
+            if not info or info.get('bootId') != target_boot:
+                raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime Router изменился')
+        except GateError as failed:
+            preflight_error = failed
+    metadata = {'version': 1, 'sessionId': binding['local_id'], 'turnId': body.expectedTurnId,
+                'clientMessageId': body.clientMessageId, 'uuid': None, 'state': 'unknown',
+                'bodySha256': digest, '_targetBoot': target_boot, '_contract': 1, '_org': device.org}
+    op, fresh = state.operations.begin(device, binding, 'POST', _path(binding, '/steer'), original, key,
+                                      body_digest=digest, steer=metadata)
+    if fresh:
+        # Persist preflight negatives under the original key too: a later
+        # capability/profile change must not admit the same rejected intent.
+        try:
+            if preflight_error is not None:
+                raise preflight_error
+            validate(body, capability((info or {}).get('steering')))
+            if (info['steering'].get('targetNodeId') != binding['node_id'] or
+                    info['steering'].get('targetBootId') != target_boot):
+                raise GateError(409, 'steer_target_boot_mismatch', 'Capability относится к другому runtime')
+            negotiated = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/sdk-tools'),
+                                                   params={'steering': '1'}, expected_boot=binding['boot_id'])
+            if negotiated.status_code != 200:
+                error = json.loads(_response(negotiated).body).get('error') or {}
+                error = error if isinstance(error, dict) else {}
+                raise GateError(negotiated.status_code, error.get('code', 'steering_unavailable'),
+                                error.get('message', 'Router не подтвердил активный runtime'))
+            try:
+                caps = capability(negotiated.json().get('steering'))
+            except (ValueError, AttributeError):
+                caps = capability(None)
+            validate(body, caps)
+            if caps['targetBootId'] != target_boot or caps['targetNodeId'] != binding['node_id']:
+                raise GateError(409, 'steer_target_boot_mismatch', 'Сессия подтвердила другой runtime')
+            validate_prompt(PromptRequest(id=body.clientMessageId, text=body.text, attachments=body.attachments),
+                            None)  # Legacy prompt/upload ceilings are not strong SDK input limits.
+        except GateError as failed:
+            import httpx
+            response = httpx.Response(failed.status, json={
+                'error': {'code': failed.code, 'message': failed.message, **failed.extra,
+                          'state': 'not_applied', 'deliveryState': 'not_sent'},
+                'steer': {**metadata, 'state': 'not_applied'}})
+            state.operations.complete(op['id'], response)
+            return _operation_response(response, state.store._one('SELECT * FROM router_operations WHERE id=?', (op['id'],)))
+    response = await _deliver_operation(state, binding, op, fresh, raw, request.query_params)
+    current = state.store._one('SELECT * FROM router_operations WHERE id=?', (op['id'],))
+    return _operation_response(response, current)
 
 
 @router.post("/harness/agent/sessions/{sid}/tools")

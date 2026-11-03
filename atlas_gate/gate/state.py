@@ -240,12 +240,14 @@ class GateState:
                 body['apiAttemptRecovery'] = api_attempt_contract()
                 for model in body['models']:
                     model.setdefault('sessionRecovery', None)
+                    model.setdefault('steering', None)
                     route = org.route(model['route_id'])
                     if route and route.kind == 'router-agent':
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
                         from .reasoning import project_capabilities
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
                         model['sessionRecovery'] = self.project_recovery(org.id, route.id, model['model'])
+                        model['steering'] = self.project_steering(org.id, route.id, model['model'])
                     options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
                         if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
                         and model['route_id'] in self.nodes.config[node_id].routes
@@ -286,6 +288,15 @@ class GateState:
             if (node := self.nodes.config[nid]).enabled and org_id in node.orgs
             and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}
 
+    def project_steering(self, org_id, route_id, model):
+        from .steering import bound_capability
+        return {'version': 1, 'scope': 'pinned_node', 'nodes': {
+            nid: {**bound_capability(info.get('steering'), {'node_id': nid, 'boot_id': info.get('bootId')}),
+                  'nodeId': nid, 'bootId': info.get('bootId')}
+            for nid, info in self.nodes.snapshots.items()
+            if (node := self.nodes.config[nid]).enabled and org_id in node.orgs
+            and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}
+
     async def publish_contexts(self):
         """Метаданные меняются без пересоздания агентов, сессий и org config."""
         import copy
@@ -302,6 +313,7 @@ class GateState:
                         from .reasoning import project_capabilities
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
                         model['sessionRecovery'] = self.project_recovery(org.id, route.id, model['model'])
+                        model['steering'] = self.project_steering(org.id, route.id, model['model'])
                 row = publish(self.store,self.key,org.id,body,dump(org))
                 self.snapshot(org,int(row['profile_version']))
             self.bodies = bodies

@@ -636,6 +636,7 @@ async def admin_runtime(request: Request):
     pending = state.store._all("SELECT state,COUNT(*) count FROM api_attempts WHERE state IN ('prepared','running','outcome_unknown') GROUP BY state")
     return {'version': 1, 'gateVersion': __version__,
             'apiAttemptContractVersion': 1,
+            'steerContractVersion': 1,
             'activeRequests': getattr(request.app.state, 'active_gate_requests', 0),
             'activeApiAttempts': active, 'apiStates': {row['state']: row['count'] for row in pending}}
 
