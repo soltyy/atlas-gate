@@ -245,12 +245,7 @@ class GateState:
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
                         from .reasoning import project_capabilities
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
-                        model['sessionRecovery'] = {'version': 1, 'scope': 'pinned_node', 'nodes': {
-                            nid: {**(info.get('sessionRecoveryProofs') or {'supported': False}),
-                                  'transportSupported': node.transport == 'direct' or info.get('connectorProtocol') == 2}
-                            for nid, info in self.nodes.snapshots.items()
-                            if (node := self.nodes.config[nid]).enabled and org.id in node.orgs
-                            and route.id in node.routes and model['model'] in {m.get('value') for m in info.get('models', [])}}}
+                        model['sessionRecovery'] = self.project_recovery(org.id, route.id, model['model'])
                     options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
                         if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
                         and model['route_id'] in self.nodes.config[node_id].routes
@@ -281,6 +276,16 @@ class GateState:
             self.ready.set()
             return {"orgs": versions, "errors": errors, "warnings": warnings, "upstreams": dict(self.upstreams)}
 
+    def project_recovery(self, org_id, route_id, model):
+        # Exact node and boot, never a union of capabilities across providers.
+        return {'version': 1, 'scope': 'pinned_node', 'nodes': {
+            nid: {**(info.get('sessionRecoveryProofs') or {'supported': False}),
+                  'nodeId': nid, 'bootId': info.get('bootId'),
+                  'transportSupported': node.transport == 'direct' or info.get('connectorProtocol') == 2}
+            for nid, info in self.nodes.snapshots.items()
+            if (node := self.nodes.config[nid]).enabled and org_id in node.orgs
+            and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}
+
     async def publish_contexts(self):
         """Метаданные меняются без пересоздания агентов, сессий и org config."""
         import copy
@@ -296,6 +301,7 @@ class GateState:
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
                         from .reasoning import project_capabilities
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
+                        model['sessionRecovery'] = self.project_recovery(org.id, route.id, model['model'])
                 row = publish(self.store,self.key,org.id,body,dump(org))
                 self.snapshot(org,int(row['profile_version']))
             self.bodies = bodies
