@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh managed API admission contract after Gate startup
+Description=Refresh managed API and exact steering contracts after Gate startup
 After=atlas-gate.service
 
 [Service]

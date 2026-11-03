@@ -17,6 +17,7 @@ from dotenv import dotenv_values
 ROOT=Path('/opt/atlas');FLAG=Path('/run/atlas-gate-maintenance')
 ADMISSION_FLAG=Path('/run/atlas-gate-admission')
 API_FLAG=Path('/run/atlas-gate-api-attempt-v1')
+STEER_FLAG=Path('/run/atlas-gate-steer-v1')
 SITE=Path('/etc/nginx/sites-enabled/atlas-gate');LOCK=Path('/run/lock/atlas-deploy.lock')
 BACKUPS=Path('/var/backups/atlas');DATABASE=Path('/var/lib/atlas-gate/gate.db')
 
@@ -65,21 +66,21 @@ def assert_gate_idle():
             raise RuntimeError('Busy Gate I/O or detached API producer; no restart')
 
 
-def sync_api_contract(expected_version=None):
+def _sync_contract(flag, field, expected_version=None):
     """Publish capability only after a fresh probe during serialized cutover/startup.
 
     Absence is deliberately fail-closed in Nginx. An old positive marker or an
     orphaned staging file must never authorize inference on a legacy rollback.
     """
-    pending=API_FLAG.with_name(API_FLAG.name+'.pending')
-    API_FLAG.unlink(missing_ok=True)
+    pending=flag.with_name(flag.name+'.pending')
+    flag.unlink(missing_ok=True)
     # The activation lock or systemd's serialized ExecStartPost excludes another
     # lifecycle writer. .pending is staging, never capability evidence.
     pending.unlink(missing_ok=True)
     state=gate_runtime()
     if state is not None and not isinstance(state,dict):
         raise RuntimeError('Invalid API contract runtime response')
-    if not state or type(state.get('apiAttemptContractVersion')) is not int or state['apiAttemptContractVersion']!=1:
+    if not state or type(state.get(field)) is not int or state[field]!=1:
         return False
     version=state.get('gateVersion')
     if not isinstance(version,str) or not version or expected_version is not None and version!=expected_version:
@@ -88,10 +89,46 @@ def sync_api_contract(expected_version=None):
         fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o644)
         with os.fdopen(fd,'w') as stream:
             stream.write(version);stream.flush();os.fsync(stream.fileno())
-        os.replace(pending,API_FLAG)
+        os.replace(pending,flag)
     finally:
         pending.unlink(missing_ok=True)
     return True
+
+
+def sync_api_contract(expected_version=None):
+    return _sync_contract(API_FLAG, 'apiAttemptContractVersion', expected_version)
+
+
+def sync_steer_contract(expected_version=None):
+    return _sync_contract(STEER_FLAG, 'steerContractVersion', expected_version)
+
+
+def clear_contracts():
+    for flag in (API_FLAG, STEER_FLAG):
+        flag.unlink(missing_ok=True)
+        flag.with_name(flag.name+'.pending').unlink(missing_ok=True)
+
+
+def assert_contract_lifecycle():
+    """The external fence must survive starting an older wheel after rollback."""
+    unit=run(['systemctl','show','atlas-gate','-p','ExecStartPre','-p','ExecStartPost'],
+             capture_output=True,text=True).stdout
+    required=('/usr/bin/rm', str(API_FLAG), str(API_FLAG)+'.pending',
+              str(STEER_FLAG), str(STEER_FLAG)+'.pending', 'atlas-gate-api-contract-refresh.service')
+    if not isinstance(unit,str) or not all(value in unit for value in required):
+        raise RuntimeError('Persistent contract startup hooks are missing; no activation')
+
+
+def assert_steer_ingress():
+    # An unauthenticated invalid-session request cannot invoke an SDK even on
+    # legacy Gate. It proves the installed external policy, not source files.
+    with httpx.Client(trust_env=False,timeout=20) as client:
+        for method,path in (('POST','/steer'),('GET','/commands?requestId=contract-probe')):
+            response=client.request(method,'https://gate.atlcon.ru/harness/agent/sessions/contract-probe'+path,
+                headers={'X-Atlas-Steer-Contract':'1','X-Atlas-Steer-Target-Boot':'contract-probe'})
+            if (response.status_code!=503 or response.json().get('error',{}).get('code')!='steer_contract_unavailable'
+                    or 'X-Atlas-Command-State' in response.headers):
+                raise RuntimeError('Exact steering ingress fence not installed; no activation')
 
 
 def refresh_api_contract(attempts=45):
@@ -101,27 +138,27 @@ def refresh_api_contract(attempts=45):
     fencing is reported without failing ExecStartPost and killing healthy I/O.
     Activation itself still requires a confirmed contract before opening ingress.
     """
-    API_FLAG.unlink(missing_ok=True)
-    API_FLAG.with_name(API_FLAG.name+'.pending').unlink(missing_ok=True)
+    clear_contracts()
     version=None
     for attempt in range(attempts):
         try:
             state=health()
             if not isinstance(state,dict) or not isinstance(state.get('version'),str) or not state['version']:
-                return {'status':'blocked','reason':'invalid_startup_health','managedApiIngressAllowed':False}
+                return {'status':'blocked','reason':'invalid_startup_health','managedApiIngressAllowed':False,'steerIngressAllowed':False}
             version=state['version'];break
         except httpx.HTTPError:
             if attempt+1<attempts:time.sleep(1)
     if version is None:
-        return {'status':'blocked','reason':'startup_health_unavailable','managedApiIngressAllowed':False}
+        return {'status':'blocked','reason':'startup_health_unavailable','managedApiIngressAllowed':False,'steerIngressAllowed':False}
     try:
         enabled=sync_api_contract(version)
+        steering=sync_steer_contract(version)
     except (httpx.HTTPError,OSError,RuntimeError,ValueError) as failed:
-        API_FLAG.unlink(missing_ok=True)
+        clear_contracts()
         return {'status':'blocked','gateVersion':version,'reason':type(failed).__name__,
-                'managedApiIngressAllowed':False}
+                'managedApiIngressAllowed':False,'steerIngressAllowed':False}
     return {'status':'passed' if enabled else 'unsupported','gateVersion':version,
-            'managedApiIngressAllowed':enabled}
+            'managedApiIngressAllowed':enabled,'steerIngressAllowed':steering}
 
 
 def drain_ingress():
@@ -197,9 +234,13 @@ def main():
     run(['nginx','-t'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     with open(LOCK,'a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        clear_contracts()
+        assert_contract_lifecycle()
+        assert_steer_ingress()
         # Close any stale positive marker before busy/qualification checks can
         # abort this rollout. A failed probe leaves managed requests fenced.
         sync_api_contract()
+        sync_steer_contract()
         before=states();assert_idle(before);assert_gate_idle();assert not any(d['draining'] for d in before.values())
         env={k:v for k,v in os.environ.items() if k not in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV')}
         check=run([a.candidate/'.venv/bin/python','-m','atlas_gate.admission_check'],cwd='/tmp',env=env,capture_output=True,text=True)
@@ -232,13 +273,15 @@ def main():
             drain_ingress()
             assert_idle(states());assert_gate_idle()
             stopped=True;service_ready=False
-            API_FLAG.unlink(missing_ok=True)
+            clear_contracts()
             run(['systemctl','stop','atlas-gate'])
             with sqlite3.connect('file:'+str(DATABASE)+'?mode=ro',uri=True) as src,sqlite3.connect(backup/'gate.db') as dst:src.backup(dst)
             (backup/'gate.db').chmod(0o600)
             link(a.candidate);run(['systemctl','start','atlas-gate']);ready(version)
             if not sync_api_contract(version):
                 raise RuntimeError('Candidate did not confirm managed API attempt contract1')
+            if not sync_steer_contract(version):
+                raise RuntimeError('Candidate did not confirm exact steering contract1')
             service_ready=True
             after=states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
         except BaseException:
@@ -247,7 +290,9 @@ def main():
                 run(['systemctl','stop','atlas-gate'])
                 if (ROOT/'gate').resolve()!=old:link(old)
                 service_ready=False
-                run(['systemctl','start','atlas-gate']);ready(oldversion);sync_api_contract(oldversion);service_ready=True
+                clear_contracts()
+                run(['systemctl','start','atlas-gate']);ready(oldversion)
+                sync_api_contract(oldversion);sync_steer_contract(oldversion);service_ready=True
             raise
         finally:
             if service_ready:
@@ -263,7 +308,8 @@ def main():
                'qualification':qualification,'backup':str(backup),'ingressMaintenanceVerified':True,
                'routerBootsUnchanged':all(final[k]['bootId']==before[k]['bootId'] for k in before),
                'maintenanceCleared':not FLAG.exists() and not ADMISSION_FLAG.exists(),
-               'twoPhaseIngressDrain':True,'detachedApiDrain':True,'managedApiIngressAllowed':API_FLAG.exists()}
+               'twoPhaseIngressDrain':True,'detachedApiDrain':True,'managedApiIngressAllowed':API_FLAG.exists(),
+               'steerIngressAllowed':STEER_FLAG.exists()}
         (backup/'deployment.json').write_text(json.dumps(proof,indent=2));(backup/'deployment.json').chmod(0o600)
         print(json.dumps(proof),flush=True)
 

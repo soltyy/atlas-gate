@@ -1,13 +1,19 @@
 """Steering v1: only Router's exact runtime may promise absorption evidence."""
 from .errors import GateError
 
+CONTRACT_HEADER = 'X-Atlas-Steer-Contract'
+TARGET_HEADER = 'X-Atlas-Steer-Target-Boot'
+
 
 def capability(value):
     if (not isinstance(value, dict) or type(value.get('version')) is not int
             or value.get('version') != 1 or value.get('supported') is False
             or any(value.get(k) is not True for k in
                    ('expectedTurnId', 'clientMessageId', 'durableAbsorption'))
-            or value.get('delivery') != 'next_boundary'):
+            or value.get('delivery') != 'next_boundary'
+            or value.get('requiredHeader') != CONTRACT_HEADER
+            or any(not isinstance(value.get(k), str) or not value[k] or len(value[k]) > 200
+                   for k in ('targetNodeId', 'targetBootId'))):
         return {'version': 1, 'supported': False}
     attachments = value.get('attachments')
     if not isinstance(attachments, dict) or any(type(attachments.get(k)) is not bool
@@ -15,6 +21,9 @@ def capability(value):
         return {'version': 1, 'supported': False}
     return {'version': 1, 'expectedTurnId': True, 'clientMessageId': True,
             'durableAbsorption': True, 'delivery': 'next_boundary',
+            'requiredHeader': CONTRACT_HEADER,
+            'requiredHeaders': {CONTRACT_HEADER: '1', TARGET_HEADER: value['targetBootId']},
+            'targetNodeId': value['targetNodeId'], 'targetBootId': value['targetBootId'],
             'attachments': {k: attachments[k] for k in ('images', 'documents')}}
 
 
@@ -28,6 +37,14 @@ def validate(body, caps):
             raise GateError(422, 'steer_attachments_unsupported',
                             'Router не поддерживает весь смешанный steer; запрос не отправлен',
                             state='not_applied', deliveryState='not_sent')
+
+
+def bound_capability(value, binding):
+    caps = capability(value)
+    if caps.get('supported') is not False and (caps['targetNodeId'] != binding['node_id']
+                                             or caps['targetBootId'] != binding['boot_id']):
+        return {'version': 1, 'supported': False}
+    return caps
 
 
 def merge(old, new):
@@ -51,4 +68,7 @@ def merge(old, new):
 
 
 def public(value, session_id):
-    return {**{k: v for k, v in value.items() if not k.startswith('_')}, 'sessionId': session_id}
+    result = {**{k: v for k, v in value.items() if not k.startswith('_')}, 'sessionId': session_id}
+    if value.get('_targetBoot'):
+        result['targetBootId'] = value['_targetBoot']
+    return result

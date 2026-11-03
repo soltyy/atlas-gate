@@ -17,7 +17,25 @@ from .test_network_gate import create, events, network  # noqa: F401
 
 CAP = {'version': 1, 'expectedTurnId': True, 'clientMessageId': True,
        'durableAbsorption': True, 'delivery': 'next_boundary',
+       'requiredHeader': 'X-Atlas-Steer-Contract', 'targetNodeId': 'a', 'targetBootId': 'one',
        'attachments': {'images': False, 'documents': False}}
+
+
+def headers_for(client, prefix, key=None, **extra):
+    headers = dict(client.steer_headers[prefix])
+    if key is not None:
+        headers['Idempotency-Key'] = key
+    return {**headers, **extra}
+
+
+async def capture_target(client, prefix):
+    metadata = await client.get(prefix + '/sdk-tools', params={'steering': '1'})
+    assert metadata.status_code == 200, metadata.text
+    if not hasattr(client, 'steer_headers'):
+        client.steer_headers = {}
+    cap = metadata.json()['steering']
+    client.steer_headers[prefix] = cap.get('requiredHeaders') or {
+        'X-Atlas-Steer-Contract': '1', 'X-Atlas-Steer-Target-Boot': cap.get('targetBootId', 'unsupported')}
 
 
 def payload(**overrides):
@@ -143,6 +161,7 @@ async def setup_native(network, monkeypatch):
 async def active(client):
     sid = await create(client)
     prefix = '/harness/agent/sessions/' + sid
+    await capture_target(client, prefix)
     started = await client.post(prefix + '/prompt?mode=async', json={'id': 'original', 'text': 'call:echo'})
     assert started.status_code == 202, started.text
     await events(client, sid, 'original')
@@ -158,7 +177,7 @@ async def test_real_http_accepted_absorbed_lost_ack_owner_and_same_text_ids(netw
     try:
         sid, prefix = await active(client)
         body = payload()
-        headers = {'Idempotency-Key': 'steer-original'}
+        headers = headers_for(client, prefix, 'steer-original')
         accepted = await client.post(prefix + '/steer', json=body, headers=headers)
         assert accepted.status_code == 200, accepted.text
         proof = accepted.json()['steer']
@@ -181,7 +200,7 @@ async def test_real_http_accepted_absorbed_lost_ack_owner_and_same_text_ids(netw
         receipt = await client.get(prefix + '/commands/' + command)
         assert receipt.json()['steer']['state'] == 'absorbed'
         # Same caption is another intent, never deduplicated by text.
-        second = await client.post(prefix + '/steer', json=payload(), headers={'Idempotency-Key': 'second'})
+        second = await client.post(prefix + '/steer', json=payload(), headers=headers_for(client, prefix, 'second'))
         assert second.status_code == 200 and len(calls) == 2
         assert second.json()['steer']['uuid'] != proof['uuid']
         assert state.store._one('SELECT COUNT(*) n FROM agent_turns')['n'] == 1
@@ -194,20 +213,21 @@ async def test_real_http_accepted_absorbed_lost_ack_owner_and_same_text_ids(netw
 
 async def test_strong_unknown_missing_receipt_never_redelivers_and_mixed_rejection_is_atomic(network, monkeypatch):
     _, calls = await setup_native(network, monkeypatch)
-    monkeypatch.setattr('atlas_router.main.steering_capability', lambda backend, journal: CAP)
+    monkeypatch.setattr('atlas_router.main.steering_capability', lambda backend, journal, node_id, boot_id: {
+        **CAP, 'targetNodeId': node_id, 'targetBootId': boot_id})
     client, app, routers, *_ = network
     state = app.state.gate
     sid, prefix = await active(client)
     body = payload(attachments=[{'kind': 'image', 'data': 'YWJj', 'mediaType': 'image/png'}])
-    mixed = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'mixed'})
+    mixed = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'mixed'))
     assert mixed.status_code == 422 and mixed.json()['error']['code'] == 'steer_attachments_unsupported'
     assert not calls
     saved = state.store._one("SELECT * FROM router_operations WHERE path LIKE '%/steer'")
     assert saved['state'] == 'complete' and json.loads(saved['steer'])['state'] == 'not_applied'
     # The rejected intent remains rejected if capability later becomes available.
-    monkeypatch.setattr('atlas_router.main.steering_capability', lambda backend, journal: {
-        **CAP, 'attachments': {'images': True, 'documents': True}})
-    repeated = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'mixed'})
+    monkeypatch.setattr('atlas_router.main.steering_capability', lambda backend, journal, node_id, boot_id: {
+        **CAP, 'targetNodeId': node_id, 'targetBootId': boot_id, 'attachments': {'images': True, 'documents': True}})
+    repeated = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'mixed'))
     assert repeated.status_code == 422 and repeated.json()['steer']['state'] == 'not_applied'
     assert not calls
     binding = state.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
@@ -224,7 +244,7 @@ async def test_strong_unknown_missing_receipt_never_redelivers_and_mixed_rejecti
     monkeypatch.setattr(upstream, 'request', lost)
     body = payload()
     for _ in range(3):
-        unknown = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'lost-key'})
+        unknown = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'lost-key'))
         assert unknown.status_code == 503, unknown.text
     assert len(attempts) == 1 and not calls
     pending = await client.get(prefix + '/commands', params={'requestId': 'lost-key'})
@@ -254,7 +274,9 @@ async def test_profile_exact_nodes_refresh_public_discovery_and_legacy_compatibi
     # An old text-only request requires no new negotiated promise.
     legacy = await client.post(prefix + '/steer', json={'text': 'legacy'})
     assert legacy.status_code == 200, legacy.text
-    unavailable = await client.post(prefix + '/steer', json=payload(), headers={'Idempotency-Key': 'new'})
+    client.steer_headers[prefix]['X-Atlas-Steer-Target-Boot'] = state.store._one(
+        'SELECT boot_id FROM router_bindings WHERE id=?', (sid,))['boot_id']
+    unavailable = await client.post(prefix + '/steer', json=payload(), headers=headers_for(client, prefix, 'new'))
     assert unavailable.status_code == 422 and unavailable.json()['error']['code'] == 'steering_unsupported'
     monkeypatch.setattr(routers[0].state.backend, 'steering_capabilities', lambda: True, raising=False)
     await state.context_windows.poll()
@@ -276,6 +298,80 @@ async def test_profile_exact_nodes_refresh_public_discovery_and_legacy_compatibi
     assert model['steering']['nodes']['a']['supported'] is False
     from atlas_gate.gate.model_contracts import ModelContract, ProfileModel
     assert 'steering' not in ModelContract.model_fields and 'steering' in ProfileModel.model_fields
+    assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
+
+
+async def test_contract_headers_and_original_boot_are_required_without_auto_rebind(network, monkeypatch):
+    _, calls = await setup_native(network, monkeypatch)
+    client, app, routers, *_ = network
+    sid, prefix = await active(client)
+    body = payload()
+    for headers in ({'Idempotency-Key': 'missing'},
+                    {'Idempotency-Key': 'missing-boot', 'X-Atlas-Steer-Contract': '1'},
+                    {**headers_for(client, prefix, 'bad-version'), 'X-Atlas-Steer-Contract': '2'}):
+        result = await client.post(prefix + '/steer', json=body, headers=headers)
+        assert result.status_code == 422 and result.json()['error']['code'] == 'steer_contract_required'
+    disguised = await client.post(prefix + '/steer', json={'text': 'must not become legacy'},
+                                  headers=headers_for(client, prefix, 'missing-ids'))
+    assert disguised.status_code == 422 and not calls
+    state = app.state.gate
+    original_binding = state.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+    original_probe = state.nodes.probe
+    async def rebooted(node):
+        value = await original_probe(node)
+        return {**value, 'bootId': 'new-boot'} if node == original_binding['node_id'] else value
+    monkeypatch.setattr(state.nodes, 'probe', rebooted)
+    result = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'old-boot'))
+    assert result.status_code == 409 and result.json()['steer']['state'] == 'not_applied'
+    assert result.json()['steer']['targetBootId'] == original_binding['boot_id'] and not calls
+    assert state.store._one('SELECT boot_id FROM router_bindings WHERE id=?', (sid,))['boot_id'] == original_binding['boot_id']
+    monkeypatch.setattr(state.nodes, 'probe', original_probe)
+    accepted = await client.post(prefix + '/steer', json=payload(), headers=headers_for(client, prefix, 'accepted-boot'))
+    assert accepted.status_code == 200 and len(calls) == 1
+    wrong = {**headers_for(client, prefix, 'accepted-boot'), 'X-Atlas-Steer-Target-Boot': 'changed',
+             'Content-Type': 'application/json'}
+    conflict = await client.post(prefix + '/steer', content=accepted.request.content, headers=wrong)
+    assert conflict.status_code == 409 and len(calls) == 1, conflict.text
+    read = await client.get(prefix + '/commands', params={'requestId': 'accepted-boot'},
+                            headers=headers_for(client, prefix))
+    assert read.status_code == 200 and read.json()['steer']['targetBootId'] == original_binding['boot_id']
+    state.store._exec('UPDATE router_bindings SET boot_id=? WHERE id=?', ('subsequent-boot', sid))
+    historical = await client.get(prefix + '/commands', params={'requestId': 'accepted-boot'},
+                                   headers=headers_for(client, prefix))
+    assert historical.status_code == 200 and historical.json()['steer']['targetBootId'] == original_binding['boot_id']
+    replay = await client.post(prefix + '/steer', content=accepted.request.content,
+                              headers={**headers_for(client, prefix, 'accepted-boot'), 'Content-Type': 'application/json'})
+    assert replay.status_code == 200 and len(calls) == 1
+    wrong_read = await client.get(prefix + '/commands', params={'requestId': 'accepted-boot'}, headers=wrong)
+    assert wrong_read.status_code == 409
+    state.store._exec('UPDATE router_bindings SET boot_id=? WHERE id=?', (original_binding['boot_id'], sid))
+    assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
+
+
+async def test_different_key_cannot_turn_original_unknown_client_identity_into_not_applied(network, monkeypatch):
+    _, calls = await setup_native(network, monkeypatch)
+    client, app, routers, *_ = network
+    sid, prefix = await active(client)
+    state = app.state.gate
+    binding = state.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+    upstream = state.nodes.clients[binding['node_id']]
+    original = upstream.request
+    async def lost(method, path, **kwargs):
+        if method == 'POST' and path.endswith('/steer'):
+            raise httpx.ReadError('unknown initial dispatch')
+        return await original(method, path, **kwargs)
+    monkeypatch.setattr(upstream, 'request', lost)
+    body = payload()
+    first = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'original-key'))
+    assert first.status_code == 503
+    second = await client.post(prefix + '/steer', json=body, headers={
+        **headers_for(client, prefix, 'new-key'), 'X-Atlas-Steer-Target-Boot': 'stale-target'})
+    assert second.status_code == 409
+    assert second.json()['error']['code'] == 'steer_message_identity_conflict'
+    assert second.json()['error']['state'] == 'unknown'
+    assert second.json()['error']['steer']['state'] == 'unknown'
+    assert not calls
+    assert state.store._one("SELECT COUNT(*) n FROM router_operations WHERE steer IS NOT NULL")['n'] == 1
     assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
 
 
@@ -301,12 +397,12 @@ async def test_lost_native_ack_is_observed_by_key_without_redelivery_and_stop_is
     body = payload()
     # Owner/policy are checked before contacting the original Router.
     foreign = await client.post(prefix + '/steer', json=body, headers={
-        'Idempotency-Key': 'foreign', 'Authorization': 'Bearer ' + other['device_token']})
+        **headers_for(client, prefix, 'foreign'), 'Authorization': 'Bearer ' + other['device_token']})
     assert foreign.status_code == 404 and not calls
     denied = await client.post(prefix + '/steer', json=body, headers={
-        'Idempotency-Key': 'class', 'X-Harness-Data-Class': 'not-an-org-class'})
+        **headers_for(client, prefix, 'class'), 'X-Harness-Data-Class': 'not-an-org-class'})
     assert denied.status_code == 403 and not calls
-    first = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'lost-ack'})
+    first = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'lost-ack'))
     assert first.status_code == 503 and len(calls) == 1
     observed = await client.get(prefix + '/commands', params={'requestId': 'lost-ack'})
     assert observed.status_code == 200 and observed.json()['steer']['state'] == 'accepted'
@@ -315,14 +411,14 @@ async def test_lost_native_ack_is_observed_by_key_without_redelivery_and_stop_is
     consumed[body['clientMessageId']]()
     observed = await client.get(prefix + '/commands', params={'requestId': 'lost-ack'})
     assert observed.json()['steer']['state'] == 'absorbed'
-    replay = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'lost-ack'})
+    replay = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'lost-ack'))
     assert replay.json()['steer']['state'] == 'absorbed' and len(calls) == 1
     assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
     await events(client, sid, 'original', True)
     next_turn = await client.post(prefix + '/prompt?mode=async', json={'id': 'next', 'text': 'call:echo'})
     assert next_turn.status_code == 202
     await events(client, sid, 'next')
-    late = await client.post(prefix + '/steer', json=payload(), headers={'Idempotency-Key': 'after-stop'})
+    late = await client.post(prefix + '/steer', json=payload(), headers=headers_for(client, prefix, 'after-stop'))
     assert late.status_code == 409, late.text
     assert late.json()['steer']['state'] == 'not_applied' and len(calls) == 1
     old_receipt = await client.get(prefix + '/commands', params={'requestId': 'lost-ack'})
@@ -338,7 +434,7 @@ async def test_raw_utf8_body_hash_preserves_unicode_omission_and_serialization(n
     body = payload(text='К🙂 é')
     del body['attachments']
     raw = json.dumps(body, ensure_ascii=False, indent=2).encode('utf-8')
-    headers = {'Idempotency-Key': 'raw-outbox', 'Content-Type': 'application/json'}
+    headers = headers_for(client, prefix, 'raw-outbox', **{'Content-Type': 'application/json'})
     first = await client.post(prefix + '/steer', content=raw, headers=headers)
     assert first.status_code == 200, first.text
     assert first.json()['steer']['bodySha256'] == hashlib.sha256(raw).hexdigest()
@@ -357,6 +453,7 @@ async def test_strong_metadata_preflight_never_cold_opens_sdk(network, monkeypat
     client, app, routers, *_ = network
     sid = await create(client)
     prefix = '/harness/agent/sessions/' + sid
+    await capture_target(client, prefix)
     binding = app.state.gate.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
     router = routers[0 if binding['node_id'] == 'a' else 1]
     await router.state.registry.remove(binding['local_id'], persist_close=False)
@@ -365,7 +462,7 @@ async def test_strong_metadata_preflight_never_cold_opens_sdk(network, monkeypat
         opened.append(True)
         raise AssertionError('strong steering preflight cold-opened the SDK')
     monkeypatch.setattr(router.state.backend, 'open_session', forbidden)
-    result = await client.post(prefix + '/steer', json=payload(), headers={'Idempotency-Key': 'missing-runtime'})
+    result = await client.post(prefix + '/steer', json=payload(), headers=headers_for(client, prefix, 'missing-runtime'))
     assert result.status_code == 409, result.text
     assert result.json()['error']['state'] == 'not_applied'
     assert not opened and not calls
@@ -379,7 +476,7 @@ async def test_supported_caption_and_document_share_one_native_identity(network,
     sid, prefix = await active(client)
     body = payload(text='caption', attachments=[{'kind': 'text', 'filename': 'note.txt',
                                                 'data': 'содержимое документа'}])
-    result = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'caption-files'})
+    result = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'caption-files'))
     assert result.status_code == 200, result.text
     assert len(calls) == 1 and calls[0][3] == 'caption'
     assert len(calls[0][4]) == 1 and calls[0][4][0]['data'] == 'содержимое документа'
@@ -406,7 +503,7 @@ async def test_mismatched_native_ack_cannot_confirm_another_body(network, monkey
             return httpx.Response(200, json=doc)
         return response
     monkeypatch.setattr(upstream, 'request', wrong_proof)
-    result = await client.post(prefix + '/steer', json=payload(), headers={'Idempotency-Key': 'bad-proof'})
+    result = await client.post(prefix + '/steer', json=payload(), headers=headers_for(client, prefix, 'bad-proof'))
     assert result.status_code == 503 and result.json()['error']['code'] == 'command_outcome_unknown'
     assert len(calls) == 1
     current = await client.get(prefix + '/commands', params={'requestId': 'bad-proof'})
@@ -432,7 +529,7 @@ async def test_absorbed_event_is_readable_when_original_http_receipt_remains_unk
         return response
     monkeypatch.setattr(upstream, 'request', unavailable)
     body = payload()
-    first = await client.post(prefix + '/steer', json=body, headers={'Idempotency-Key': 'event-only'})
+    first = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'event-only'))
     assert first.status_code == 503 and len(calls) == 1
     consumed[body['clientMessageId']]()
     await events(client, sid, 'original')

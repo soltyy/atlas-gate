@@ -289,9 +289,10 @@ class GateState:
             and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}
 
     def project_steering(self, org_id, route_id, model):
-        from .steering import capability
+        from .steering import bound_capability
         return {'version': 1, 'scope': 'pinned_node', 'nodes': {
-            nid: {**capability(info.get('steering')), 'nodeId': nid, 'bootId': info.get('bootId')}
+            nid: {**bound_capability(info.get('steering'), {'node_id': nid, 'boot_id': info.get('bootId')}),
+                  'nodeId': nid, 'bootId': info.get('bootId')}
             for nid, info in self.nodes.snapshots.items()
             if (node := self.nodes.config[nid]).enabled and org_id in node.orgs
             and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}

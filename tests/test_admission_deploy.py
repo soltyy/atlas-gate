@@ -19,11 +19,13 @@ import pytest
 
 
 @pytest.fixture
-def guard_module(monkeypatch):
+def guard_module(monkeypatch,tmp_path):
     if os.name=='nt':
         monkeypatch.setitem(sys.modules,'fcntl',SimpleNamespace(LOCK_EX=1,LOCK_NB=2,flock=lambda *a:None))
     spec=importlib.util.spec_from_file_location('gate_guard',Path(__file__).parents[1]/'deploy/gate_activate.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    module.API_FLAG=tmp_path/'api-v1'
+    module.STEER_FLAG=tmp_path/'steer-v1'
     return module
 
 
@@ -83,6 +85,9 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guar
     monkeypatch.setattr(m,'health',lambda:{'version':'0.4.16'})
     monkeypatch.setattr(m,'ready',lambda version:events.append(('ready',version)))
     monkeypatch.setattr(m,'assert_gate_idle',lambda:None)
+    monkeypatch.setattr(m,'assert_contract_lifecycle',lambda:None)
+    monkeypatch.setattr(m,'assert_steer_ingress',lambda:None)
+    monkeypatch.setattr(m,'sync_steer_contract',lambda expected_version=None: expected_version!='0.4.16')
     real_sync=m.sync_api_contract
     if failure=='legacy_rollback':
         m.API_FLAG.write_text('orphan-positive')
@@ -189,7 +194,7 @@ def test_startup_refresh_rebuilds_run_marker_without_deploy_lock_or_activation(t
     monkeypatch.setattr(m.time,'sleep',lambda seconds:None)
     monkeypatch.setattr(m,'run',forbidden);monkeypatch.setattr(m,'node',forbidden)
     result=m.refresh_api_contract(attempts=2)
-    assert result=={'status':'passed','gateVersion':'0.4.20','managedApiIngressAllowed':True}
+    assert result=={'status':'passed','gateVersion':'0.4.20','managedApiIngressAllowed':True,'steerIngressAllowed':False}
     assert len(probes)==2 and flag.read_text()=='0.4.20' and not m.LOCK.exists()
 
 
@@ -198,8 +203,48 @@ def test_startup_legacy_runtime_cannot_reenable_managed_posts(tmp_path,monkeypat
     monkeypatch.setattr(m,'API_FLAG',flag);monkeypatch.setattr(m,'health',lambda:{'version':'0.4.19'})
     monkeypatch.setattr(m,'gate_runtime',lambda:None)
     assert m.refresh_api_contract(attempts=1)=={
-        'status':'unsupported','gateVersion':'0.4.19','managedApiIngressAllowed':False}
+        'status':'unsupported','gateVersion':'0.4.19','managedApiIngressAllowed':False,'steerIngressAllowed':False}
     assert not flag.exists()
+
+
+@pytest.mark.parametrize('runtime',[None,{'gateVersion':'0.4.21','apiAttemptContractVersion':1},
+    {'gateVersion':'0.4.22','steerContractVersion':True},
+    {'gateVersion':'0.4.22','steerContractVersion':'1'}])
+def test_steer_contract_never_trusts_stale_marker_or_legacy_runtime(guard_module,monkeypatch,runtime):
+    m=guard_module;flag=m.STEER_FLAG;pending=flag.with_name(flag.name+'.pending')
+    flag.write_text('new-runtime-stale');pending.write_text('crashed')
+    monkeypatch.setattr(m,'gate_runtime',lambda:runtime)
+    assert m.sync_steer_contract() is False
+    assert not flag.exists() and not pending.exists()
+
+
+def test_startup_refresh_contracts_handles_reboot_then_old_gate_rollback(guard_module,monkeypatch):
+    m=guard_module
+    runtime={'gateVersion':'0.4.22','apiAttemptContractVersion':1,'steerContractVersion':1}
+    monkeypatch.setattr(m,'gate_runtime',lambda:runtime)
+    def health():
+        assert not m.STEER_FLAG.exists() and not m.STEER_FLAG.with_name(m.STEER_FLAG.name+'.pending').exists()
+        return {'version':runtime['gateVersion']}
+    monkeypatch.setattr(m,'health',health)
+    m.STEER_FLAG.write_text('stale');m.STEER_FLAG.with_name(m.STEER_FLAG.name+'.pending').write_text('crash')
+    assert m.refresh_api_contract(attempts=1)['steerIngressAllowed'] is True
+    assert m.STEER_FLAG.read_text()=='0.4.22'
+    runtime={'gateVersion':'0.4.21','apiAttemptContractVersion':1}
+    result=m.refresh_api_contract(attempts=1)
+    assert result['managedApiIngressAllowed'] is True and result['steerIngressAllowed'] is False
+    assert not m.STEER_FLAG.exists()
+
+
+def test_activation_requires_persistent_startup_marker_cleanup(guard_module,monkeypatch):
+    m=guard_module
+    pre='/usr/bin/rm -f '+ ' '.join(str(f)+suffix for f in (m.API_FLAG,m.STEER_FLAG) for suffix in ('','.pending'))
+    unit='ExecStartPre='+pre+'\nExecStartPost=/usr/bin/systemctl --no-block start atlas-gate-api-contract-refresh.service'
+    monkeypatch.setattr(m,'run',lambda *a,**k:SimpleNamespace(stdout=unit))
+    m.assert_contract_lifecycle()
+    unit=unit.replace(str(m.STEER_FLAG)+'.pending','')
+    with pytest.raises(RuntimeError,match='startup hooks'):m.assert_contract_lifecycle()
+    template=(Path(__file__).parents[1]/'deploy/atlas-gate-api-contract.conf').read_text()
+    assert '/run/atlas-gate-steer-v1.pending' in template and 'ExecStartPre=+' in template
 
 
 @pytest.mark.parametrize('failure',['health','runtime','invalid_runtime'])
@@ -270,9 +315,9 @@ def test_unprivileged_nginx_contract_fence_and_existing_stream_callbacks(tmp_pat
     thread=threading.Thread(target=upstream.serve_forever,daemon=True);thread.start()
     with socket.socket() as available:
         available.bind(('127.0.0.1',0));port=available.getsockname()[1]
-    maintenance=tmp_path/'maintenance';admission=tmp_path/'admission';api=tmp_path/'api-v1'
+    maintenance=tmp_path/'maintenance';admission=tmp_path/'admission';api=tmp_path/'api-v1';steer=tmp_path/'steer-v1'
     snippet=(Path(__file__).parents[1]/'deploy/nginx-gate-maintenance.conf').read_text()
-    snippet=snippet.replace('/run/atlas-gate-maintenance',str(maintenance)).replace('/run/atlas-gate-admission',str(admission)).replace('/run/atlas-gate-api-attempt-v1',str(api))
+    snippet=snippet.replace('/run/atlas-gate-maintenance',str(maintenance)).replace('/run/atlas-gate-admission',str(admission)).replace('/run/atlas-gate-api-attempt-v1',str(api)).replace('/run/atlas-gate-steer-v1',str(steer))
     include=tmp_path/'policy.conf';include.write_text(snippet)
     for directory in ('client-body','proxy','fastcgi','uwsgi','scgi'):
         (tmp_path/directory).mkdir(mode=0o700)
@@ -316,6 +361,22 @@ http {{ access_log off;
             assert client.post(path,json={}).status_code==200  # legacy behavior remains explicit
             api.write_text('0.4.20')
             assert client.post(path,json={},headers=headers).status_code==200
+            steer_path='/harness/agent/sessions/s/steer'
+            strong={'X-Atlas-Steer-Contract':'1','X-Atlas-Steer-Target-Boot':'captured-boot'}
+            before=len(calls)
+            for endpoint in (steer_path,'/harness/agent/sessions/s/commands','/harness/agent/sessions/s/commands/c'):
+                response=client.post(endpoint,json={},headers=strong) if endpoint==steer_path else client.get(endpoint,headers=strong)
+                assert response.status_code==503 and response.json()['error']['code']=='steer_contract_unavailable'
+                assert 'X-Atlas-Command-State' not in response.headers
+            assert len(calls)==before
+            steer.with_name(steer.name+'.pending').touch()
+            assert client.post(steer_path,json={},headers=strong).status_code==503 and len(calls)==before
+            assert client.post(steer_path,json={'text':'legacy'}).status_code==200
+            steer.write_text('new-runtime')
+            assert client.post(steer_path,json={},headers=strong).status_code==200
+            steer.unlink()  # immediately visible without nginx reload/stat cache
+            before=len(calls)
+            assert client.post(steer_path,json={},headers=strong).status_code==503 and len(calls)==before
             with client.stream('POST','/harness/agent/sessions/s/prompt',json={}) as stream:
                 iterator=stream.iter_text();assert 'waiting-tool' in next(iterator)
                 admission.touch()

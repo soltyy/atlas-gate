@@ -346,6 +346,12 @@ async def control_receipt(sid: str, command_id: str, request: Request,
         if sealed:
             return _admission_negative(json.loads(sealed['response']))
         raise GateError(404, "not_found", "команда не найдена")
+    from .steering import CONTRACT_HEADER, TARGET_HEADER
+    if request.headers.get(CONTRACT_HEADER) is not None or request.headers.get(TARGET_HEADER) is not None:
+        expected = json.loads(op.get('steer') or '{}').get('_targetBoot')
+        if (request.headers.get(CONTRACT_HEADER) != '1' or not expected or
+                request.headers.get(TARGET_HEADER) != expected):
+            raise GateError(409, 'steer_contract_mismatch', 'Сверка требует исходные заголовки intent', state='unknown')
     current = await _control_receipt(state, op)
     if current["state"] != "complete":
         if current.get('steer'):
@@ -516,7 +522,11 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
             await state.publish_contexts()
     if method == 'GET' and suffix in ('/files', '/sdk-tools') and response.status_code == 200:
         from .input_recovery import validate, public
-        proof = response.json().get('inputRecovery')
+        doc = response.json()
+        if suffix == '/sdk-tools' and 'steering' in doc:
+            from .steering import bound_capability
+            doc['steering'] = bound_capability(doc['steering'], binding)
+        proof = doc.get('inputRecovery')
         sdk_id = binding.get('sdk_id')
         if proof is not None and not sdk_id:
             saved = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/reconcile'),
@@ -530,9 +540,8 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
             sdk_id = metadata.get('sdkSessionId')
         validate(proof, binding['local_id'], sdk_id)
         if proof is not None:
-            doc = response.json()
             doc['inputRecovery'] = public(proof, binding)
-            return JSONResponse(doc)
+        return JSONResponse(doc)
     return _response(response)
 
 
@@ -548,9 +557,13 @@ async def agent_interrupt(sid: str, request: Request, device: Device = Depends(r
 
 @router.post("/harness/agent/sessions/{sid}/steer")
 async def agent_steer(sid: str, body: SteerRequest, request: Request, device: Device = Depends(require_device)):
-    if body.expectedTurnId is None:
+    from .steering import capability, validate, CONTRACT_HEADER, TARGET_HEADER
+    contract, target_boot = request.headers.get(CONTRACT_HEADER), request.headers.get(TARGET_HEADER)
+    if body.expectedTurnId is None and contract is None and target_boot is None:
         return await _delegate(request, device, sid, "POST", "/steer")
-    from .steering import capability, validate
+    if contract != '1' or body.expectedTurnId is None or not target_boot or len(target_boot) > 200:
+        raise GateError(422, 'steer_contract_required', 'Точный steer требует contract1, target boot и paired IDs',
+                        state='not_applied', deliveryState='not_sent')
     state = gate(request)
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request)
@@ -565,13 +578,18 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
     info, preflight_error = None, None
     if existing is None:
         try:
-            binding = await state.routing.recover_boot(binding)
+            # The target was captured by the client before admission. A restart
+            # cannot make a fresh steer target a newly restored SDK transport.
+            if binding['boot_id'] != target_boot:
+                raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime сессии изменился')
             info = await state.nodes.probe(binding['node_id'])
+            if not info or info.get('bootId') != target_boot:
+                raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime Router изменился')
         except GateError as failed:
             preflight_error = failed
     metadata = {'version': 1, 'sessionId': binding['local_id'], 'turnId': body.expectedTurnId,
                 'clientMessageId': body.clientMessageId, 'uuid': None, 'state': 'unknown',
-                'bodySha256': digest}
+                'bodySha256': digest, '_targetBoot': target_boot, '_contract': 1}
     op, fresh = state.operations.begin(device, binding, 'POST', _path(binding, '/steer'), original, key,
                                       body_digest=digest, steer=metadata)
     if fresh:
@@ -581,6 +599,9 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
             if preflight_error is not None:
                 raise preflight_error
             validate(body, capability((info or {}).get('steering')))
+            if (info['steering'].get('targetNodeId') != binding['node_id'] or
+                    info['steering'].get('targetBootId') != target_boot):
+                raise GateError(409, 'steer_target_boot_mismatch', 'Capability относится к другому runtime')
             negotiated = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/sdk-tools'),
                                                    params={'steering': '1'}, expected_boot=binding['boot_id'])
             if negotiated.status_code != 200:
@@ -593,6 +614,8 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
             except (ValueError, AttributeError):
                 caps = capability(None)
             validate(body, caps)
+            if caps['targetBootId'] != target_boot or caps['targetNodeId'] != binding['node_id']:
+                raise GateError(409, 'steer_target_boot_mismatch', 'Сессия подтвердила другой runtime')
             validate_prompt(PromptRequest(id=body.clientMessageId, text=body.text, attachments=body.attachments),
                             node_attachments(info))
         except GateError as failed:

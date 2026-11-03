@@ -81,13 +81,16 @@ class Routing:
         # The foreground create and background command reconciliation may both
         # observe the same Router ACK. Publish ready+body atomically; only the
         # first observation owns the immutable bytes, including extension fields.
-        raw = json.dumps(created)
         with self.store._lock:
             db = self.store._db
             saved = dict(db.execute('SELECT * FROM router_bindings WHERE id=?', (sid,)).fetchone())
             cached = self.creation_response(saved)
             if cached is not None:
                 return cached
+            if 'steering' in created:
+                from .steering import bound_capability
+                created = dict(created, steering=bound_capability(created['steering'], saved))
+            raw = json.dumps(created)
             db.execute("UPDATE router_bindings SET status='ready',local_id=?,response=? WHERE id=?",
                        (local_id, raw, sid))
         return 200, raw.encode()

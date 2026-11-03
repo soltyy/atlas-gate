@@ -35,6 +35,8 @@ class Operations:
             store._exec('ALTER TABLE router_operations ADD COLUMN body_sha256 TEXT')
         if 'steer' not in columns:
             store._exec('ALTER TABLE router_operations ADD COLUMN steer TEXT')
+        store._exec("""CREATE INDEX IF NOT EXISTS router_steer_identity ON router_operations(
+            device_id,session_id,json_extract(steer,'$.clientMessageId')) WHERE steer IS NOT NULL""")
         store._exec('''CREATE TABLE IF NOT EXISTS router_admission_fences(
             id TEXT PRIMARY KEY, device_id TEXT NOT NULL, org TEXT NOT NULL,
             session_id TEXT NOT NULL, turn_id TEXT NOT NULL, body_sha256 TEXT NOT NULL,
@@ -113,6 +115,9 @@ class Operations:
         rid = request_id or (f"prompt:{binding['id']}:{turn_id}" if turn_id else str(uuid.uuid4()))
         rid = self.key(device, rid)
         fingerprint = hashlib.sha256((method + path + json.dumps(body, sort_keys=True)).encode()).hexdigest()
+        if steer is not None:
+            fingerprint = body_sha256({'request': fingerprint, 'contract': steer.get('_contract'),
+                                       'targetBoot': steer.get('_targetBoot')})
         with self.store._lock:
             db = self.store._db
             db.execute("BEGIN IMMEDIATE")
@@ -122,8 +127,22 @@ class Operations:
                     if (old['fingerprint'] != fingerprint or old['session_id'] != binding['id'] or
                             (body_digest and old['body_sha256'] and body_digest != old['body_sha256'])):
                         raise GateError(409, 'idempotency_conflict', 'request_id использован с другими параметрами')
+                    if steer is not None and (not old['steer'] or
+                            any(json.loads(old['steer']).get(k) != steer.get(k) for k in ('_targetBoot', '_contract'))):
+                        raise GateError(409, 'idempotency_conflict', 'Исходный target boot команды изменён')
                     db.execute('COMMIT')
                     return dict(old), False
+                if steer is not None:
+                    original = db.execute("""SELECT id,steer FROM router_operations WHERE device_id=?
+                        AND session_id=? AND steer IS NOT NULL AND json_extract(steer,'$.clientMessageId')=?""",
+                        (device.device_id, binding['id'], steer['clientMessageId'])).fetchone()
+                    if original:
+                        from .steering import public
+                        saved = json.loads(original['steer'])
+                        raise GateError(409, 'steer_message_identity_conflict',
+                            'Реплика уже принадлежит исходной команде; требуется сверка прежнего ключа',
+                            state=saved['state'], originalCommandId=original['id'],
+                            steer=public(saved, binding['id']))
                 sealed = db.execute('SELECT * FROM router_admission_fences WHERE id=? OR (device_id=? AND session_id=? AND turn_id=?)',
                                     (rid, device.device_id, binding['id'], turn_id)).fetchone()
                 if sealed:
