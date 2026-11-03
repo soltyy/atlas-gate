@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, quote
 from typing import Literal
 import httpx
 from pydantic import BaseModel, Field, model_validator
-from .errors import GateError
+from .errors import GateError, GateFreshNodeError
 
 
 class Node(BaseModel):
@@ -164,12 +164,14 @@ class Nodes:
     async def request(self, node_id: str, method: str, path: str, *, content=b"", params=None, expected_boot=None, request_id=None):
         node = self.config.get(node_id)
         if node is None or not node.enabled or self.revoked(node_id):
-            raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
+            raise GateFreshNodeError('Router не подключён', node_id=node_id, method=method,
+                                     path=path, reason='node_unavailable')
         info = self.snapshots.get(node_id)
         if not info or time.monotonic() - info["observed"] > 5:
             info = await self.probe(node_id)
         if info is None:
-            raise GateError(503, "node_unavailable", "идентичность Router не подтверждена", node_id=node_id)
+            raise GateFreshNodeError('идентичность Router не подтверждена', node_id=node_id,
+                                     method=method, path=path, reason='identity_unconfirmed')
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
         steering_probe = (method == 'GET' and path.endswith('/sdk-tools')

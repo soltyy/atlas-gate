@@ -12,7 +12,7 @@ from fastapi.responses import Response, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from ..schemas import CompactRequest, DocumentUploadRequest, PromptRequest, SessionCreated, SessionList, SteerRequest, ToolResultRequest, ToolsUpdate
 from .api import check_data_class, gate, org_of, ready_gate, require_device, router
-from .errors import GateError, STATUS_CODES
+from .errors import GateError, GateFreshNodeError, STATUS_CODES
 from .schemas import GateAgentSessionCreate, PromptAdmissionResolve
 from ..sdk_tools import SdkTools, permitted
 from .state import Device
@@ -460,14 +460,14 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
                 binding["node_id"], op['method'], op["path"], content=raw, params=params,
                 expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"])
         except GateError as failed:
-            if fresh and failed.code == 'node_unavailable':
+            if fresh and isinstance(failed, GateFreshNodeError):
                 # Nodes проверил identity/доступность ДО отправки. Это известный
                 # отказ доставки, в отличие от потерянного ответа принятой команды.
                 response = httpx.Response(503, json={'error':{
                     'code':failed.code, 'message':failed.message, 'deliveryState':'not_sent'}})
                 if op.get('steer'):
                     state.operations.observe_steer(op['id'], {**json.loads(op['steer']), 'state': 'not_applied'})
-                state.operations.complete(op['id'], response)
+                state.operations.complete(op['id'], response, pre_dispatch=(binding, failed))
                 return response
             state.operations.unknown(op["id"])
             log.warning("command pending: command=%s node=%s code=%s cause=%s",
