@@ -149,10 +149,20 @@ Fake SDK используется для воспроизводимых гоно
   hashes трёх ready чатов неизменны, все вкладки открыты, warnings0, unprovable
   source защищён. Counters **5/0/10/5→5/0/10/5**.
 
+Публикация того же ZIP0906 подтверждена PR231 в `program/s1-edt-api`, merge
+`257d2a3d442ff7227f025b8732d5a40246481de4`, 33516504 bytes, Git blob
+`d27782ce323db88cd33f2d6fd186304ccfda3855`.
+[ZIP](https://github.com/soltyy/edt-llm-agent-extension/raw/257d2a3d442ff7227f025b8732d5a40246481de4/release/ay-agents-latest.zip),
+[машинная квитанция](https://github.com/soltyy/edt-llm-agent-extension/blob/257d2a3d442ff7227f025b8732d5a40246481de4/docs/qa/upgrade-230.json).
+Квитанция прочитана из опубликованного commit: все phase exitCode0, восемь версий
+product JAR, hashes/counters повторного запуска и исходные keys/body/hash/Run
+проверены. Публикация сопоставлена по ref/size/blob через GitHub API; повторное
+полное скачивание ZIP здесь не выполнялось.
+
 Граница: проверен binary transition реальных ZIP/JAR на Windows OSGi с loopback
 Gate25/Router23-stub. Provider SDK, production история и рабочие действия не
-затрагивались. Публикация0906 и p2 установка в пользовательскую EDT принимаются
-отдельно; A57 не означает готовности каждого backend/OS или всех остальных A-ID.
+затрагивались. Пользовательская p2 установка в рабочую EDT принимается отдельно;
+A57 не означает готовности каждого backend/OS или всех остальных A-ID.
 
 ## 8. Выход из инцидента Зинаиды
 
