@@ -14,10 +14,14 @@
   Возможности другого SDK/CLI или аккаунта нельзя переносить из этой строки.
 - EDT **1.0.0.202611032236** опубликован с приёмкой identity/coordinator:
   [EDT228](https://github.com/soltyy/edt-llm-agent-extension/issues/228#issuecomment-6613861177).
-- Кандидат EDT **1.0.0.202611040906**, source
-  `3948a77c0d518fcf1ede9376c0e38ef8dd35bdaa`, прошёл отдельную приёмку обновления
-  и повторного запуска A57. Его публикация и установка через p2 в рабочую EDT
-  этим результатом не подтверждаются. [EDT230](https://github.com/soltyy/edt-llm-agent-extension/issues/230).
+- EDT **1.0.0.202611040906**, source `3948a77c0d518fcf1ede9376c0e38ef8dd35bdaa`,
+  опубликован через PR231 в `program/s1-edt-api`, merge
+  `257d2a3d442ff7227f025b8732d5a40246481de4`.
+  [Неизменяемый ZIP](https://github.com/soltyy/edt-llm-agent-extension/raw/257d2a3d442ff7227f025b8732d5a40246481de4/release/ay-agents-latest.zip),
+  33516504 bytes, SHA256 `aa25e2555567dae0e30e7f467fa11715d13d4696998899c65e864f65b3b1bf98`.
+  [Машинная квитанция A57](https://github.com/soltyy/edt-llm-agent-extension/blob/257d2a3d442ff7227f025b8732d5a40246481de4/docs/qa/upgrade-230.json)
+  подтверждает переход и повторный запуск этого артефакта; пользовательская
+  установка через p2 в рабочую EDT остаётся отдельной границей.
 - Harness сообщает поставку negotiated controller в **0.1.151**:
   [Harness504](https://github.com/soltyy/atlas_harness/issues/504). Это клиентская
   квитанция, а не проверка текущей установки каждого пользователя и не подтверждение
