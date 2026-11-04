@@ -1,6 +1,7 @@
 """Loopback Java acceptance fixture, temporary Gate + two deterministic Router."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import tempfile
 
@@ -11,7 +12,8 @@ from atlas_gate.gate.operations import body_sha256
 from .test_network_gate import network, create, events
 
 
-async def seed(client, state):
+async def seed(client, state, suffix=''):
+    prefix='history103'+('-'+suffix if suffix else '')
     old = await create(client)
     # A transport already owns its logical native identity before inference.
     # Only the CURRENT transport below executes one synthetic seed prompt.
@@ -20,10 +22,10 @@ async def seed(client, state):
     assert (await client.delete('/harness/agent/sessions/'+old)).status_code == 200
     opened = await client.post('/harness/agent/sessions',json={'system':'test','model':'stub-fast',
         'tools':[{'name':'echo','description':'echo','parameters':{'type':'object'}}],
-        'resumeSessionId':previous['sdk_alias']},headers={'Idempotency-Key':'history103-resume'})
+        'resumeSessionId':previous['sdk_alias']},headers={'Idempotency-Key':prefix+'-resume'})
     assert opened.status_code==200 and opened.json()['resumed'] is True,opened.text
     current=opened.json()['id']
-    payload={'id':'history103-current-turn','text':'saved current answer exactly once'}
+    payload={'id':prefix+'-current-turn','text':'saved current answer exactly once'+(' '+suffix if suffix else '')}
     result=await client.post(f'/harness/agent/sessions/{current}/prompt?mode=async',json=payload,
                             headers={'Idempotency-Key':payload['id']})
     assert result.status_code==202,result.text
@@ -51,7 +53,21 @@ async def main():
             folder=Path(settings.ATLAS_GATE_ORGS_DIR);folder.mkdir(parents=True,exist_ok=True)
             (folder/'test-org.json').write_text(json.dumps(org),encoding='utf-8')
             await state.reload()
-            setup=await seed(client,state)
+            count=int(os.environ.get('ATLAS_HISTORY103_CHATS','1'))
+            assert count>=1
+            chats=[]
+            for i in range(count):
+                chat=await seed(client,state,'chat-'+str(i+1) if count>1 else '')
+                damaged=count==1 or i<2
+                chat.update(org=chat['orgId'],route=chat['routeId'],session_id=chat['currentSID'],
+                    previous_alias=chat['previousAlias'],run_id=chat['sourceRunId'],
+                    request_id=chat['requestId'],prompt_body=chat['originalPromptBody'],
+                    expected_text=chat['savedTerminal'].get('text'),
+                    conversation_id='lineage228-chat'+('-'+str(i+1) if count>1 else ''),
+                    branch_id='lineage228-branch'+('-'+str(i+1) if count>1 else ''),
+                    damaged=damaged,checkpointAlias=chat['previousAlias'] if damaged else chat['historyAlias'])
+                chats.append(chat)
+            setup=dict(chats[0],chats=chats)
             setup.update(credentials=credentials,foreignCredentials=other,url=str(client.base_url))
             setup.update(org=setup['orgId'],route=setup['routeId'],session_id=setup['currentSID'],
                 previous_alias=setup['previousAlias'],run_id=setup['sourceRunId'],
