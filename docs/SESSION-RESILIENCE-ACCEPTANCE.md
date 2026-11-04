@@ -126,6 +126,34 @@ Fake SDK используется для воспроизводимых гоно
 | A56 | Direct и connector: input proof header, Retry-After, command/create headers; новый cases path; legacy node | Negotiation не теряется; current connector gaps явно unsupported; capability равна всему пути; нет произвольного admin tunnel |
 | A57 | Реальные старый и новый JAR в разных JVM на одном сохранённом workspace; минимум два damaged и один healthy открытый чат; вкладки/selected tab, SDK history, compact/media, checkpoints/cursors/outputs; автоматический startup без клика/нового prompt | Все открытые чаты восстановлены; законные identity proofs и saved terminal применены один раз под source CAS с аудитом, keys/hashes/история сохранены; бизнес-счётчики не растут. Healthy чат не закрывается и не блокируется спорным source. Недоступный proof даёт точный статус конкретного чата; unsupported не подменяется успехом. Приёмка относится к точным версиям JAR, не к новому пустому workspace |
 
+## Квитанция A57, 04.11.2026
+
+По приёмке владельца [EDT230](https://github.com/soltyy/edt-llm-agent-extension/issues/230)
+и [test-only PR106](https://github.com/soltyy/atlas-gate/pull/106):
+
+- Опубликованные1609→2236: разные OSGi JVM на одном workspace, проверены версии
+  и locations всех восьми product JAR. Найденные stale warnings устранены в0906.
+- Независимый стендB: опубликованный2236→реальный candidate ZIP0906, source
+  `3948a77c0d518fcf1ede9376c0e38ef8dd35bdaa`, SHA256
+  `aa25e2555567dae0e30e7f467fa11715d13d4696998899c65e864f65b3b1bf98`.
+  Upgrade test1/0fail/0error/0skip; full clean3512/0fail/0error/13skip/0flakes.
+- Actual ChatTabs.restore/WebChatSurface вернули четыре вкладки. Две damaged
+  alias исправлены автоматически с аудитом, healthy source до нового ввода не
+  изменён, unprovable first остался защищённым; stale warnings0. Исходные четыре
+  request key/body/hash/sourceRunId, prefix/reasoning/media originals/compact/vault
+  и порядок вкладок сохранены.
+- Во время recovery prompt/tool/operation/turn counters **4/0/8/4→4/0/8/4**.
+  Только новый явный healthy prompt увидел два прежних сообщения детерминированного
+  backend, после чего counters стали5/0/10/5.
+- Третья JVM/тот же workspaceB/тот же ZIP: repeat test1/0fail/0error/0skip;
+  hashes трёх ready чатов неизменны, все вкладки открыты, warnings0, unprovable
+  source защищён. Counters **5/0/10/5→5/0/10/5**.
+
+Граница: проверен binary transition реальных ZIP/JAR на Windows OSGi с loopback
+Gate25/Router23-stub. Provider SDK, production история и рабочие действия не
+затрагивались. Публикация0906 и p2 установка в пользовательскую EDT принимаются
+отдельно; A57 не означает готовности каждого backend/OS или всех остальных A-ID.
+
 ## 8. Выход из инцидента Зинаиды
 
 1. В точной старой беседе сохранён old Run со stale checkpoint и отменённый следующий intent.

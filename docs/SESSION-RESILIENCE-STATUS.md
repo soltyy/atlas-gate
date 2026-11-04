@@ -14,6 +14,10 @@
   Возможности другого SDK/CLI или аккаунта нельзя переносить из этой строки.
 - EDT **1.0.0.202611032236** опубликован с приёмкой identity/coordinator:
   [EDT228](https://github.com/soltyy/edt-llm-agent-extension/issues/228#issuecomment-6613861177).
+- Кандидат EDT **1.0.0.202611040906**, source
+  `3948a77c0d518fcf1ede9376c0e38ef8dd35bdaa`, прошёл отдельную приёмку обновления
+  и повторного запуска A57. Его публикация и установка через p2 в рабочую EDT
+  этим результатом не подтверждаются. [EDT230](https://github.com/soltyy/edt-llm-agent-extension/issues/230).
 - Harness сообщает поставку negotiated controller в **0.1.151**:
   [Harness504](https://github.com/soltyy/atlas_harness/issues/504). Это клиентская
   квитанция, а не проверка текущей установки каждого пользователя и не подтверждение
@@ -41,16 +45,21 @@
 resume, смену модели, repair checkpoint или повтор команды. Direct Router и
 direct API обходят Gate и сохраняют собственные клиентские adapters/ledgers.
 
-## Что остаётся отдельной задачей
+## Квалифицированные границы и отдельные задачи
 
 - Универсальный terminal continuation permit остаётся unsupported
   ([Gate77](https://github.com/soltyy/atlas-gate/issues/77)); transport restore,
   accepted tool ACK или identity proof его не заменяют.
 - Автоматическое восстановление **всех открытых чатов после обновления клиента**
-  требует отдельной upgrade-приёмки: реальные старые/новые JAR, разные JVM и один
-  сохранённый workspace, несколько повреждённых и здоровых чатов, вкладки,
-  checkpoints/outputs/cursors, compact/media. Один восстановленный Run или новый
-  пустой чат такой приёмкой не является. На дату сверки эта проверка ещё ведётся.
+  прошло A57 на названном стенде: опубликованные1609→2236; затем независимый
+  workspaceB, опубликованный2236→candidate0906→повтор candidate в третьей JVM.
+  Реальные product JAR/ChatTabs.restore/WebChatSurface восстановили четыре вкладки:
+  две исправлены по identity proof, здоровая сохранена, unprovable source остался
+  защищённым. Startup/repeat не увеличили бизнес-счётчики; один новый явный prompt
+  детерминированного backend проверил доступность прежней истории. Это Windows
+  OSGi/loopback Gate25/Router23-stub приёмка, не универсальная квалификация SDK/OS
+  и не пользовательская p2 установка. Точные hashes/счётчики — в
+  [приёмке](SESSION-RESILIENCE-ACCEPTANCE.md) и [PR106](https://github.com/soltyy/atlas-gate/pull/106).
 - Gate не меняет БД Harness/EDT. Клиент сохраняет исходные root/org/route/model,
   SID/alias/Run/request/body hash и аудит repair; затем создаёт свежую inventory
   с новым ключом и более новой version, сохраняя clientStoreEpoch и unresolved
