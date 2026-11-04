@@ -1,6 +1,9 @@
 # Источники, основания решений и пределы проверки
 
 Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), 02.11.2026.
+Статусы исходного аудита ниже относятся к этой дате; поставки после него
+сверяются по [актуальной матрице](SESSION-RESILIENCE-STATUS.md). Эта правка не
+объявляет повторной проверкой внешних страниц обновление локального статуса Atlas.
 Внешние страницы открыты при подготовке документа. Они описывают актуальные
 продукты поставщиков, **не гарантируют наличие всех возможностей в установленных
 SDK** и могут измениться. Численные provider limits здесь не используются для
@@ -29,7 +32,7 @@ continuation, которая требует своего доказанного 
 
 | ID | Первичный источник | Что использовано / граница |
 |---|---|---|
-| S06 | [Agent SDK: Work with sessions](https://code.claude.com/docs/en/agent-sdk/sessions) | Exact resume ID, continue/resume/fork, storage/cwd. SessionStore уже есть в проверенном SDK0.2.159, но не интегрирован/квалифицирован Router; MirrorErrorMessage не позволяет считать любой mirror полным backup |
+| S06 | [Agent SDK: Work with sessions](https://code.claude.com/docs/en/agent-sdk/sessions) | Exact resume ID, continue/resume/fork, storage/cwd. Наличие SessionStore в SDK0.2.159 не является proof restore конкретной конфигурации; квалификация Atlas описана в CLAUDE-COLD-RESTORE. MirrorErrorMessage не позволяет считать любой mirror полным backup |
 | S07 | [Agent SDK: Stream responses](https://code.claude.com/docs/en/agent-sdk/streaming-output) | Partial stream, complete content blocks и финальный ResultMessage различаются; текстовый блок не завершает весь SDK запрос |
 | S08 | [Claude API errors](https://platform.claude.com/docs/en/api/errors) | Typed errors, request ID, отдельные rate/billing/auth/overload причины. API errors не заменяют состояние входа Claude Code subscription |
 | S09 | [Claude API streaming](https://platform.claude.com/docs/en/build-with-claude/streaming) | Поток может оборваться после начала; способы текстовой continuation зависят от модели. Tool/thinking partial blocks не восстанавливаются как готовый tool call |

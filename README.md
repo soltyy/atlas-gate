@@ -1,6 +1,6 @@
 # Atlas Gate
 
-Текущий выпуск: **0.4.12** — [чтение результатов закрытых ходов](docs/RELEASE-0.4.12.md).
+Текущий выпуск: **0.4.25** — [подтверждение identity после resume](docs/RELEASE-0.4.25.md).
 
 Самостоятельный централизованный Gate для Atlas Harness/EDT и нескольких Router.
 Claude/Codex SDK, подписочные входы и SDK история находятся на Router. На одной
@@ -20,6 +20,7 @@ resume/tools/interrupt/compact/events идут на сохранённый node.
 
 - [Реализация и задачи](docs/IMPLEMENTATION.md)
 - [Единый контракт восстановления Harness — Gate — Router (RFC)](docs/SESSION-RESILIENCE-CONTRACT.md)
+- [Поставленные возможности и границы клиентов](docs/SESSION-RESILIENCE-STATUS.md)
 - [Открытый каталог и настройки харнеса](docs/HARNESS-DISCOVERY.md)
 - [Повторы, квитанции и неизвестный исход](docs/RETRY-RECEIPTS.md)
 - [Поставка Gate 0.4.7 и Router 0.8.4 на VDS](docs/RETRY60-DEPLOYMENT.md)
