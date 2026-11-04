@@ -1,7 +1,8 @@
 # Приёмка контракта восстановления
 
-Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), редакция 1, 02.11.2026.
-**План проверок будущей реализации. Таблицы ниже не означают, что всё уже проверено.**
+Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), редакция 1; актуализация 04.11.2026.
+**План и критерии проверок. Таблицы не означают, что все сценарии уже проверены.**
+Поставленная часть и квалификация отмечены в [матрице статуса](SESSION-RESILIENCE-STATUS.md).
 
 ## 1. Как выбирать проверки без лишних прогонов
 
@@ -13,6 +14,7 @@
 | Harness stale checkpoint/apply ACK | A10–A18, A25–A29, A34, A48; установленный клиент со старой беседой | Общую серверную регрессию, если server code не менялся |
 | API-adapter | A07, A31–A38, A52–A55 **только для изменённого endpoint/provider** | Предположение, что OpenAI mock проверил Anthropic/DeepSeek; SDK-only compact/auth тесты неизменённого API adapter |
 | Connector/protocol forwarding | A06–A08, A45, A56; direct/connector сравнение exact path/status/body/headers | SDK/model генерацию, когда меняется только header relay |
+| Startup/обновление клиента и восстановление открытых чатов | A57: реальные старый/новый JAR, разные JVM и один workspace, несколько damaged и healthy sources | Production prompt/tools, изменение серверного runtime ради клиентского upgrade-теста |
 | Executor effect ledger | A10–A14, A28–A30, A43; внешний контролируемый counter/read-back | Повтор настоящего письма/платежа/удаления ради smoke test |
 | Хранение/restore/deploy | A21–A24, A40–A46; guard-required qualification | Нагрузочную «пробу» в пользовательской истории |
 
@@ -122,6 +124,7 @@ Fake SDK используется для воспроизводимых гоно
 | A54 | Responses completed с function_call; incomplete max_output_tokens; refusal content; store=false background | API status/reason/Run не смешаны; waiting-tools; data policy учитывает временное background storage, retrieve только при реальной поддержке |
 | A55 | Документированный nonstream Claude529/DeepSeek503 admission rejection после HTTP dispatch против generic5xx/midstream200 error | Только доказанный отказ до inference даёт новый attempt по policy/backoff; unknown/partial не повторены; причина/расход сохранены |
 | A56 | Direct и connector: input proof header, Retry-After, command/create headers; новый cases path; legacy node | Negotiation не теряется; current connector gaps явно unsupported; capability равна всему пути; нет произвольного admin tunnel |
+| A57 | Реальные старый и новый JAR в разных JVM на одном сохранённом workspace; минимум два damaged и один healthy открытый чат; вкладки/selected tab, SDK history, compact/media, checkpoints/cursors/outputs; автоматический startup без клика/нового prompt | Все открытые чаты восстановлены; законные identity proofs и saved terminal применены один раз под source CAS с аудитом, keys/hashes/история сохранены; бизнес-счётчики не растут. Healthy чат не закрывается и не блокируется спорным source. Недоступный proof даёт точный статус конкретного чата; unsupported не подменяется успехом. Приёмка относится к точным версиям JAR, не к новому пустому workspace |
 
 ## 8. Выход из инцидента Зинаиды
 

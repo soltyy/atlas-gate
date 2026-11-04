@@ -1,16 +1,21 @@
 # Единый контракт жизненного цикла и восстановления Harness — Gate — Router
 
-Редакция RFC 1, 02.11.2026, Europe/Moscow. Владелец общего контракта — Gate.
+Редакция RFC 1, нормативная база 02.11.2026; статус актуализирован 04.11.2026,
+Europe/Moscow. Владелец общего контракта — Gate.
 
-**Статус: проект целевого контракта, а не заявление о поставленной реализации.**
-Исходная проверенная серверная база: Gate **0.4.19** (`015b26f`), Router **0.8.18**
+**Статус: нормативный контракт и целевые требования; реализация поэтапная.**
+Поставленные Gate **0.4.25** / Router **0.8.23**, клиентские квитанции и точные
+границы перечислены в [актуальной матрице](SESSION-RESILIENCE-STATUS.md).
+Историческая база исходного рекона: Gate **0.4.19** (`015b26f`), Router **0.8.18**
 (`b214db3`); установленный Codex SDK **0.160.0**, Claude Agent SDK **0.2.159**, MCP
 **2.2.0**. Клиентский код Harness прочитан, но его локальная БД и установленный
-клиент этим документом не меняются. В частности, Gate #87 / Harness #502 пока не
-доказывают успешного восстановления старого клиентского Run.
+клиент этим документом не меняются. Серверная поставка сама по себе не доказывает
+применения результата к локальному checkpoint пользователя.
 
 Нормативные слова **ДОЛЖЕН**, **НЕЛЬЗЯ**, **МОЖЕТ** относятся к целевой системе.
-Существующий wire v1 сохраняется; новые API из раздела 8 **ещё не реализованы**.
+Существующий wire v1 сохраняется; основа coordinator API из раздела 8 уже поставлена.
+Фактические paths/capabilities задаёт [WIRE](SESSION-RESILIENCE-WIRE.md), а
+неподдержанные части остаются целевыми требованиями.
 Примеры идентификаторов синтетические. Секретов, переписки и SDK history в документе нет.
 
 План реализации: [Gate #88](https://github.com/soltyy/atlas-gate/issues/88).
@@ -40,6 +45,7 @@ SDK/connector требования: [Router #104](https://github.com/soltyy/atla
 2. [Сценарии приёмки и выбор необходимых проверок](SESSION-RESILIENCE-ACCEPTANCE.md).
 3. [Первичные источники и проверенная реализация](SESSION-RESILIENCE-SOURCES.md).
 4. [Действующие HTTP-пути и отличия от целевого API](SESSION-RESILIENCE-WIRE.md).
+5. [Поставленные возможности и клиентские границы](SESSION-RESILIENCE-STATUS.md).
 
 ## 1. Цель и пределы гарантий
 
@@ -381,8 +387,8 @@ manifest остаётся непредъявленный prompt, сначала 
 
 ### 8.1. Объявление и совместимость
 
-**Предлагается, не существует в 0.4.19:** подписанный
-`sessionRecoveryCoordinator.version=1`. Это отдельная capability, не повышение
+Подписанный `sessionRecoveryCoordinator.version=1` поставлен начиная с Gate0.4.20;
+в исторической базе0.4.19 его не было. Это отдельная capability, не повышение
 версии существующих commandRecovery/transportRecovery/inputRecovery.
 
 Capability объявляет supported operations, topology, replay policy, retention,
@@ -392,6 +398,10 @@ proof/owner/history/continuation. Gate проектирует их на exact pi
 поле supported=false/отсутствует, никакого синтетического разрешения.
 
 ### 8.2. Предлагаемые endpoints
+
+Таблица описывает целевую форму. Поставленные методы, request schemas и результаты
+сверяются по [WIRE](SESSION-RESILIENCE-WIRE.md) и подписанному профилю; не все
+целевые методы/адаптеры ниже объявлены реализованными.
 
 | Сторона | Метод/путь | Семантика |
 |---|---|---|
@@ -714,9 +724,9 @@ generation, terminal reason (в том числе `aborted_streaming`/`aborted_t
 
 **History-only restore не должен сам продолжить прерванный ход.** Переменная
 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` разрешает native auto-continuation без нового
-host prompt. SDK наследует окружение; проверенный Router её не перекрывает. Это
-обнаруженная возможность, а не утверждение, что flag включён на действующем аккаунте.
-Целевой adapter явно отключает её для history-only restore и fencing-ом запрещает
+host prompt. Это свойство native SDK, а не утверждение о flag действующего аккаунта.
+Квалифицированный adapter Router23 отключает auto-continuation в своей
+[поддержанной области](CLAUDE-COLD-RESTORE.md) и fencing-ом запрещает
 любые native inference/tools до действующего admitted intent/permit. Отдельно
 проверяет effective env с разрешёнными user/managed settings при старте и изменении:
 одного `options.env` override недостаточно считать защиту доказанной. Квалификация
@@ -730,7 +740,8 @@ ConversationResetMessage (`/clear`) — state-changing смена history lineag
 baseline сохраняются; старые Runs/permits не наследуются новой историей. Running
 SDK totals могут сброситься, но Atlas settlement не обнуляется и не удваивается.
 Неожиданный reset требует reconciliation; живой transport не доказывает сохранность
-прежнего контекста. Origin/reset обработка в текущем Router ещё требует реализации.
+прежнего контекста. Origin/reset обработка поставлена в adapter; восстановление
+сверяет exact case и не переносит эту квалификацию на произвольную CLI/конфигурацию.
 
 После потери login: required/unknown/authenticated различаются; состояние проверяется
 заново после входа. Если прежний transport умер, coordinator создаёт новый через
@@ -1038,20 +1049,21 @@ backup, switch, readiness и собственную инертную приём�
 
 ## 14. Совместимость и план внедрения
 
-### 14.1. Что есть в исходной базе, а что ещё требуется
+### 14.1. Поставленная реализация и оставшиеся границы
 
-| Возможность | Статус на зафиксированной базе |
+| Возможность | Статус Gate25 / Router23; подробности в [матрице](SESSION-RESILIENCE-STATUS.md) |
 |---|---|
 | Durable command ACK, exact turn events, summary receipt, owner affinity | Реализовано; смотреть конкретные v1 документы и retention |
 | Prompt admission fence | Gate commandRecovery v1 реализован; не универсальный fence внешних инструментов |
 | Auth refresh/create-resume, input no-rollout, idle writer handoff | Реализовано частями Gate79/85/87, Router101/103; клиентский recovery не следует из серверной поставки |
-| Recovery через исходящий connector | Не равен direct: input-recovery request header отфильтровывается; response headers теряются. Полная capability требует transport conformance |
-| Claude native auto-continuation guard, origin/drain/reset, SessionStore | SDK содержит соответствующие возможности/события; Router safety/ledger integration ещё не квалифицирована и требует реализации |
+| Recovery через исходящий connector | Transport/lifecycle conformance поставлен; capabilities всё равно проверяются по точному пути/узлу. Direct qualification не переносится на произвольный connector |
+| Claude native auto-continuation guard, origin/drain/reset, history-only restore | Поставлено и квалифицировано в заявленной области, см. [Claude](CLAUDE-COLD-RESTORE.md); не универсальная гарантия любой конфигурации |
 | Provider retry до dispatch и SDK internal retry observation | Реализовано в соответствующих путях; общая account-group координация не гарантируется |
-| Универсальный coordinator case API, manifest, CAS и client-applied ACK | **Предлагается** этим RFC |
-| Cross-Run stale checkpoint автоматическое закрытие по доказательствам | **Требуется**, Harness502 / Gate87 |
+| Coordinator case API, manifest, CAS и client-applied ACK | Серверный v1 поставлен; клиентский commit/ACK и охват старых checkpoints требуют собственной приёмки |
+| Cross-Run stale checkpoint и обновление всех открытых чатов | Есть клиентские поставки отдельных repair путей; общий startup/upgrade сценарий нескольких старых чатов проверяется отдельно |
+| Same-device auth и opaque history identity repair | Gate24 auth v1 / Gate25 sourceHistoryIdentity v1; нужен понимающий capability клиент. SDK history и инструмент не переисполняются |
 | Terminal safe continuation permit | **Требуется**, Gate77 / Router96 / EDT220 |
-| Stateful durable recovery всех прямых API requests | **Не гарантируется** обычным streaming proxy; нужен adapter ledger/coordinator |
+| Stateful durable recovery прямых API requests | API-attempt ledger/coordinator поставлен; retrieval/cancel и неизвестные upstream outcomes ограничены конкретным протоколом/провайдером |
 | Target-aware late Stop fencing, единый executor effect ledger | Целевой контракт; нельзя объявлять реализованными в legacy endpoints |
 | Автоматическая cross-node/account SDK migration, multi-active Gate HA | Не реализовано; отдельная процедура/проект |
 

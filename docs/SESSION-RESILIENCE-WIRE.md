@@ -1,17 +1,21 @@
-# HTTP-карта recovery: Gate 0.4.20 / Router 0.8.19
+# HTTP-карта recovery: Gate 0.4.25 / Router 0.8.23
 
-Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), сверка кода 03.11.2026.
+Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), актуализация 04.11.2026.
+Текущая поставка Gate **0.4.25** / оба Router **0.8.23** и клиентские границы —
+в [матрице статуса](SESSION-RESILIENCE-STATUS.md). Ниже сохраняется описание
+базовой реализации coordinator v1, дополненной без изменения прежних wire схем.
 Исходная база RFC — Gate **0.4.19** / Router **0.8.18**. Ниже отдельно описан
-поставленный серверный runtime **Gate 0.4.20 / оба Router 0.8.19**. Guard,
+первоначально поставленный coordinator **Gate 0.4.20 / оба Router 0.8.19**. Guard,
 native SDK web и HTTPS postflight завершены; [квитанция поставки](https://github.com/soltyy/atlas-gate/issues/88#issuecomment-6590421898).
-Это подмножество RFC: ограничения Claude cold restore, continuation и клиентской
+Это подмножество RFC: ограничения квалификации Claude cold restore, continuation и клиентской
 локальной транзакции перечислены ниже. Версия или fixture сами по себе не доказывают
 поддержку другого развёрнутого узла: клиент проверяет подписанный профиль и exact case.
 
 Точные request schemas: [OpenAPI wire v1](fixtures/session-recovery-openapi.json).
 Примеры, capability, headers и canonical JSON vectors:
 [session-recovery-v1.json](fixtures/session-recovery-v1.json). В опубликованном
-снимке `6740fca` и текущем коде совпадают 12 recovery/API-attempt путей и 18 схем.
+снимке `6740fca` зафиксированы 12 базовых recovery/API-attempt путей и 18 схем.
+Снимок не является полным OpenAPI последующих additive возможностей Gate25.
 Остальные v1 paths сохраняются в source/OpenAPI и профильных документах.
 
 Gate #88 / Router #104 реализуют серверную часть. Harness #504 / EDT #222 —
@@ -275,9 +279,11 @@ Read/create proof не открывают SDK. History `recorded` означае
 transcript. Lifecycle change делает старый case stale и не разрешает его старый action.
 Native шаги ограничены `resume_transport` / `release_idle_transport` для доказанно
 собственного idle transport, с проверкой pending turns/tools/children/compact/input I/O.
-Cold resume объявлен для Codex/stub; Claude `historyOnlyRestore=false` и
-`noActionRestoreQualified=false`. Для Claude есть origin/drain/reset accounting,
-но это не доказательство безопасного холодного resume без inference.
+Cold resume объявляется по квалифицированному pinned adapter. В первоначальном
+R19 Claude `historyOnlyRestore=false` / `noActionRestoreQualified=false`; эта
+граница обновлена последующей [поставкой Claude cold restore](CLAUDE-COLD-RESTORE.md),
+сохранённой в Router23. Конкретный case и текущая конфигурация по-прежнему могут
+дать unsupported; наличие origin/drain/reset accounting само по себе не proof.
 
 `sdk_writer_busy` и локальный pre-SDK `capacity_exceeded` могут иметь точный
 `rejected_not_sent`, `scope=transport_only`, `retryable=true`. Это отказ transport
@@ -292,3 +298,22 @@ node-token контракт, прямой API без Gate — собственн
 Gate не появляется в этих топологиях автоматически. Cross-account/node/device
 migration, восстановление утраченной SQLite клиента и произвольные внешние effects
 этим серверным кандидатом не реализованы.
+
+## 8. Additive возможности Gate24/25
+
+- [Auth recovery v1](AUTH-RECOVERY97.md): отдельные versioned paths для сохранения
+  прежнего устройства после потери входа. Legacy refresh/enroll не меняют смысл.
+- [Source history identity v1](SOURCE-HISTORY-IDENTITY103.md): подписанный
+  `sessionRecoveryCoordinator.sourceHistoryIdentity`, GET
+  `/harness/agent/sessions/{sid}/history-identity?previousAlias=<opaque-alias>`.
+  Только local read и проверка полномочий; `same_native_history` доказывает
+  resume continuity, не outcome и не право повторить prompt. Клиент применяет
+  узкий CAS с аудитом и затем новую inventory/version/key.
+- [Подтверждённый отказ prompt](RETRY-RECEIPTS.md): полный admission fence после
+  доказанного собственного pre-dispatch отказа; arbitrary503 не становится proof.
+- [Steering v1](STEERING-V1.md): уже поставленный Gate23/Router23 контракт
+  exact-turn accepted/absorbed. Он не является terminal continuation.
+
+Для прямых Router/API клиентов эти Gate additions не появляются автоматически.
+Старые clients не обязаны вызывать новые paths; новые используют их только по
+подписанным capabilities и сохраняют безопасный fallback/typed unsupported.
