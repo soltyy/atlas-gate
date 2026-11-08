@@ -4,6 +4,18 @@ from __future__ import annotations
 import json
 
 METRICS = ("totalInputTokens", "uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens")
+GROUP_COLUMNS = {
+    "device": ("deviceId", "model", "kind"),
+    "user": ("org", "userId"),
+    "model": ("model", "route", "kind"),
+    "user_model": ("org", "userId", "model", "route", "kind"),
+}
+PERIOD_MODIFIERS = {
+    "day": "",
+    "week": ", 'weekday 0', '-6 days'",
+    "month": ", 'start of month'",
+}
+TIMEZONE_OFFSETS = {"msk": "+3 hours", "utc": "+0 hours"}
 
 
 def count(value):
@@ -49,13 +61,15 @@ def sdk_usage(result):
     return detail
 
 
-def usage_report(store, *, since, until, limit=50, before=None, **filters):
+def usage_report(store, *, since, until, limit=50, before=None, group_by="device",
+                 bucket=None, timezone="msk", **filters):
     conditions, values = ["u.ts >= ?", "u.ts < ?"], [since, until]
-    for name, column in (("org", "org"), ("device", "device_id"), ("model", "model"), ("route", "route"), ("kind", "kind")):
+    for name, column in (("org", "org"), ("user", "user_id"), ("device", "device_id"),
+                         ("model", "model"), ("route", "route"), ("kind", "kind")):
         if filters.get(name):
             conditions.append(f"u.{column} = ?")
             values.append(filters[name])
-    select = """SELECT u.rowid AS id, u.ts, u.org, u.device_id AS deviceId,
+    select = """SELECT u.rowid AS id, u.ts, u.org, u.user_id AS userId, u.device_id AS deviceId,
         d.device_name AS deviceName, d.platform, u.model, u.route, u.kind,
         u.session_id AS sessionId, u.model_call AS turnId,
         CASE WHEN a.payload IS NOT NULL THEN json_extract(a.payload,'$.totalInputTokens') ELSE u.prompt_tokens END AS totalInputTokens,
@@ -78,12 +92,37 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
     aggregate += """, COUNT(CASE WHEN totalInputTokens IS NOT NULL AND cacheReadTokens IS NOT NULL THEN 1 END) AS cacheComparableRecords,
         SUM(CASE WHEN cacheReadTokens IS NOT NULL THEN totalInputTokens END) AS cacheComparableInput,
         SUM(CASE WHEN totalInputTokens IS NOT NULL THEN cacheReadTokens END) AS cacheComparableRead"""
+    adjusted = "CASE WHEN cacheReadTokens BETWEEN 0 AND totalInputTokens THEN totalInputTokens - cacheReadTokens + outputTokens END"
+    aggregate += f""", SUM(totalInputTokens + outputTokens) AS totalTokens,
+        COUNT(totalInputTokens + outputTokens) AS totalTokensRecords,
+        SUM({adjusted}) AS cacheAdjustedTokens, COUNT({adjusted}) AS cacheAdjustedTokensRecords"""
+    period = None
+    if bucket:
+        offset = TIMEZONE_OFFSETS[timezone]
+        modifiers = PERIOD_MODIFIERS[bucket]
+        period = f"date(ts, 'unixepoch', '{offset}'{modifiers})"
+    columns = GROUP_COLUMNS[group_by]
+    group_keys = ", ".join(("period", *columns) if period else columns)
+    group_fields = ", ".join(("deviceId", "deviceName", "platform", "model", "kind")
+                             if group_by == "device" else columns)
+    if period:
+        group_fields = f"{period} AS period, {group_fields}"
+    order = "period DESC, totalInputTokens DESC" if period else "totalInputTokens DESC"
     with store._lock:
         db = store._db
         db.execute("BEGIN")
         try:
             summary = dict(db.execute(f"SELECT {aggregate} FROM ({select})", values).fetchone())
-            groups = [dict(row) for row in db.execute(f"SELECT deviceId, deviceName, platform, model, kind, {aggregate} FROM ({select}) GROUP BY deviceId, model, kind ORDER BY totalInputTokens DESC", values)]
+            groups = [dict(row) for row in db.execute(
+                f"SELECT {group_fields}, {aggregate} FROM ({select}) GROUP BY {group_keys} ORDER BY {order}", values)]
+            trend = [dict(row) for row in db.execute(
+                f"SELECT {period} AS period, {aggregate} FROM ({select}) GROUP BY period ORDER BY period", values
+            )] if period else []
+            if group_by != "device":
+                labels = {(row["org"], row["user_id"]): (row["user_name"], row["user_email"])
+                          for row in db.execute("SELECT org,user_id,user_name,user_email FROM devices ORDER BY created_at,device_id")}
+                dimensions = db.execute("""SELECT DISTINCT org, user_id, model, route FROM usage
+                    WHERE ts >= ? AND ts < ?""", (since, until)).fetchall()
             page_values = list(values)
             page = f"SELECT * FROM ({select})"
             if before is not None:
@@ -96,7 +135,7 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
         except BaseException:
             db.execute("ROLLBACK")
             raise
-    for item in [summary, *groups]:
+    for item in [summary, *groups, *trend]:
         denominator = item.pop("cacheComparableInput")
         numerator = item.pop("cacheComparableRead")
         item["cacheReadPercent"] = 100 * numerator / denominator if denominator and numerator is not None else None
@@ -106,4 +145,17 @@ def usage_report(store, *, since, until, limit=50, before=None, **filters):
             row['usageIncomplete'] = bool(row['usageIncomplete'])
         row["modelUsage"] = json.loads(row["modelUsage"]) if row["modelUsage"] else {}
         row['pricingDecision'] = json.loads(row['pricingDecision']) if row['pricingDecision'] else None
-    return {"since": since, "until": until, "summary": summary, "groups": groups, "rows": rows[:limit], "nextBefore": next_before}
+    report = {"since": since, "until": until, "summary": summary, "groups": groups,
+              "rows": rows[:limit], "nextBefore": next_before, "trend": trend}
+    if group_by != "device":
+        for row in [*groups, *rows[:limit]]:
+            if "userId" in row:
+                row["userName"], row["userEmail"] = labels.get((row["org"], row["userId"]), (None, None))
+        people = sorted({(row["org"], row["user_id"]) for row in dimensions})
+        report["options"] = {
+            "users": [{"org": org, "userId": user, "userName": labels.get((org, user), (None, None))[0],
+                       "userEmail": labels.get((org, user), (None, None))[1]} for org, user in people],
+            "models": sorted({row["model"] for row in dimensions if row["model"]}),
+            "routes": sorted({row["route"] for row in dimensions if row["route"]}),
+        }
+    return report

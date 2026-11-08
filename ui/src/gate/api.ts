@@ -93,11 +93,20 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
 export interface UsageMetrics {
   records: number; legacyRecords: number; cacheReadPercent: number | null; cacheComparableRecords: number
+  incompleteRecords: number
+  totalTokens: number | null; totalTokensRecords: number
+  cacheAdjustedTokens: number | null; cacheAdjustedTokensRecords: number
   totalInputTokens: number | null; totalInputTokensRecords: number
   uncachedInputTokens: number | null; uncachedInputTokensRecords: number
   cacheReadTokens: number | null; cacheReadTokensRecords: number
   cacheWriteTokens: number | null; cacheWriteTokensRecords: number
   outputTokens: number | null; outputTokensRecords: number
+}
+export interface UsageUser {
+  org: string; userId: string; userName: string | null; userEmail: string | null
+}
+export type UsageGroup = UsageMetrics & Partial<UsageUser> & {
+  period?: string; model?: string; route?: string | null; kind?: string
 }
 export interface UsageRow {
   id: number; ts: number; org: string; deviceId: string; deviceName: string | null; platform: string | null
@@ -105,10 +114,13 @@ export interface UsageRow {
   totalInputTokens: number | null; uncachedInputTokens: number | null; cacheReadTokens: number | null
   cacheWriteTokens: number | null; outputTokens: number | null; durationMs: number | null
   source: string; status: string; modelUsage: Record<string, Record<string, number | null>>
+  userId: string; userName?: string | null; userEmail?: string | null
 }
 export interface UsageReport {
   since: number; until: number; summary: UsageMetrics
-  groups: (UsageMetrics & { deviceId: string; deviceName: string | null; platform: string | null; model: string; kind: string })[]
+  groups: UsageGroup[]
+  trend: (UsageMetrics & { period: string })[]
+  options?: { users: UsageUser[]; models: string[]; routes: string[] }
   rows: UsageRow[]; nextBefore: number | null
 }
 export const gateApi = {

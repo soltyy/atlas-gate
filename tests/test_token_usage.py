@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +74,40 @@ def test_legacy_unknown_coverage_and_filters(tmp_path):
     assert report(store, device="other")["rows"] == []
     assert report(store, kind="gateway")["rows"] == []
     store.close()
+
+
+def test_user_model_trend_merges_devices_and_respects_calendar_and_cache(tmp_path):
+    store = Store(str(tmp_path / "usage.db"))
+    sunday = datetime.fromisoformat("2026-11-01T20:59:59+00:00").timestamp()
+    monday_msk = sunday + 1
+    try:
+        for device, ts, cache, org in (
+            ("laptop", sunday, 50, "first"),
+            ("laptop", monday_msk, 60, "first"),
+            ("desktop", monday_msk + 1, 0, "first"),
+            ("other-org", monday_msk, 40, "second"),
+        ):
+            store.usage_add(org=org, device_id=device, user_id="same-user", kind="gateway",
+                            model="model", route="api", prompt_tokens=100, completion_tokens=10,
+                            cached_tokens=cache)
+            store._exec("UPDATE usage SET ts=? WHERE rowid=(SELECT max(rowid) FROM usage)", (ts,))
+        interval = {"since": sunday - 86400, "until": monday_msk + 60}
+        weekly = usage_report(store, **interval, group_by="user_model", bucket="week")
+        assert [(g["period"], g["org"], g["records"]) for g in weekly["groups"]] == [
+            ("2026-11-02", "first", 2), ("2026-11-02", "second", 1), ("2026-10-26", "first", 1)]
+        group = weekly["groups"][0]
+        assert group["userId"] == "same-user" and group["model"] == "model"
+        assert group["totalTokens"] == 220 and group["totalTokensRecords"] == 2
+        assert group["cacheAdjustedTokens"] == 50 and group["cacheAdjustedTokensRecords"] == 1
+        assert [(p["period"], p["totalTokens"]) for p in weekly["trend"]] == [
+            ("2026-10-26", 110), ("2026-11-02", 330)]
+        daily = usage_report(store, **interval, group_by="user", bucket="day", timezone="utc",
+                             org="first", user="same-user")
+        assert daily["groups"][0]["period"] == "2026-11-01"
+        assert daily["groups"][0]["records"] == 3
+        assert daily["summary"]["cacheAdjustedTokens"] == 110
+    finally:
+        store.close()
 
 
 def test_receipt_and_details_are_one_transaction(tmp_path):
@@ -164,5 +199,9 @@ async def test_admin_api_authorization_validation_and_filters(configured):
     data = (await http.get('/harness/admin/usage?model=gpt-6.1-sol', headers=admin)).json()
     assert data['summary']['records'] == 1 and data['summary']['cacheReadTokens'] == 0
     assert (await http.get('/harness/admin/usage?model=other', headers=admin)).json()['rows'] == []
-    for query in ('since=4&until=3', 'since=nan', 'until=inf', 'limit=0', 'limit=201', 'before=-1'):
+    people = (await http.get('/harness/admin/usage?group_by=user&bucket=day&user=user', headers=admin)).json()
+    assert people['groups'][0]['userId'] == 'user' and people['groups'][0]['cacheAdjustedTokens'] == 1
+    assert people['trend'][0]['totalTokens'] == 1
+    for query in ('since=4&until=3', 'since=nan', 'until=inf', 'limit=0', 'limit=201', 'before=-1',
+                  'group_by=bad', 'bucket=bad', 'timezone=bad'):
         assert (await http.get('/harness/admin/usage?' + query, headers=admin)).status_code in (400, 422)
