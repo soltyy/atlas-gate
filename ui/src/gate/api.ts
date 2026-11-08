@@ -73,8 +73,8 @@ export interface NewNode {
 }
 export interface NodeEnrollment { id: string; node_id: string; fingerprint: string; expires: number }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
+async function request(method: string, path: string, body?: unknown, accept = 'application/json'): Promise<Response> {
+  const headers: Record<string, string> = { Accept: accept }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   const token = adminToken()
   if (token) headers['X-Atlas-Token'] = token
@@ -83,12 +83,16 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const data = await res.json().catch(() => ({}))
   if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
     const message = data?.error?.message ?? `HTTP ${res.status}`
     throw new Error(message)
   }
-  return data as T
+  return res
+}
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await request(method, path, body)).json().catch(() => ({})) as Promise<T>
 }
 
 export interface UsageMetrics {
@@ -125,6 +129,8 @@ export interface UsageReport {
 }
 export const gateApi = {
   usage: (params: URLSearchParams) => call<UsageReport>('GET', `/harness/admin/usage?${params}`),
+  usageExcel: async (params: URLSearchParams) => (await request('GET', `/harness/admin/usage.xlsx?${params}`,
+    undefined, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')).blob(),
   nodeOptions: () => call<NodeOptions>('GET', '/harness/admin/node-options'),
   nodeAdd: (body: NewNode) => call<{ node_id: string; status: RouterNode['status'] }>('POST', '/harness/admin/nodes', body),
   nodes: () => call<{ nodes: RouterNode[] }>('GET', '/harness/admin/nodes'),

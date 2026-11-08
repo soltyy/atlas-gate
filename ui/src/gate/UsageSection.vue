@@ -5,9 +5,11 @@ import { gateApi, type UsageGroup, type UsageReport, type UsageUser } from './ap
 const report = ref<UsageReport | null>(null)
 const error = ref('')
 const busy = ref(false)
+const exporting = ref(false)
 const filters = reactive({ preset: '7', from: '', to: '', timezone: 'msk', bucket: 'day',
   group: 'user_model', org: '', user: '', model: '', route: '', device: '', kind: '' })
 let applied: URLSearchParams | null = null
+let appliedFilters = ''
 const shown = ref({ timezone: 'msk', bucket: 'day', group: 'user_model' })
 const offsets: Record<string, number> = { msk: 10800, utc: 0 }
 const users = computed(() => (report.value?.options?.users ?? []).filter(u => !filters.org || u.org === filters.org))
@@ -54,47 +56,67 @@ function delta(index: number, key: 'totalTokens' | 'cacheAdjustedTokens') {
   const diff = curr[key] - prev[key]
   return diff > 0 ? `+${number(diff)}` : number(diff)
 }
-async function load(more = false) {
-  if (busy.value) return
-  error.value = ''
-  const params = new URLSearchParams(more && applied ? applied : undefined)
-  if (!more) {
-    const since = dateSeconds(filters.from)
-    const until = Math.min(dateSeconds(filters.to) + 86400, Date.now() / 1000)
-    if (!Number.isFinite(since) || !Number.isFinite(until) || since >= until) {
-      error.value = 'Укажите корректный диапазон дат.'
-      return
-    }
-    params.set('since', String(since))
-    params.set('until', String(until))
-    params.set('group_by', filters.group)
-    params.set('timezone', filters.timezone)
-    if (filters.bucket) params.set('bucket', filters.bucket)
-    for (const key of ['org', 'device', 'model', 'route', 'kind'] as const) {
-      if (filters[key].trim()) params.set(key, filters[key].trim())
-    }
-    if (filters.user) {
-      const [org, user] = JSON.parse(filters.user) as [string, string]
-      params.set('org', org)
-      params.set('user', user)
-    }
-  } else if (report.value?.nextBefore) {
-    params.set('before', String(report.value.nextBefore))
+function selectedParams() {
+  const since = dateSeconds(filters.from)
+  const until = Math.min(dateSeconds(filters.to) + 86400, Date.now() / 1000)
+  if (!Number.isFinite(since) || !Number.isFinite(until) || since >= until) {
+    throw new Error('Укажите корректный диапазон дат.')
   }
+  const params = new URLSearchParams({ since: String(since), until: String(until),
+    group_by: filters.group, timezone: filters.timezone })
+  if (filters.bucket) params.set('bucket', filters.bucket)
+  for (const key of ['org', 'device', 'model', 'route', 'kind'] as const) {
+    if (filters[key].trim()) params.set(key, filters[key].trim())
+  }
+  if (filters.user) {
+    const [org, user] = JSON.parse(filters.user) as [string, string]
+    params.set('org', org)
+    params.set('user', user)
+  }
+  return params
+}
+async function load(more = false) {
+  if (busy.value || exporting.value) return
+  error.value = ''
   busy.value = true
   try {
+    const selection = JSON.stringify(filters)
+    const params = more && applied ? new URLSearchParams(applied) : selectedParams()
+    if (more && report.value?.nextBefore) params.set('before', String(report.value.nextBefore))
     const result = await gateApi.usage(params)
     if (more && report.value) {
       report.value = { ...report.value, rows: [...report.value.rows, ...result.rows], nextBefore: result.nextBefore }
     } else {
       report.value = result
       applied = params
+      appliedFilters = selection
       shown.value = { timezone: params.get('timezone')!, bucket: params.get('bucket') ?? '', group: params.get('group_by')! }
     }
   } catch (e) {
     error.value = (e as Error).message
   } finally {
     busy.value = false
+  }
+}
+async function exportExcel() {
+  if (busy.value || exporting.value) return
+  exporting.value = true
+  error.value = ''
+  try {
+    const params = applied && appliedFilters === JSON.stringify(filters) ? applied : selectedParams()
+    const blob = await gateApi.usageExcel(params)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `atlas-usage-${filters.from}_${filters.to}.xlsx`
+    document.body.append(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    exporting.value = false
   }
 }
 applyPreset()
@@ -106,7 +128,7 @@ onMounted(() => void load())
     <h2>Статистика моделей и пользователей</h2>
     <p>Расход с разных устройств объединяется по пользователю в организации. Модель указана по маршруту хода или API-запроса.</p>
     <form @submit.prevent="load()">
-      <fieldset class="filters" :disabled="busy">
+      <fieldset class="filters" :disabled="busy || exporting">
         <label>Период <select v-model="filters.preset" @change="applyPreset"><option value="7">7 дней</option><option value="30">30 дней</option><option value="90">90 дней</option><option value="custom">Свой диапазон</option></select></label>
         <label>С <input v-model="filters.from" type="date" required @change="filters.preset = 'custom'" /></label>
         <label>По <input v-model="filters.to" type="date" required @change="filters.preset = 'custom'" /></label>
@@ -121,12 +143,13 @@ onMounted(() => void load())
         <label>Модель <input id="usage-model" v-model="filters.model" list="usage-models" placeholder="Все" /></label>
         <label>Маршрут <input v-model="filters.route" list="usage-routes" placeholder="Все" /></label>
         <button :disabled="busy">Обновить</button>
+        <button type="button" @click="exportExcel">{{ exporting ? 'Подготовка Excel…' : 'Скачать Excel' }}</button>
       </fieldset>
       <datalist id="usage-orgs"><option v-for="org in organizations" :key="org" :value="org" /></datalist>
       <datalist id="usage-models"><option v-for="model in report?.options?.models" :key="model" :value="model" /></datalist>
       <datalist id="usage-routes"><option v-for="route in report?.options?.routes" :key="route" :value="route" /></datalist>
       <details class="extra-filters"><summary>Дополнительные фильтры</summary>
-        <fieldset class="filters" :disabled="busy">
+        <fieldset class="filters" :disabled="busy || exporting">
           <label>Устройство (ID) <input v-model="filters.device" placeholder="Все" /></label>
           <label>Тип <select v-model="filters.kind"><option value="">Все</option><option value="agent">Подписка</option><option value="gateway">API</option></select></label>
         </fieldset>
@@ -179,7 +202,7 @@ onMounted(() => void load())
       <div v-if="report.rows.length" class="table-wrap"><table><thead><tr><th>Время</th><th>Пользователь / модель</th><th>Вход</th><th>Вне кеша</th><th>Кеш: чтение / запись</th><th>Выход</th><th>SDK, с</th><th>Подробности</th></tr></thead><tbody>
         <tr v-for="row in report.rows" :key="row.id"><td>{{ time(row.ts) }}</td><td>{{ userLabel(row) }}<small>{{ row.model }} · {{ row.route }}</small></td><td>{{ number(row.totalInputTokens) }}</td><td>{{ number(row.uncachedInputTokens) }}</td><td>{{ number(row.cacheReadTokens) }} / {{ number(row.cacheWriteTokens) }}<small v-if="row.source === 'router-sdk' && row.cacheReadTokens === 0">Без чтения кеша</small></td><td>{{ number(row.outputTokens) }}</td><td>{{ row.durationMs == null ? 'нет данных' : (row.durationMs / 1000).toFixed(1) }}</td><td><details><summary>{{ row.source === 'legacy' ? 'Без детализации SDK' : row.status === 'success' ? 'Успешно' : row.status === 'failed' ? 'Ошибка' : 'Статус неизвестен' }}</summary><p>Сессия: {{ row.sessionId || '—' }}<br />Ход: {{ row.turnId || '—' }}<br />Устройство: {{ row.deviceName || row.deviceId }}</p><p v-if="Object.keys(row.modelUsage).length">Разбивка SDK по моделям входит в итог.</p><pre v-if="Object.keys(row.modelUsage).length">{{ row.modelUsage }}</pre></details></td></tr>
       </tbody></table></div>
-      <button v-if="report.nextBefore" :disabled="busy" @click="load(true)">Показать ещё</button>
+      <button v-if="report.nextBefore" :disabled="busy || exporting" @click="load(true)">Показать ещё</button>
     </template>
   </section>
 </template>

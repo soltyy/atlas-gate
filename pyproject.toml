@@ -1,10 +1,18 @@
 [project]
 name = "atlas-gate"
-version = "0.4.26"
+version = "0.4.27"
 description = "Централизованный доступ к распределённым Atlas Router"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["fastapi>=0.115", "httpx>=0.28.1", "pydantic-settings>=2.15.0", "pyjwt[crypto]>=2.14.0", "sse-starlette>=3.4.11", "uvicorn[standard]>=0.53.0"]
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.15.0",
+    "pyjwt[crypto]>=2.14.0",
+    "sse-starlette>=3.4.11",
+    "uvicorn[standard]>=0.53.0",
+    "xlsxwriter>=3.2,<4",
+]
 
 [project.scripts]
 atlas-gate = "atlas_gate.main:main"
