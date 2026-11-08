@@ -171,13 +171,14 @@ onMounted(() => void load())
       <template v-if="report.trend?.length">
         <h3>Динамика</h3>
         <p>Δ к предыдущему полному календарному интервалу с измерениями по всем записям. Неполные периоды помечены.</p>
-        <div class="table-wrap"><table><thead><tr><th>Начало интервала</th><th>Все токены</th><th>Δ</th><th>За вычетом чтения из кеша</th><th>Δ</th></tr></thead><tbody>
+        <div class="table-wrap"><table aria-label="Динамика расхода"><thead><tr><th>Начало интервала</th><th>Все токены</th><th>Δ</th><th>За вычетом чтения из кеша</th><th>Δ</th><th>Чтение из кеша, % входа</th></tr></thead><tbody>
           <tr v-for="(p, i) in report.trend" :key="p.period">
             <td>{{ p.period }}<small v-if="!fullPeriod(p.period)">Неполный период</small></td>
             <td>{{ number(p.totalTokens) }}<div v-if="p.totalTokens != null" class="bar" aria-hidden="true" :style="{ width: (p.totalTokens / chartMax * 100) + '%' }" /></td>
             <td>{{ delta(i, 'totalTokens') }}</td>
             <td>{{ number(p.cacheAdjustedTokens) }}<small>{{ p.cacheAdjustedTokensRecords }} / {{ p.records }} записей</small><div v-if="p.cacheAdjustedTokens != null" class="bar adjusted" aria-hidden="true" :style="{ width: (p.cacheAdjustedTokens / chartMax * 100) + '%' }" /></td>
             <td>{{ delta(i, 'cacheAdjustedTokens') }}</td>
+            <td>{{ percent(p.cacheReadPercent) }}<small v-if="p.cacheComparableRecords < p.records">{{ p.cacheComparableRecords }} / {{ p.records }} записей</small></td>
           </tr>
         </tbody></table></div>
       </template>
