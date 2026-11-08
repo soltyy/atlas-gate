@@ -10,7 +10,11 @@ it('показывает ноль отдельно от неизвестного
   sessionStorage.setItem('atlas.gate.adminToken', 'admin')
   const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({
     since: 1, until: 2, summary, groups: [{ ...summary, ...user, model: 'gpt-6.1-sol', kind: 'agent' }],
-    rows: [row], trend: [], options: { users: [user], models: ['gpt-6.1-sol'], routes: ['sub'] }, nextBefore: 2,
+    rows: [row], trend: [
+      { ...summary, period: '2026-11-02' },
+      { ...summary, period: '2026-11-03', cacheReadPercent: 85.2, cacheComparableRecords: 2 },
+      { ...summary, period: '2026-11-04', cacheReadPercent: null, cacheComparableRecords: 0 },
+    ], options: { users: [user], models: ['gpt-6.1-sol'], routes: ['sub'] }, nextBefore: 2,
   }))
   vi.stubGlobal('fetch', fetcher)
   const w = mount(UsageSection); await flush()
@@ -20,6 +24,11 @@ it('показывает ноль отдельно от неизвестного
   expect(w.text()).toContain('Записей без детализации SDK: 1')
   expect(w.text()).toContain('Алексей')
   expect(w.text()).toContain('За вычетом чтения из кеша')
+  const trend = w.get('table[aria-label="Динамика расхода"]')
+  expect(trend.get('thead th:last-child').text()).toBe('Чтение из кеша, % входа')
+  expect(trend.findAll('tbody tr').map(tr => tr.get('td:last-child').text())).toEqual([
+    '0.0 %1 / 2 записей', '85.2 %', 'нет данных0 / 2 записей',
+  ])
   const params = new URL(fetcher.mock.calls[0][0] as string, 'http://localhost').searchParams
   await w.findAll('button').find(b => b.text() === 'Показать ещё')!.trigger('click'); await flush()
   const second = new URL(fetcher.mock.calls[1][0] as string, 'http://localhost').searchParams
