@@ -41,3 +41,31 @@ it('отображает отказ API и позволяет повторить
   expect(w.find('[role=alert]').text()).toBe('Нет доступа')
   expect(w.find('button').attributes('disabled')).toBeUndefined()
 })
+
+it('выгружает выбранные фильтры без курсора пагинации', async () => {
+  sessionStorage.setItem('atlas.gate.adminToken', 'admin')
+  const fetcher = vi.fn(async (url: string, _init?: RequestInit) => url.includes('usage.xlsx')
+    ? new Response(new Blob(['xlsx']))
+    : jsonResponse({ since: 1, until: 2, summary, groups: [], rows: [row], trend: [], nextBefore: 2 }))
+  vi.stubGlobal('fetch', fetcher)
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL() { return 'blob:usage' }
+    static revokeObjectURL() {}
+  })
+  const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  try {
+    const w = mount(UsageSection); await flush()
+    await w.get('#usage-model').setValue('opus')
+    await w.findAll('button').find(b => b.text() === 'Скачать Excel')!.trigger('click')
+    await flush()
+    const call = fetcher.mock.calls.find(([url]) => url.includes('usage.xlsx'))!
+    const query = new URL(call[0], 'http://localhost').searchParams
+    expect(query.get('model')).toBe('opus')
+    expect(query.get('group_by')).toBe('user_model')
+    expect(query.has('before')).toBe(false)
+    expect(call[1]?.headers).toMatchObject({ 'X-Atlas-Token': 'admin' })
+    expect(clicked).toHaveBeenCalledOnce()
+  } finally {
+    clicked.mockRestore()
+  }
+})

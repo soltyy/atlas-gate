@@ -128,8 +128,10 @@ def usage_report(store, *, since, until, limit=50, before=None, group_by="device
             if before is not None:
                 page += " WHERE id < ?"
                 page_values.append(before)
-            page += " ORDER BY id DESC LIMIT ?"
-            page_values.append(limit + 1)
+            page += " ORDER BY id DESC"
+            if limit is not None:
+                page += " LIMIT ?"
+                page_values.append(limit + 1)
             rows = [dict(row) for row in db.execute(page, page_values)]
             db.execute("COMMIT")
         except BaseException:
@@ -139,7 +141,7 @@ def usage_report(store, *, since, until, limit=50, before=None, group_by="device
         denominator = item.pop("cacheComparableInput")
         numerator = item.pop("cacheComparableRead")
         item["cacheReadPercent"] = 100 * numerator / denominator if denominator and numerator is not None else None
-    next_before = rows[limit - 1]["id"] if len(rows) > limit else None
+    next_before = rows[limit - 1]["id"] if limit is not None and len(rows) > limit else None
     for row in rows[:limit]:
         if row['usageIncomplete'] is not None:
             row['usageIncomplete'] = bool(row['usageIncomplete'])
