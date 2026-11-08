@@ -717,7 +717,10 @@ async def admin_usage(request: Request, since: float | None = Query(default=None
                       limit: int = Query(default=50, ge=1, le=200),
                       before: int | None = Query(default=None, ge=1),
                       org: str | None = None, device: str | None = None, model: str | None = None,
-                      route: str | None = None, kind: str | None = None):
+                      route: str | None = None, kind: str | None = None, user: str | None = None,
+                      group_by: Literal["device", "user", "model", "user_model"] = "device",
+                      bucket: Literal["day", "week", "month"] | None = None,
+                      timezone: Literal["msk", "utc"] = "msk"):
     from .token_usage import usage_report
     end = until if until is not None else time.time()
     start = since if since is not None else max(0, end - 86400)
@@ -725,7 +728,8 @@ async def admin_usage(request: Request, since: float | None = Query(default=None
         raise GateError(400, "invalid_range", "начало периода должно предшествовать концу")
     state = await ready_gate(request)
     return usage_report(state.store, since=start, until=end, limit=limit, before=before,
-                        org=org, device=device, model=model, route=route, kind=kind)
+                        org=org, device=device, model=model, route=route, kind=kind, user=user,
+                        group_by=group_by, bucket=bucket, timezone=timezone)
 
 
 @router.get("/harness/admin/devices", dependencies=admin)
