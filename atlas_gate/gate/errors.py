@@ -39,9 +39,11 @@ class GateFreshNodeError(GateError):
     A provider/relay error body or another GateError with the same public code
     cannot establish this fact. Never construct this from an HTTP response.
     """
-    def __init__(self, message: str, *, node_id: str, method: str, path: str, reason: str) -> None:
+    def __init__(self, message: str, *, node_id: str, method: str, path: str, reason: str,
+                 retryable: bool = False) -> None:
         super().__init__(503, 'node_unavailable', message, node_id=node_id)
         self.node_id, self.method, self.path, self.reason = node_id, method, path, reason
+        self.retryable = retryable
 
 
 def error_body(code: str, message: str, **extra: Any) -> dict[str, Any]:

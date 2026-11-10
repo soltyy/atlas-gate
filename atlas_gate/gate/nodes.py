@@ -88,6 +88,7 @@ class Nodes:
         self._probe_locks = {n.node_id: asyncio.Lock() for n in nodes}
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
+        self._retryable_probes: set[str] = set()
         self.cooldown: dict[str, float] = {}
         self.quota_seen: dict[str, float] = {}
         self.store = store
@@ -109,6 +110,7 @@ class Nodes:
             return await self._probe(node_id)
 
     async def _probe(self, node_id: str) -> dict | None:
+        self._retryable_probes.discard(node_id)
         if self.revoked(node_id):
             self.snapshots.pop(node_id, None)
             return None
@@ -123,6 +125,7 @@ class Nodes:
         if self.config[node_id].transport == "connector" and time.monotonic() - getattr(client.channel, "last_poll", {}).get(node_id, 0) > 60:
             self.snapshots.pop(node_id, None)
             self.probe_errors[node_id] = "Ожидается исходящее подключение. Выполните регистрацию, одобрите заявку и запустите atlas-node run."
+            self._retryable_probes.add(node_id)
             return None
         try:
             response = await self.clients[node_id].get("/v1/node")
@@ -151,6 +154,10 @@ class Nodes:
                     self.store._exec("INSERT INTO router_catalogs VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET models=excluded.models", (node_id, json.dumps(info["models"])))
             return self.snapshots[node_id]
         except (httpx.HTTPError, ValueError, TypeError, KeyError, GateError) as failed:
+            if (isinstance(failed, httpx.TransportError)
+                    or isinstance(failed, httpx.HTTPStatusError) and failed.response.status_code in (502, 503, 504)
+                    or isinstance(failed, GateError) and failed.code == "node_unavailable"):
+                self._retryable_probes.add(node_id)
             self.probe_errors[node_id] = (
                 "Router отверг ключ доступа. Проверьте ATLAS_TOKEN." if isinstance(failed, httpx.HTTPStatusError) and failed.response.status_code in (401, 403)
                 else "Не удалось связаться с Router. Проверьте адрес, TLS и доступность с машины Gate." if isinstance(failed, httpx.HTTPError)
@@ -171,7 +178,8 @@ class Nodes:
             info = await self.probe(node_id)
         if info is None:
             raise GateFreshNodeError('идентичность Router не подтверждена', node_id=node_id,
-                                     method=method, path=path, reason='identity_unconfirmed')
+                                     method=method, path=path, reason='identity_unconfirmed',
+                                     retryable=node_id in self._retryable_probes)
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
         steering_probe = (method == 'GET' and path.endswith('/sdk-tools')

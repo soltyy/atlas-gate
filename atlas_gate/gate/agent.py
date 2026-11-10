@@ -119,11 +119,32 @@ async def _events(state, binding, turn, device, after=0, wait=0):
     return response, doc
 
 
+async def _follow_event_page(state, binding, turn, device, after):
+    """Retry only observation of the accepted turn, at the same cursor."""
+    delay = 0.25
+    while True:
+        try:
+            response, doc = await _events(state, binding, turn, device, after, 1000)
+        except GateError as failed:
+            if failed.code != "node_unavailable" or (
+                    isinstance(failed, GateFreshNodeError) and not failed.retryable):
+                raise
+            reason = failed.code
+        else:
+            if response.status_code not in (502, 503, 504):
+                return response, doc
+            reason = f"HTTP {response.status_code}"
+        if delay == 0.25:
+            log.warning("Чтение событий Router прервано: turn=%s after=%s reason=%s", turn, after, reason)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 5)
+
+
 async def _watch(state, binding, turn, device):
     after = 0
     try:
         for _ in range(3600):
-            _, doc = await _events(state, binding, turn, device, after, 1000)
+            _, doc = await _follow_event_page(state, binding, turn, device, after)
             if doc is None:
                 return
             after = doc.get("nextAfter", after)
@@ -223,7 +244,7 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
         after = 0
         try:
             while True:
-                _, doc = await _events(state, binding, body.id, device, after, 1000)
+                _, doc = await _follow_event_page(state, binding, body.id, device, after)
                 if doc is None:
                     yield {"data": json.dumps({"type": "error", "id": body.id, "kind": "session_suspended", "message": "события Router недоступны"})}
                     return
