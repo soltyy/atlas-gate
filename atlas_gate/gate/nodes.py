@@ -168,7 +168,8 @@ class Nodes:
     async def refresh(self):
         await asyncio.gather(*(self.probe(n.node_id) for n in self.config.values() if n.enabled))
 
-    async def request(self, node_id: str, method: str, path: str, *, content=b"", params=None, expected_boot=None, request_id=None):
+    async def request(self, node_id: str, method: str, path: str, *, content=b"", params=None,
+                      expected_boot=None, request_id=None, tool_result_turn=None):
         node = self.config.get(node_id)
         if node is None or not node.enabled or self.revoked(node_id):
             raise GateFreshNodeError('Router не подключён', node_id=node_id, method=method,
@@ -197,6 +198,8 @@ class Nodes:
             headers["X-Atlas-Input-Recovery"] = "1"
         if request_id:
             headers["Idempotency-Key"] = request_id
+        if tool_result_turn is not None:
+            headers["X-Atlas-Tool-Result-Turn"] = tool_result_turn
         try:
             options = {"timeout": httpx.Timeout(connect=5, read=None, write=70, pool=5)} if path.endswith("/compact") and self.config[node_id].transport != 'connector' else {}
             response = await self.clients[node_id].request(method, path, content=content,

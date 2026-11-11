@@ -234,6 +234,13 @@ class GateState:
                     'resolvePath': '/harness/agent/sessions/{sessionId}/commands/reconcile',
                     'canonicalBody': 'json-sort-keys-compact-utf8-v1', 'lateAdmissionBlocked': True,
                     'requiresNewIntent': True}
+                body['toolResultRecovery'] = {
+                    'version': 1,
+                    'statusPath': '/harness/agent/sessions/{sessionId}/turns/{turnId}/tool-result-recovery',
+                    'turnStatusPath': '/harness/agent/sessions/{sessionId}/turns/{turnId}',
+                    'retryTurnHeader': 'X-Atlas-Tool-Result-Turn',
+                    'canonicalBody': 'json-sort-keys-compact-utf8-v1',
+                }
                 from .recovery import CAPABILITY as RECOVERY_CAPABILITY
                 from .api_attempts import api_attempt_contract
                 body['sessionRecoveryCoordinator'] = dict(RECOVERY_CAPABILITY)
