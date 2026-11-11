@@ -1,6 +1,6 @@
 # Приёмка контракта восстановления
 
-Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), редакция 1; актуализация 04.11.2026.
+Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), редакция 1. Актуализация 11.11.2026.
 **План и критерии проверок. Таблицы не означают, что все сценарии уже проверены.**
 Поставленная часть и квалификация отмечены в [матрице статуса](SESSION-RESILIENCE-STATUS.md).
 
@@ -15,6 +15,7 @@
 | API-adapter | A07, A31–A38, A52–A55 **только для изменённого endpoint/provider** | Предположение, что OpenAI mock проверил Anthropic/DeepSeek; SDK-only compact/auth тесты неизменённого API adapter |
 | Connector/protocol forwarding | A06–A08, A45, A56; direct/connector сравнение exact path/status/body/headers | SDK/model генерацию, когда меняется только header relay |
 | Startup/обновление клиента и восстановление открытых чатов | A57: реальные старый/новый JAR, разные JVM и один workspace, несколько damaged и healthy sources | Production prompt/tools, изменение серверного runtime ради клиентского upgrade-теста |
+| Чтение событий, активные callbacks и сохранённый tool_result | A58–A60 по затронутой границе. Для wire — mixed versions и старый HTTP формат | Перезапуск служб, рабочие prompt/tools, массовые прогоны provider inference |
 | Executor effect ledger | A10–A14, A28–A30, A43; внешний контролируемый counter/read-back | Повтор настоящего письма/платежа/удаления ради smoke test |
 | Хранение/restore/deploy | A21–A24, A40–A46; guard-required qualification | Нагрузочную «пробу» в пользовательской истории |
 
@@ -181,7 +182,30 @@ A57 не означает готовности каждого backend/OS или 
 Ни открытие нового пустого тестового чата, ни thread/read без успешного client apply
 не закрывают эту приёмку. Read-only проверка истории полезна, но её предел надо назвать.
 
-## 9. Форма отчёта поставки
+## 9. Чтение после обрыва и восстановление tool_result
+
+| ID | Сценарий | Проверяемый исход |
+|---|---|---|
+| A58 | Временный обрыв Gate→Router после применённого события | Тот же turn/after. Сохранённый terminal дочитывается. Один допущенный prompt и одна запись usage. Постоянный запрет доступа передаётся клиенту |
+| A59 | Потеря доставки до и после приёма Router, параллельный callback, гонка Stop, старый Router или смена boot | При доказанном ожидании передаётся тот же key/body. После приёма применяется ACK. Недостаток доказательств оставляет сверку. Один приём на callId, один terminal/usage |
+| A60 | Истечение Gate access в ходе, Stop во время ротации, перезапуск EDT с сохранённым ledger | Сохраняются identity, cursor и payload. Проверяются active auth, исходные pending callbacks, отсутствие повторного исполнения уже заявленного эффекта и поздней доставки после Stop |
+
+### Квитанция Gate 0.4.31 / Router 0.8.24, 11.11.2026
+
+- A58 проверен на Gate 0.4.29: обрыв и HTTP 503 вводились на стенде. На действующем
+  Claude проверены SSE и terminal с одним usage. [Gate #115](https://github.com/soltyy/atlas-gate/issues/115#issuecomment-6772581737)
+- Установленные wheel Gate 0.4.31 и Router 0.8.24 прошли 22 целевых теста Linux
+  с тестовым SDK. Отдельно прошли 9 проверок Gate 0.4.31 с Router 0.8.23 на Windows.
+  Router CI проверил Linux suite, установленный transport на Linux/Windows и
+  ingress rollback. На действующих Codex и Claude через direct проверены
+  подписанный профиль, ожидающий callback, ACK, terminal и один usage на ход.
+  Диагностические сессии закрыты, устройство отозвано. Обрыв и Stop race
+  проверялись на стенде. [Gate #119](https://github.com/soltyy/atlas-gate/issues/119) · [Router #115](https://github.com/soltyy/atlas-router/issues/115)
+- Gate 0.4.30 и выпущенный EDT прошли сверку после Stop с закрытием сохранённых
+  checkpoint. Выпуск EDT 202611111927 проверил A60 на изолированном стенде
+  с обновлением с 202611111729. [Gate #117](https://github.com/soltyy/atlas-gate/issues/117) · [EDT #236](https://github.com/soltyy/edt-llm-agent-extension/issues/236)
+
+## 10. Форма отчёта поставки
 
 Отчёт содержит commit/version всех изменённых компонентов, exact SDK/API версии,
 advertised и реально квалифицированные возможности, выбранные A-ID, результаты,
