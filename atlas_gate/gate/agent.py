@@ -442,7 +442,7 @@ def _tool_result_pending(op):
                      command_id=op["id"])
 
 
-async def _deliver_operation(state, binding, op, fresh, raw, params):
+async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_result_turn=None):
     """Сверка ACK и повтор только с доказательством прежнего boot + durable dedup (#50/#60)."""
     import httpx
 
@@ -477,9 +477,15 @@ async def _deliver_operation(state, binding, op, fresh, raw, params):
                         or binding["boot_id"] != op["boot_id"]
                         or "durable_commands" not in info.get("capabilities", [])):
                     raise _tool_result_pending(op)
+                if tool_result_turn is not None:
+                    proof = await _tool_recovery_state(state, binding, op, tool_result_turn, json.loads(raw)["callId"])
+                    if not (proof and proof.get("waiting") is True and proof.get("retryAllowed") is True
+                            and proof.get("commandState") == "missing"):
+                        raise _tool_result_pending(op)
+            extra = {"tool_result_turn": tool_result_turn} if tool_result_turn is not None else {}
             response = await state.nodes.request(
                 binding["node_id"], op['method'], op["path"], content=raw, params=params,
-                expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"])
+                expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"], **extra)
         except GateError as failed:
             if fresh and isinstance(failed, GateFreshNodeError):
                 # Nodes проверил identity/доступность ДО отправки. Это известный
@@ -574,7 +580,94 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
 
 @router.post("/harness/agent/sessions/{sid}/tool_result")
 async def agent_tool_result(sid: str, body: ToolResultRequest, request: Request, device: Device = Depends(require_device)):
+    turn_id = request.headers.get("x-atlas-tool-result-turn")
+    if turn_id is not None:
+        state = gate(request)
+        binding = state.routing.get(sid, device)
+        _policy(state, device, binding, request, require_model=False)
+        key = f"tool-result:{sid}:{body.callId}"
+        if request.headers.get("idempotency-key") != key or request.query_params:
+            raise GateError(409, "tool_result_recovery_mismatch", "Требуется исходный ключ результата")
+        raw = await request.body()
+        op = _original_tool_operation(state, device, binding, turn_id, body.callId, body_sha256(json.loads(raw)))
+        if op is None:
+            raise GateError(404, "not_found", "Исходная доставка не найдена")
+        try:
+            proof = await _tool_recovery_state(state, binding, op, turn_id, body.callId)
+        except (GateError, ValueError):
+            proof = None
+        if proof is None:
+            raise _tool_result_pending(op)
+        return _operation_response(await _deliver_operation(
+            state, binding, op, False, raw, None, tool_result_turn=turn_id), op)
     return await _delegate(request, device, sid, "POST", "/tool_result", tool_result=body)
+
+
+def _original_tool_operation(state, device, binding, turn_id, call_id, digest):
+    key = f"tool-result:{binding['id']}:{call_id}"
+    op = state.store._one(
+        "SELECT * FROM router_operations WHERE id=? AND device_id=? AND session_id=? AND method='POST' AND path=?",
+        (state.operations.key(device, key), device.device_id, binding["id"], _path(binding, "/tool_result")))
+    if op and (op["body_sha256"] != digest or not turn_id or op["turn_id"] not in (None, turn_id)):
+        raise GateError(409, "tool_result_recovery_mismatch", "Ход или хеш исходного результата не совпадает")
+    return op
+
+
+async def _tool_recovery_state(state, binding, op, turn_id, call_id):
+    if not op["boot_id"] or op["boot_id"] != binding["boot_id"]:
+        return None
+    info = state.nodes.snapshots.get(binding["node_id"])
+    if not info or time.monotonic() - info.get("observed", 0) > 5:
+        info = await state.nodes.probe(binding["node_id"])
+    if (not info or info.get("bootId") != op["boot_id"]
+            or "tool_result_recovery_v1" not in info.get("capabilities", [])):
+        return None
+    response = await state.nodes.request(
+        binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn_id, safe='')}/tool-result-recovery"),
+        params={"callId": call_id, "commandId": op["id"]}, expected_boot=op["boot_id"])
+    if response.status_code != 200:
+        return None
+    proof = response.json()
+    if isinstance(proof, dict) and proof.get("callKnown") is True and all(proof.get(key) == value for key, value in {
+        "version": 1, "nodeId": binding["node_id"], "bootId": op["boot_id"],
+        "sessionId": binding["local_id"], "turnId": turn_id, "callId": call_id, "commandId": op["id"],
+    }.items()):
+        return proof
+    return None
+
+
+@router.get("/harness/agent/sessions/{sid}/turns/{turn_id}/tool-result-recovery")
+async def tool_result_recovery(sid: str, turn_id: str, callId: str, bodySha256: str,
+                               request: Request, device: Device = Depends(require_device)):
+    state = gate(request)
+    binding = state.routing.get(sid, device)
+    _policy(state, device, binding, request, require_model=False)
+    op = _original_tool_operation(state, device, binding, turn_id, callId, bodySha256)
+    if op is None:
+        raise GateError(404, "not_found", "Исходная доставка не найдена")
+    current = await _control_receipt(state, op)
+    try:
+        proof = await _tool_recovery_state(state, binding, op, turn_id, callId)
+    except (GateError, ValueError):
+        proof = None
+    outcome, retry = "unknown", False
+    if proof and current["state"] == "complete":
+        try:
+            receipt = json.loads(current["response"])
+        except (ValueError, TypeError):
+            receipt = None
+        if isinstance(receipt, dict) and receipt.get("callId") == callId:
+            if current["status"] == 200 and receipt.get("status") == "accepted":
+                outcome = "accepted"
+            elif current["status"] == 409 and receipt.get("status") == "turn_not_waiting":
+                outcome = "closed"
+    elif proof and current.get("receiptState") == "missing":
+        retry = (proof.get("waiting") is True and proof.get("retryAllowed") is True
+                 and proof.get("commandState") == "missing")
+    return JSONResponse({"version": 1, "sessionId": sid, "turnId": turn_id, "callId": callId,
+                         "requestId": f"tool-result:{sid}:{callId}", "commandId": op["id"],
+                         "bodySha256": bodySha256, "outcome": outcome, "retryAllowed": retry},
+                        headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/harness/agent/sessions/{sid}/interrupt")
@@ -713,7 +806,25 @@ async def agent_stop(sid: str, task_id: str, request: Request, device: Device = 
 
 @router.get("/harness/agent/sessions/{sid}/turns/{turn_id}")
 async def agent_turn(sid: str, turn_id: str, request: Request, device: Device = Depends(require_device)):
-    return await _delegate(request, device, sid, "GET", f"/turns/{quote(turn_id, safe='')}")
+    state = gate(request)
+    binding = state.routing.get(sid, device)
+    _policy(state, device, binding, request, require_model=False, require_sdk=False)
+    binding = await state.routing.recover_boot(binding)
+    response = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn_id, safe='')}"),
+                                         params={"toolResultRecovery": "1"},
+                                         expected_boot=binding["boot_id"])
+    if response.status_code != 200:
+        return _response(response)
+    status = response.json()
+    callbacks = status.pop("toolCallbacks", None)
+    if isinstance(callbacks, dict) and all(callbacks.get(key) == value for key, value in {
+        "version": 1, "sessionId": binding["local_id"], "nodeId": binding["node_id"],
+        "bootId": binding["boot_id"], "turnId": turn_id, "seq": status.get("seq"),
+    }.items()) and status.get("turnId") == turn_id and status.get("done") is False:
+        pending = callbacks.get("pendingCallIds")
+        if isinstance(pending, list) and all(isinstance(call, str) and call for call in pending):
+            status["toolCallbacks"] = dict(callbacks, sessionId=sid)
+    return JSONResponse(status, headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/harness/agent/sessions/{sid}/turns/{turn_id}/events")
