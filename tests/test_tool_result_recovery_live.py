@@ -83,6 +83,8 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
             await asyncio.sleep(.01)
     settings = (await client.get("/harness/settings")).json()["profile"]
     assert settings["toolResultRecovery"]["version"] == 1
+    legacy = await actual_request("GET", f"/v1/sessions/{binding['local_id']}/turns/{turn}")
+    assert set(legacy.json()) == {"turnId", "state", "seq", "done"}
     turn_status = (await client.get(f"{prefix}/turns/{turn}")).json()
     assert turn_status["toolCallbacks"] == {
         "version": 1, "sessionId": sid, "turnId": turn, "seq": turn_status["seq"],

@@ -117,6 +117,9 @@ Gate возвращает `toolCallbacks` в `GET {G-root}/turns/{turnId}`, ко
 с `Idempotency-Key: tool-result:{sessionId}:{callId}` и
 `X-Atlas-Tool-Result-Turn: {turnId}`. Gate сверяет владельца, исходный ключ и тело.
 Router сверяет тот же callback перед доставкой и использует дисковую дедупликацию.
+На внутреннем HTTP/connector-канале Gate запрашивает снимок с `toolResultRecovery=1`
+и передаёт исходный ход для защищённой доставки параметром `toolResultTurn`.
+Обычный статус Router сохраняет прежнюю схему.
 Если Stop или смена хода успели изменить ожидание, Router возвращает
 `409 recovery_unconfirmed`. Итог хода и причина отказа провайдера по-прежнему
 читаются по exact terminal receipt. Оценка окна SDK и compact имеют свои события

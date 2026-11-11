@@ -811,6 +811,7 @@ async def agent_turn(sid: str, turn_id: str, request: Request, device: Device = 
     _policy(state, device, binding, request, require_model=False, require_sdk=False)
     binding = await state.routing.recover_boot(binding)
     response = await state.nodes.request(binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn_id, safe='')}"),
+                                         params={"toolResultRecovery": "1"},
                                          expected_boot=binding["boot_id"])
     if response.status_code != 200:
         return _response(response)

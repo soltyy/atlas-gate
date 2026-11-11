@@ -199,7 +199,7 @@ class Nodes:
         if request_id:
             headers["Idempotency-Key"] = request_id
         if tool_result_turn is not None:
-            headers["X-Atlas-Tool-Result-Turn"] = tool_result_turn
+            params = {"toolResultTurn": tool_result_turn}
         try:
             options = {"timeout": httpx.Timeout(connect=5, read=None, write=70, pool=5)} if path.endswith("/compact") and self.config[node_id].transport != 'connector' else {}
             response = await self.clients[node_id].request(method, path, content=content,
