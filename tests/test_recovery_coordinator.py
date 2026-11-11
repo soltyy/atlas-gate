@@ -199,6 +199,68 @@ def cas(snapshot):
     return {"version": 1, "expectedRevision": snapshot["revision"], "sourceManifestSha256": snapshot["sourceManifestSha256"], "branchFence": snapshot["branchFence"]}
 
 
+@pytest.mark.parametrize("blocker", [None, "no_stop", "wrong_call", "admitted_unknown", "alternate_accepted"])
+async def test_stopped_turn_reconciles_unsent_durable_outputs(recovery_http, blocker, monkeypatch):
+    client, state, nodes = recovery_http
+    ref, operations = source(state, nodes, tool=False)
+    sid, tid = ref["sessionId"], operations[0]["turnId"]
+    for number in range(4):
+        call_id = f"child-{number}"
+        output = {"callId": call_id, "content": "saved result"}
+        operations.append({"kind": "tool_result", "requestId": f"tool-result:{sid}:{call_id}",
+                           "turnId": tid, "callId": call_id, "bodySha256": body_sha256(output),
+                           "localState": "output_durable", "outputRef": f"saved-{number}"})
+        if number == 0 and blocker in ("admitted_unknown", "alternate_accepted"):
+            binding = state.store._one("SELECT * FROM router_bindings WHERE id=?", (sid,))
+            command, _ = state.operations.begin(owner(state), binding, "POST",
+                f"/v1/sessions/local-{sid}/tool_result", output,
+                request_id=operations[-1]["requestId"] if blocker == "admitted_unknown" else "different-key")
+            if blocker == "alternate_accepted":
+                state.operations.complete(command["id"], httpx.Response(200, json={"callId": call_id, "status": "accepted"}))
+
+    # Claude emits stopped parent-agent events under different call IDs.
+    nodes.turns[tid] = [
+        {"type": "tool_call", "id": tid, "seq": i + 1,
+         "callId": "other-child" if i == 0 and blocker == "wrong_call" else f"child-{i}"}
+        for i in range(4)
+    ] + [
+        {"type": "tool_done", "id": tid, "seq": 5, "callId": "parent-agent", "isError": True},
+        {"type": "result", "id": tid, "seq": 6, "ok": False,
+         "code": "provider_failed" if blocker == "no_stop" else "turn_interrupted"}
+    ]
+    inv = await inventory(client, [ref])
+    if blocker is None:
+        async def old_observer(*args):
+            return None
+
+        with monkeypatch.context() as old:
+            old.setattr(state.recovery, "_stopped_tool_delivery", old_observer)
+            snapshot, _ = await case(client, inv, ref, operations)
+            path = "/harness/recovery/cases/" + snapshot["recoveryId"]
+            assert [o["outcome"] for o in snapshot["operations"][1:]] == ["outcome_unknown"] * 4
+            await post(client, "/harness/recovery/inventories/" + inv["inventoryId"] + "/seal", {"version": 1}, "seal")
+            assert (await client.post(path + "/ack", json=ack_body(snapshot, "old-ack"))).status_code == 200
+        snapshot = (await client.get(path)).json()
+    else:
+        snapshot, _ = await case(client, inv, ref, operations)
+        await post(client, "/harness/recovery/inventories/" + inv["inventoryId"] + "/seal", {"version": 1}, "seal")
+        path = "/harness/recovery/cases/" + snapshot["recoveryId"]
+    outcomes = [o["outcome"] for o in snapshot["operations"]]
+    assert outcomes[0] == "terminal_error"
+    if blocker is None:
+        assert outcomes[1:] == ["rejected"] * 4
+        proofs = [e["body"]["payload"] for e in snapshot["evidence"] if e["body"]["kind"] == "tool_result"]
+        assert [proof["operation"] for proof in proofs] == operations[1:]
+        assert all(proof["response"]["error"]["deliveryState"] == "closed" for proof in proofs)
+    else:
+        assert outcomes[1] == "outcome_unknown"
+    ack = await client.post(path + "/ack", json=ack_body(snapshot))
+    assert ack.status_code == 200, ack.text
+    final = (await client.get(path)).json()
+    assert final["next"]["businessDispatchAllowed"] is (blocker is None)
+    assert not any(method == "POST" and path.endswith(("/prompt", "/tool_result")) for method, path, _ in nodes.calls)
+
+
 async def test_exact_closed_terminal_ack_output_pagination_and_no_business_dispatch(recovery_http):
     client, state, nodes = recovery_http
     ref, operations = source(state, nodes)

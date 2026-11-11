@@ -744,6 +744,48 @@ class Recovery:
             public["sessionId"] = binding["sdk_alias"]
         return public
 
+    async def _stopped_tool_delivery(self, device, binding, operation, journals):
+        call_id, turn_id = operation["callId"], operation["turnId"]
+        key = f"tool-result:{binding['id']}:{call_id}"
+        if operation["requestId"] != key or operation.get("localState") != "output_durable":
+            return None
+        if turn_id not in journals:
+            try:
+                journals[turn_id] = await self._terminal(binding, turn_id, 0)
+            except (GateError, ValueError):
+                journals[turn_id] = None
+        journal = journals[turn_id]
+        if not journal or journal["payloadUnavailable"]:
+            return None
+        terminal = journal["terminal"]
+        last = journal["events"][-1] if journal["events"] else {}
+        if (terminal.get("type") != "result" or terminal.get("ok") is not False
+                or terminal.get("code") != "turn_interrupted" or terminal.get("outcomeUnknown") is True
+                or terminal.get("kind") == "command_outcome_unknown"
+                or last.get("id") != turn_id or last.get("type") != "result"
+                or last.get("code") != "turn_interrupted"):
+            return None
+        if not any(event.get("id") == turn_id and event.get("type") == "tool_call"
+                   and event.get("callId") == call_id for event in journal["events"]):
+            return None
+        # The terminal turn has closed its callbacks. Recheck admission after
+        # reading Router: any possibly accepted delivery still needs its own ACK.
+        oid = self.state.operations.key(device, key)
+        for row in self.store._all(
+                "SELECT id,state,status,response FROM router_operations WHERE session_id=? AND path LIKE '%/tool_result'",
+                (binding["id"],)):
+            if row["id"] == oid or row["state"] != "complete":
+                return None
+            try:
+                response = json.loads(row["response"])
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(response, dict) or (response.get("callId") == call_id and row["status"] < 400):
+                return None
+        return {"operation": operation, "status": 409, "response": {"error": {
+            "code": "turn_interrupted", "deliveryState": "closed",
+            "turnId": turn_id, "callId": call_id, "terminalSeq": journal["seq"]}}}
+
     async def observe(self, device, request, case_id):
         case = self._case(case_id, device, request)
         manifest = json.loads(case["manifest"])
@@ -752,6 +794,7 @@ class Recovery:
             return await self._observe_api(device, request, case, manifest, binding)
         await self._reconcile_steps(case["branch_id"], device, request)
         outcomes, actions, proofs = [], [], []
+        stopped_journals = {}
         all_resolved = bool(manifest["operations"])
         allowed = manifest.get("permissions", {}).get("allowedRecovery", [])
         try:
@@ -831,6 +874,10 @@ class Recovery:
                     outcome["outcome"], action_kind = "sealed_not_sent", "resolve_source_checkpoint"
                 elif "resolve_source_checkpoint" in allowed or "seal_prompt" in allowed:
                     actions.append({"id": _id(case_id, "seal", operation), "executor": "gate", "kind": "seal_prompt", "operation": operation})
+            elif not op and kind == "tool_result":
+                payload = await self._stopped_tool_delivery(device, binding, operation, stopped_journals)
+                if payload is not None:
+                    outcome["outcome"], action_kind = "rejected", "resolve_source_checkpoint"
             if payload is not None:
                 proof = self._proof(case_id, kind, payload)
                 proofs.append({**proof, **self.store._one("SELECT body FROM recovery_evidence WHERE id=?", (proof["evidenceId"],))})
