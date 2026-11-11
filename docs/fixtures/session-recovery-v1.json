@@ -29,6 +29,14 @@
       "proofPayload": "source_retention"
     },
     "canonicalBody": "json-sort-keys-compact-utf8-v1",
+    "sourceHistoryIdentity": {
+      "version": 1,
+      "pathTemplate": "/harness/agent/sessions/{sid}/history-identity",
+      "previousAliasQuery": "previousAlias",
+      "readOnly": true,
+      "businessReplayAllowed": false,
+      "provesOutcome": false
+    },
     "exactPinnedPath": true,
     "exactPinnedPathMeaning": "native actions require exact node/boot/transport proof; not a union resume guarantee",
     "continuation": {
@@ -69,6 +77,14 @@
         "proofPayload": "source_retention"
       },
       "canonicalBody": "json-sort-keys-compact-utf8-v1",
+      "sourceHistoryIdentity": {
+        "version": 1,
+        "pathTemplate": "/harness/agent/sessions/{sid}/history-identity",
+        "previousAliasQuery": "previousAlias",
+        "readOnly": true,
+        "businessReplayAllowed": false,
+        "provesOutcome": false
+      },
       "exactPinnedPath": true,
       "exactPinnedPathMeaning": "native actions require exact node/boot/transport proof; not a union resume guarantee",
       "continuation": {
