@@ -82,9 +82,11 @@ class Nodes:
             context = ssl.create_default_context(cafile=n.ca_file)
             if n.cert_file:
                 context.load_cert_chain(n.cert_file, n.key_file)
+            # Retire idle sockets before Router's 5 s keep-alive, allowing time for tunnel latency.
             self.clients[n.node_id] = httpx.AsyncClient(base_url=n.url.rstrip("/"),
                 headers={"X-Atlas-Token": token}, follow_redirects=False, trust_env=False,
-                verify=context, timeout=httpx.Timeout(70, connect=5))
+                verify=context, timeout=httpx.Timeout(70, connect=5),
+                limits=httpx.Limits(keepalive_expiry=3.0))
         self._probe_locks = {n.node_id: asyncio.Lock() for n in nodes}
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
