@@ -177,7 +177,13 @@ class GateReloaded(BaseModel):
     upstreams: dict[str, str] = Field(default_factory=dict)
 
 
+class AdaptiveFilesOffer(BaseModel):
+    version: Literal[1]
+    branchId: str = Field(min_length=1, max_length=200)
+
+
 class GateAgentSessionCreate(BaseModel):
+    adaptiveFiles: AdaptiveFilesOffer | None = None
     reasoning: ReasoningSettings | None = None
     sdkTools: SdkTools | None = None
     """Рукопожатие агентной сессии с устройства: только эти поля уходят в `/v1/sessions` роутера.

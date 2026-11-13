@@ -8,6 +8,7 @@ import hashlib
 from .errors import GateError
 from ..sdk_tools import SdkTools, supports, enabled, defaults
 from .reasoning import select_request, validate_node, confirm
+from .node_channel import ChannelClient
 from ..reasoning import ReasoningError, concrete
 
 DDL = """
@@ -90,6 +91,13 @@ class Routing:
             if 'steering' in created:
                 from .steering import bound_capability
                 created = dict(created, steering=bound_capability(created['steering'], saved))
+            if 'adaptiveFiles' in created:
+                offer = created['adaptiveFiles']
+                if (not isinstance(offer, dict) or offer.get('version') != 1
+                        or not isinstance(offer.get('branchId'), str) or not offer['branchId']
+                        or offer.get('bootId') != saved['boot_id']):
+                    created = dict(created)
+                    created.pop('adaptiveFiles')
             raw = json.dumps(created)
             db.execute("UPDATE router_bindings SET status='ready',local_id=?,response=? WHERE id=?",
                        (local_id, raw, sid))
@@ -108,6 +116,10 @@ class Routing:
     def list(self, device):
         return self.store._all("SELECT * FROM router_bindings WHERE device_id=? AND org=? AND status='ready' ORDER BY created",
                                (device.device_id, device.org))
+
+    def adaptive_transport(self, node_id):
+        client = getattr(self.nodes, 'clients', {}).get(node_id)
+        return not isinstance(client, ChannelClient) or client.supports_adaptive_files()
 
     async def create(self, device, route, model, payload, limit, request_id=None, sdk_policy=None, reasoning_policy=None):
         if request_id is not None and (not request_id or len(request_id) > 200):
@@ -255,6 +267,8 @@ class Routing:
                 body['reasoning'] = reasoning_snapshot['selected']
             if body.get('sdkTools') is None:
                 body['sdkTools'] = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
+            if body.get('adaptiveFiles') and not self.adaptive_transport(node_id):
+                body.pop('adaptiveFiles')
             sid, alias = str(uuid.uuid4()), str(uuid.uuid4())
             boot_id = self.nodes.snapshots[node_id]["bootId"]
             recovery_source = json.dumps({'previousSessionId': resume.get('id'),

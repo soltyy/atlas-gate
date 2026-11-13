@@ -7,7 +7,7 @@ class GateActivity:
         path = scope.get('path', '')
         method = scope.get('method')
         tracked = (scope['type'] == 'http' and (
-            path.startswith('/harness/agent/') and (method != 'GET' or path.endswith(('/context', '/files', '/sdk-tools'))) or
+            path.startswith('/harness/agent/') and (method != 'GET' or path.endswith(('/context', '/files', '/sdk-tools', '/files/adaptive'))) or
             path.startswith('/harness/llm/v1/') and method == 'POST' or
             path.startswith('/harness/recovery/') and method == 'POST'))
         if not tracked:

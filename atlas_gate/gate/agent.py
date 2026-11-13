@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import quote
 from fastapi import Depends, Request
@@ -44,6 +45,8 @@ def _response(response):
                 code = "router_identity_mismatch"
             elif str(detail).startswith('resume_unavailable'):
                 code = 'sdk_session_recovery_unavailable'
+            elif isinstance(detail, str) and detail.startswith('adaptive_file'):
+                code = detail
             raw = json.dumps({"error": {"code": code, "message": str(detail)}}, ensure_ascii=False).encode()
     return Response(content=raw, status_code=response.status_code, media_type="application/json", headers=headers)
 
@@ -213,6 +216,12 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     def validate_admission():
         _policy(state, device, binding, request)
+        if body.adaptiveFiles and not _adaptive_offer(binding):
+            raise GateError(409, 'adaptive_files_not_negotiated', 'Ход не согласовал адаптивные файлы')
+        if body.adaptiveFiles and body.adaptiveFiles.bootId != binding['boot_id']:
+            raise GateError(409, 'adaptive_files_reconfirmation_required', 'Привязка Router изменилась')
+        if body.adaptiveFiles and not state.routing.adaptive_transport(binding['node_id']):
+            raise GateError(409, 'adaptive_files_not_negotiated', 'Connector не подтвердил адаптивные файлы')
         validate_new_prompt(state, binding, device)
         def integer(name):
             value = request.headers.get(name)
@@ -1004,6 +1013,66 @@ async def agent_media_read(sid: str, artifact_id: str, request: Request, device:
 @router.post('/harness/agent/sessions/{sid}/files')
 async def agent_upload_files(sid: str, request: Request, device: Device = Depends(require_device)):
     return await _delegate(request, device, sid, 'POST', '/files')
+
+
+def _adaptive_offer(binding):
+    offer = json.loads(binding.get('response') or '{}').get('adaptiveFiles')
+    if isinstance(offer, dict) and offer.get('version') == 1 and offer.get('branchId') and offer.get('bootId'):
+        return offer
+    return None
+
+
+def _adaptive_binding(request, device, sid, *, receipt=False):
+    state = gate(request)
+    binding = state.routing.get(sid, device, include_closed=receipt)
+    _policy(state, device, binding, request, require_model=not receipt, require_sdk=not receipt)
+    if not receipt and not org_of(state, device).sdk_tools.files:
+        raise GateError(403, 'policy_denied', 'Организация отключила доступ к оригиналам')
+    if not _adaptive_offer(binding):
+        raise GateError(409, 'adaptive_files_not_negotiated', 'Сессия не согласовала адаптивные файлы')
+    return state, binding
+
+
+@router.get('/harness/agent/sessions/{sid}/files/adaptive')
+async def agent_adaptive_capability(sid: str, request: Request, device: Device = Depends(require_device)):
+    state, binding = _adaptive_binding(request, device, sid)
+    if not state.routing.adaptive_transport(binding['node_id']):
+        raise GateError(409, 'adaptive_files_not_negotiated', 'Connector не подтвердил адаптивные файлы')
+    binding = await state.routing.recover_boot(binding)
+    response = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/files/adaptive'),
+                                         expected_boot=binding['boot_id'])
+    if response.status_code != 200:
+        return _response(response)
+    try:
+        capability = response.json()['adaptiveFiles']
+        expected = dict(_adaptive_offer(binding), bootId=binding['boot_id'])
+        if capability != expected:
+            raise ValueError('capability mismatch')
+    except (ValueError, KeyError, TypeError) as failed:
+        raise GateError(502, 'adaptive_files_ack_invalid', 'Router не подтвердил capability') from failed
+    return JSONResponse({'adaptiveFiles': capability}, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/harness/agent/sessions/{sid}/files/adaptive/{request_id}')
+async def agent_adaptive_receipt(sid: str, request_id: uuid.UUID, request: Request, device: Device = Depends(require_device)):
+    state, binding = _adaptive_binding(request, device, sid, receipt=True)
+    response = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/files/adaptive/' + str(request_id)))
+    result = _response(response)
+    result.headers['Cache-Control'] = 'private, no-store'
+    return result
+
+
+@router.post('/harness/agent/sessions/{sid}/files/adaptive/{request_id}')
+async def agent_adaptive_reply(sid: str, request_id: uuid.UUID, request: Request, device: Device = Depends(require_device)):
+    state, binding = _adaptive_binding(request, device, sid)
+    if request.headers.get('idempotency-key') != str(request_id):
+        raise GateError(422, 'adaptive_file_idempotency_key_required', 'Ожидается исходный requestId')
+    raw = await request.body()
+    # Recheck policy and owner after the body read, before forwarding to the original boot.
+    state, binding = _adaptive_binding(request, device, sid)
+    response = await state.nodes.request(binding['node_id'], 'POST', _path(binding, '/files/adaptive/' + str(request_id)),
+        expected_boot=binding['boot_id'], request_id=str(request_id), content=raw)
+    return _response(response)
 
 @router.get('/harness/agent/sessions/{sid}/files')
 async def agent_list_files(sid: str, request: Request, device: Device = Depends(require_device)):
