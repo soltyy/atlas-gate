@@ -443,7 +443,7 @@ class Recovery:
                         or operation.get("attemptId", binding["api_attempt"]["id"]) != binding["api_attempt"]["id"]
                         or (binding["api_attempt"].get("body_sha256") and binding["api_attempt"]["body_sha256"] != operation["bodySha256"])):
                 _fail("recovery_source_conflict", "API attempt key/body не соответствуют manifest")
-            old_op = None if api else self.store._one("SELECT * FROM router_operations WHERE id=?", (self.state.operations.key(device, operation["requestId"]),))
+            old_op = None if api or kind == "tool_effect" else self.store._one("SELECT * FROM router_operations WHERE id=?", (self.state.operations.key(device, operation["requestId"]),))
             if old_op and (old_op["session_id"] != binding["id"] or not old_op["path"].endswith("/" + kind)
                            or old_op["body_sha256"] and old_op["body_sha256"] != operation["bodySha256"]
                            or kind == "prompt" and old_op["turn_id"] != operation["turnId"]):
@@ -805,11 +805,11 @@ class Recovery:
             kind, request_id = operation["kind"], operation["requestId"]
             oid = self.state.operations.key(device, request_id)
             op = self.store._one("SELECT * FROM router_operations WHERE id=?", (oid,))
-            if op and (op["device_id"] != device.device_id or op["session_id"] != binding["id"]
+            if kind != "tool_effect" and op and (op["device_id"] != device.device_id or op["session_id"] != binding["id"]
                        or not op["path"].endswith("/" + kind) or (op["body_sha256"] and op["body_sha256"] != operation["bodySha256"])
                        or (kind == "prompt" and op["turn_id"] != operation["turnId"])):
                 _fail("recovery_source_conflict", "Исходные key/body/turn не соответствуют command ledger")
-            if op and (op["state"] != "complete" or tool_result_not_sent(op)):
+            if kind != "tool_effect" and op and (op["state"] != "complete" or tool_result_not_sent(op)):
                 try:
                     response = await self.state.nodes.request(binding["node_id"], "GET", "/v1/commands/" + quote(oid, safe=""))
                     confirmed = completed_response(response.json(), oid) if response.status_code == 200 else None
@@ -822,6 +822,9 @@ class Recovery:
             payload, action_kind = None, None
             if kind == "tool_effect":
                 outcome["outcome"] = "effect_unknown"
+                payload = await self._accepted_external_tool_result(device, binding, operation, op, stopped_journals)
+                if payload is not None:
+                    outcome["outcome"], action_kind = "accepted", "resolve_source_checkpoint"
             elif op and op["state"] == "complete" and not tool_result_not_sent(op):
                 try:
                     response = json.loads(op["response"])
@@ -892,6 +895,32 @@ class Recovery:
                 all_resolved = False
             outcomes.append(outcome)
         return await self._publish(device, request, case, manifest, binding, outcomes, actions, proofs, all_resolved)
+
+    async def _accepted_external_tool_result(self, device, binding, operation, op, journals):
+        """A tool input hash and a subsequently delivered output hash identify different bodies."""
+        call, turn = operation["callId"], operation["turnId"]
+        key = f"tool-result:{binding['id']}:{call}"
+        if (operation["requestId"] != key or not op or op["device_id"] != device.device_id
+                or op["session_id"] != binding["id"] or not op["path"].endswith("/tool_result")
+                or op["state"] != "complete" or not 200 <= op["status"] < 300 or not op["body_sha256"]):
+            return None
+        try:
+            response = json.loads(op["response"])
+            if not isinstance(response, dict) or response.get("callId") != call or response.get("status") != "accepted":
+                return None
+            if turn not in journals:
+                journals[turn] = await self._terminal(binding, turn, 0)
+        except (GateError, TypeError, ValueError):
+            return None
+        journal = journals[turn]
+        if (not journal or journal["payloadUnavailable"]
+                or journal["terminal"].get("outcomeUnknown") is True
+                or journal["terminal"].get("kind") == "command_outcome_unknown"
+                or not any(event.get("id") == turn and event.get("type") == "tool_call"
+                           and event.get("callId") == call for event in journal["events"])):
+            return None
+        return {"operation": operation, "sessionId": binding["id"], "turnId": turn,
+                "receipt": {"callId": call, "status": "accepted"}, "resultBodySha256": op["body_sha256"]}
 
     @staticmethod
     def _not_sent(response):
