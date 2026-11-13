@@ -215,7 +215,7 @@ class Nodes:
             raise GateError(503, "command_outcome_unknown", "Router ещё не подтвердил итог команды; требуется сверка", node_id=node_id)
         if 300 <= response.status_code < 400:
             raise GateError(502, "node_protocol_error", "redirect Router запрещён")
-        if method != 'GET' and request_id and response.status_code >= 500:
+        if method != 'GET' and request_id and response.status_code >= 500 and '/files/adaptive/' not in path:
             # 5xx может принадлежать relay, а команда уже принята Router.
             # Только его дисковая квитанция подтверждает итог, включая настоящий 5xx.
             from .receipts import completed_response

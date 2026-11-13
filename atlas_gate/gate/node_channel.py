@@ -47,6 +47,7 @@ class Channel:
         self._temporary_payloads = tempfile.TemporaryDirectory(prefix='atlas-node-payloads-') if not database else None
         self.payloads = Path(database + '.node-payloads') if database else Path(self._temporary_payloads.name)
         self.last_poll = {}
+        self.poll_protocol = {}
         store._exec("""CREATE TABLE IF NOT EXISTS node_work(id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
             method TEXT NOT NULL, path TEXT NOT NULL, request TEXT NOT NULL,
             state TEXT NOT NULL, deadline REAL NOT NULL, lease REAL NOT NULL DEFAULT 0,
@@ -63,7 +64,8 @@ class Channel:
             logging.getLogger('atlas_gate').warning('Не удалось очистить временное тело завершённой команды')
 
     async def request(self, node_id, method, path, *, content=b"", params=None, headers=None):
-        original_upload = method == 'POST' and path.endswith('/files')
+        adaptive = '/files/adaptive' in path
+        original_upload = method == 'POST' and (path.endswith('/files') or adaptive)
         if not original_upload and len(content) > BODY_LIMIT:
             raise GateError(413, "payload_too_large", "команда превышает предел канала")
         if method != "GET" and not (headers or {}).get("Idempotency-Key"):
@@ -95,7 +97,7 @@ class Channel:
             envelope['body'] = base64.b64encode(content).decode()
         payload = json.dumps(envelope)
         now = time.time()
-        required = 2 if path.startswith('/v1/recovery/') else 1
+        required = 3 if adaptive else 2 if path.startswith('/v1/recovery/') else 1
         self.store._exec("INSERT INTO node_work(id,node_id,method,path,request,state,deadline,created,required_protocol) VALUES (?,?,?,?,?,'queued',?,?,?)", (rid, node_id, method, path, payload, now + 70, now, required))
         while time.time() < now + 70:
             row = self.store._one("SELECT state,status,response,response_headers FROM node_work WHERE id=?", (rid,))
@@ -107,6 +109,7 @@ class Channel:
 
     async def poll(self, node_id, wait=25, disconnected=None, authorized=None, protocol=1):
         self.last_poll[node_id] = time.monotonic()
+        self.poll_protocol[node_id] = protocol
         end = time.monotonic() + wait
         while True:
             if authorized and not authorized():
@@ -147,8 +150,9 @@ class Channel:
         row = self.store._one("SELECT * FROM node_work WHERE id=? AND node_id=?", (rid, node_id))
         if not row:
             raise GateError(404, "not_found", "команда принадлежит другому узлу или отсутствует")
-        if row['required_protocol'] >= 2 and headers.get('x-atlas-transport-contract') != '2':
-            raise GateError(409, 'node_protocol_error', 'Recovery требует согласованный connector protocol2')
+        required = row['required_protocol']
+        if required >= 2 and headers.get('x-atlas-transport-contract') not in ({'2', '3'} if required == 2 else {'3'}):
+            raise GateError(409, 'node_protocol_error', 'Ответ не подтвердил требуемый протокол connector')
         if row["state"] == "complete":
             if row["status"] != status or row["response"] != body or json.loads(row['response_headers'] or '{}') != headers:
                 raise GateError(409, "idempotency_conflict", "ответ уже зафиксирован")
@@ -163,6 +167,9 @@ class Channel:
 class ChannelClient:
     def __init__(self, channel, node_id):
         self.channel, self.node_id = channel, node_id
+
+    def supports_adaptive_files(self):
+        return self.channel.poll_protocol.get(self.node_id, 0) >= 3
 
     async def request(self, method, path, **kwargs):
         return await self.channel.request(self.node_id, method, path, **kwargs)
@@ -259,7 +266,7 @@ async def work(request: Request):
         credential = state(request).store._one("SELECT revoked,expires FROM node_credentials WHERE node_id=?", (node_id,))
         return bool(credential and not credential["revoked"] and credential["expires"] > time.time() and state(request).nodes.config[node_id].enabled)
     protocol = request.query_params.get('protocol', '1')
-    if protocol not in ('1', '2'):
+    if protocol not in ('1', '2', '3'):
         raise GateError(422, 'node_protocol_error', 'неподдержанная версия connector')
     return {"work": await state(request).channel.poll(node_id, disconnected=request.is_disconnected, authorized=authorized, protocol=int(protocol))}
 

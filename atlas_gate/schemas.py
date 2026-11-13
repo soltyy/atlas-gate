@@ -136,6 +136,12 @@ class Attachment(BaseModel):
     sizeBytes: int = 0
 
 
+class AdaptiveFilesTurnOffer(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    version: Literal[1]
+    bootId: str
+
+
 class PromptRequest(BaseModel):
     @model_validator(mode='before')
     @classmethod
@@ -147,6 +153,7 @@ class PromptRequest(BaseModel):
     id: str
     text: str
     attachments: list[Attachment] = Field(default_factory=list)
+    adaptiveFiles: AdaptiveFilesTurnOffer | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 TurnState = Literal["running", "waiting_tool", "done", "error", "interrupted"]
