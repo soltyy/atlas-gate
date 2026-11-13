@@ -176,9 +176,9 @@ async def inventory(client, refs, version=1):
         "clientStoreEpoch": "client-store", "checkpointInventoryVersion": version, "sources": refs}, "inventory-" + str(version))
 
 
-async def case(client, inv, ref, operations, key="case"):
+async def case(client, inv, ref, operations, key="case", checkpoint=3):
     body = {"version": 1, "inventoryId": inv["inventoryId"], "sourceRef": ref["sourceRef"], "conversationId": "chat", "branchId": "branch",
-            "sourceRunId": ref["sourceRunId"], "sourceCheckpointVersion": 3,
+            "sourceRunId": ref["sourceRunId"], "sourceCheckpointVersion": checkpoint,
             "source": {"gateRoot": "http://gate", "sessionId": ref["sessionId"], "historyAlias": "alias-" + ref["sessionId"], "routeId": "sub", "model": "model"},
             "operations": operations, "observation": {"lastAppliedSeq": 0},
             "permissions": {"allowedRecovery": ["read_receipt", "apply_saved_ack", "resolve_source_checkpoint", "resume_transport"], "businessReplayAllowed": False}}
@@ -190,7 +190,7 @@ def ack_body(snapshot, key="ack"):
     source_field = "sourceAttemptId" if "sourceAttemptId" in local[0] else "sourceSessionId"
     return {"version": 1, "ackKey": key, "planId": snapshot["planId"], "planRevision": snapshot["revision"],
             "sourceManifestSha256": snapshot["sourceManifestSha256"], "clientStoreEpoch": "client-store",
-            "sourceRunId": local[0]["sourceRunId"], source_field: local[0][source_field], "sourceCheckpointVersion": 3,
+            "sourceRunId": local[0]["sourceRunId"], source_field: local[0][source_field], "sourceCheckpointVersion": local[0]["sourceCheckpointVersion"],
             "appliedActions": [{"actionId": a["id"], "evidenceSha256": a["evidenceSha256"]} for a in local],
             "localCommitRef": "commit-" + key, "localCommitSha256": "f" * 64}
 
@@ -311,6 +311,54 @@ async def test_existing_unknown_effect_is_resolved_by_a_later_exact_result(recov
     assert ack.status_code == 200, ack.text
     admit(state, "old")
     assert not any(method == "POST" and path.endswith(("/prompt", "/tool_result")) for method, path, _ in nodes.calls)
+
+
+@pytest.mark.parametrize("change", [None, "different_turn", "different_call", "same_version", "wrong_hash", "no_receipt"])
+async def test_new_checkpoint_advances_unknown_effect_without_dropping_the_old_case(recovery_http, change):
+    client, state, nodes = recovery_http
+    ref, operations = source(state, nodes, tool=False)
+    call, turn, session = "late-call", operations[0]["turnId"], ref["sessionId"]
+    nodes.turns[turn][0] = {"type": "tool_call", "seq": 1, "id": turn, "callId": call, "name": "echo", "input": {}}
+    key = f"tool-result:{session}:{call}"
+    effect = {"kind": "tool_effect", "requestId": key, "turnId": turn, "callId": call,
+              "bodySha256": body_sha256({"name": "echo", "arguments": {}}), "localState": "effect_unknown"}
+    first = await inventory(client, [ref], version=60)
+    old, body = await case(client, first, ref, [*operations, effect], key="case-60", checkpoint=60)
+    await post(client, f"/harness/recovery/inventories/{first['inventoryId']}/seal", {"version": 1}, "seal-60")
+    current = await inventory(client, [ref], version=62)
+    output = {"callId": call, "content": "saved locally"}
+    if change != "no_receipt":
+        binding = state.store._one("SELECT * FROM router_bindings WHERE id=?", (session,))
+        command, _ = state.operations.begin(owner(state), binding, "POST", "/v1/sessions/local-old/tool_result",
+                                            output, request_id=key)
+        state.operations.complete(command["id"], httpx.Response(200, json={"callId": call, "status": "accepted"}))
+    durable = {**effect, "kind": "tool_result", "bodySha256": body_sha256(output),
+               "localState": "output_durable", "outputRef": "local:old:late-call"}
+    if change == "different_turn":
+        durable["turnId"] = "other-turn"
+    if change == "different_call":
+        durable["callId"] = "other-call"
+    if change == "wrong_hash":
+        durable["bodySha256"] = "f" * 64
+    body.update(inventoryId=current["inventoryId"], sourceCheckpointVersion=60 if change == "same_version" else 62,
+                operations=[*operations, durable])
+    response = await client.post("/harness/recovery/cases", json=body, headers={"Idempotency-Key": "case-62"})
+    if change not in (None, "no_receipt"):
+        assert response.status_code == 409, response.text
+        return
+    assert response.status_code == 200, response.text
+    await post(client, f"/harness/recovery/inventories/{current['inventoryId']}/seal", {"version": 1}, "seal-62")
+    path = "/harness/recovery/cases/" + response.json()["recoveryId"]
+    plan = (await client.get(path)).json()
+    assert plan["operations"][-1]["outcome"] == ("outcome_unknown" if change == "no_receipt" else "accepted")
+    ack = await client.post(path + "/ack", json=ack_body(plan, "ack-62"))
+    assert ack.status_code == 200, ack.text
+    old_resolved = state.store._one("SELECT resolved FROM recovery_cases WHERE id=?", (old["recoveryId"],))["resolved"]
+    assert bool(old_resolved) == (change is None)
+    if change is None:
+        assert (await client.get(path)).json()["next"]["businessDispatchAllowed"] is True
+        admit(state, session)
+    assert not any(method == "POST" and url.endswith(("/prompt", "/tool_result")) for method, url, _ in nodes.calls)
 
 
 async def test_historical_tool_preflight_is_pending_until_router_receipt(recovery_http):
