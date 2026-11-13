@@ -6,6 +6,7 @@ import math
 import time
 import uuid
 import weakref
+from urllib.parse import quote
 from .errors import GateError, GateFreshNodeError
 
 
@@ -70,7 +71,7 @@ class Operations:
         return self.store._one('SELECT * FROM router_admission_fences WHERE id=? AND device_id=? AND org=? AND session_id=?',
                               (self.key(device, request_id), device.device_id, device.org, binding['id']))
 
-    def resolve_prompt(self, device, binding, request_id, turn_id, digest):
+    def resolve_prompt(self, device, binding, request_id, turn_id, digest, *, closed_journal=False):
         """Linearization point shared with begin; never calls Router or SDK."""
         rid = self.key(device, request_id)
         with self.store._lock:
@@ -84,6 +85,16 @@ class Operations:
                         raise GateError(409, 'idempotency_conflict', 'Команда относится к другому запросу')
                     if old['body_sha256'] and old['body_sha256'] != digest:
                         raise GateError(409, 'idempotency_conflict', 'SHA тела команды не совпадает')
+                # Recheck under the same SQLite write lock as admission. The
+                # network observation is only valid for the unchanged closed source.
+                closed_negative = bool(closed_journal and old and self.closed_prompt_candidate(old, binding)
+                    and old['body_sha256'] == digest and db.execute(
+                        "SELECT 1 FROM router_bindings WHERE id=? AND device_id=? AND org=? AND status='closed' "
+                        "AND local_id=? AND node_id=? AND boot_id=? AND sdk_id=? AND route=? AND model=?",
+                        (binding['id'], device.device_id, device.org, binding['local_id'],
+                         binding['node_id'], binding['boot_id'], binding['sdk_id'], binding['route'], binding['model'])).fetchone()
+                    and not db.execute("SELECT 1 FROM router_usage_receipts WHERE session_id=? AND turn_id=?",
+                                       (binding['id'], turn_id)).fetchone())
                 sealed = db.execute('SELECT * FROM router_admission_fences WHERE id=? OR (device_id=? AND session_id=? AND turn_id=?)',
                                     (rid, device.device_id, binding['id'], turn_id)).fetchone()
                 if sealed:
@@ -91,18 +102,19 @@ class Operations:
                             sealed['session_id'] != binding['id'] or sealed['turn_id'] != turn_id or sealed['body_sha256'] != digest):
                         raise GateError(409, 'idempotency_conflict', 'Отрицательная квитанция относится к другому intent')
                     result = json.loads(sealed['response'])
-                elif old and not self._prompt_rejection(old, device, binding, digest):
+                elif old and not closed_negative and not self._prompt_rejection(old, device, binding, digest):
                     result = {'version': 1, 'outcome': 'unknown', 'commandId': rid,
                               'requestId': request_id, 'sessionId': binding['id'], 'turnId': turn_id,
                               'receiptState': old['state'], 'reason': 'observe_existing_command'}
-                elif db.execute('SELECT id FROM router_operations WHERE device_id=? AND session_id=? AND turn_id=? AND id!=?',
-                                (device.device_id, binding['id'], turn_id, rid)).fetchone():
+                elif db.execute('SELECT id FROM router_operations WHERE device_id=? AND turn_id=? AND id!=? '
+                                'AND (session_id=? OR ?)', (device.device_id, turn_id, rid, binding['id'],
+                                                             closed_negative)).fetchone():
                     result = {'version': 1, 'outcome': 'unknown', 'commandId': rid,
                               'reason': 'turn_exists_under_another_key'}
                 else:
                     # Existing proven rejection uses its original target, even if
                     # a later read-only recovery has advanced the binding's boot.
-                    target = json.loads(old['admission_rejection']) if old else {
+                    target = json.loads(old['admission_rejection']) if old and not closed_negative else {
                         'nodeId': binding['node_id'], 'bootId': binding['boot_id'],
                         'route': binding['route'], 'model': binding['model']}
                     result = {'version': 1, 'outcome': 'not_sent', 'proofType': 'admission_fence',
@@ -114,11 +126,24 @@ class Operations:
                     db.execute('INSERT INTO router_admission_fences VALUES (?,?,?,?,?,?,?,?)',
                                (rid, device.device_id, device.org, binding['id'], turn_id, digest,
                                 json.dumps(result, ensure_ascii=False), time.time()))
+                    if closed_negative and old['quota_day']:
+                        db.execute('UPDATE agent_turns SET count=count-1 WHERE user_id=? AND day=? AND count>0',
+                                   (device.user_id, old['quota_day']))
                 db.execute('COMMIT')
                 return result
             except BaseException:
                 db.execute('ROLLBACK')
                 raise
+
+    @staticmethod
+    def closed_prompt_candidate(op, binding):
+        return (binding['status'] == 'closed' and binding['local_id'] and binding['sdk_id']
+                and op['state'] == 'unknown' and op['status'] is None and op['response'] is None
+                and op['finished'] == 1 and op['accounted'] == 0 and op['turn_id'] and op['body_sha256']
+                and op['boot_id'] and op['node_id'] == binding['node_id'] and op['boot_id'] == binding['boot_id']
+                and op['device_id'] == binding['device_id'] and op['session_id'] == binding['id']
+                and op['method'] == 'POST'
+                and op['path'] == '/v1/sessions/' + quote(binding['local_id'], safe='') + '/prompt')
 
     @staticmethod
     def _prompt_rejection(old, device, binding, digest):
@@ -310,6 +335,10 @@ class Operations:
             db.execute("BEGIN IMMEDIATE")
             try:
                 old = db.execute("SELECT * FROM router_operations WHERE id=?", (rid,)).fetchone()
+                if old and old['state'] == 'unknown' and db.execute(
+                        'SELECT 1 FROM router_admission_fences WHERE id=?', (rid,)).fetchone():
+                    db.execute('COMMIT')
+                    return
                 if old and old['state'] == 'complete' and old['admission_rejection']:
                     db.execute('COMMIT')
                     return  # The original negative HTTP receipt is immutable.
