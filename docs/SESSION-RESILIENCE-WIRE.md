@@ -57,7 +57,7 @@ Create/list используют пути без `/{sid}`. SDK alias — тре�
 | POST `/prompt?mode=async` | Принятие нового turn | 202/turnId — ACK, результат в exact events/receipt |
 | POST `/prompt` с SSE | Gate читает события принятого async producer Router. Прямой Router имеет legacy cancel-on-disconnect | Gate повторяет внутреннее чтение того же turn и курсора при временном обрыве. После обрыва клиентского SSE использовать exact events |
 | GET `/turns/{turnId}` | Состояние exact turn при ready binding | Может содержать `toolCallbacks`. Для закрытого binding читать events/receipt |
-| GET `/turns/{turnId}/events?after=N&wait=M` | События после `N`, `nextAfter`, `state`, `done`. `wait` в мс, максимум 30 000 | Допускает чтение своего closed binding. При 410 отдельно запросить summary receipt. 404 оставляет отсутствие данных или доступа |
+| GET `/turns/{turnId}/events?after=N&wait=M` | События после `N`, `nextAfter`, `state`, `done`. `wait` в мс, максимум 30 000 | Допускает чтение своего closed binding. При временном обрыве Gate до 3 секунд повторяет только чтение с тем же `after` на закреплённом Router. Если связь всё ещё недоступна, клиент сохраняет курсор и повторяет GET. При 410 отдельно запросить summary receipt. 404 оставляет отсутствие данных или доступа |
 | GET `/turns/{turnId}/receipt` | Сохранённый terminal summary | Не SDK generation. Чтение own closed turn сохраняет ownership checks/usage dedup |
 | POST `/tool_result` | Доставка сохранённого результата exact callId | Accepted ACK не означает success задания; инструмент не исполняется этим endpoint заново |
 | POST `/interrupt` | Прервать текущий сессионный ход | Legacy target scope ограничен; RFC требует exact turn/generation fencing для позднего Stop |
