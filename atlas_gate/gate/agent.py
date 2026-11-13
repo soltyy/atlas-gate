@@ -357,6 +357,10 @@ async def _compact_control(request, device, binding, raw, request_id):
 @router.get("/harness/agent/sessions/{sid}/commands/{command_id}")
 async def control_receipt(sid: str, command_id: str, request: Request,
                           device: Device = Depends(require_device)):
+    return await _read_command_receipt(sid, command_id, request, device)
+
+
+async def _read_command_receipt(sid, command_id, request, device, *, request_key=None):
     state = gate(request)
     binding = state.store._one("SELECT * FROM router_bindings WHERE id=? AND device_id=? AND org=?", (sid, device.device_id, device.org))
     if binding is None:
@@ -378,7 +382,15 @@ async def control_receipt(sid: str, command_id: str, request: Request,
         if (request.headers.get(CONTRACT_HEADER) != '1' or not expected or
                 request.headers.get(TARGET_HEADER) != expected):
             raise GateError(409, 'steer_contract_mismatch', 'Сверка требует исходные заголовки intent', state='unknown')
-    current = await _control_receipt(state, op)
+    if request_key and state.operations.closed_prompt_candidate(op, binding):
+        proof, current = await _resolve_closed_prompt(
+            state, device, binding, request_key, op["turn_id"], op["body_sha256"])
+        if proof["outcome"] == "not_sent":
+            return _admission_negative(proof)
+    else:
+        current = await _control_receipt(state, op)
+    if binding['status'] == 'closed' and op['path'].endswith('/prompt') and current.get("receiptState") == "missing":
+        current["receiptState"] = "unavailable"  # A closed binding cannot accept a transport retry.
     if current["state"] != "complete":
         if current.get('steer'):
             return _pending_control(current)  # Keep durable input evidence even if HTTP receipt is unavailable.
@@ -395,14 +407,65 @@ async def receipt_by_key(sid: str, request: Request, requestId: str,
                          device: Device = Depends(require_device)):
     """Lost ACK: клиент знает исходный Idempotency-Key, но ещё не знает commandId."""
     state = gate(request)
-    return await control_receipt(sid, state.operations.key(device, requestId), request, device)
+    return await _read_command_receipt(sid, state.operations.key(device, requestId), request, device,
+                                       request_key=requestId)
 
 
 def _admission_negative(proof):
     return JSONResponse({'error': {'code': 'command_not_sent', 'message': 'Исходный intent закрыт до допуска'},
                          'recovery': proof}, status_code=409, headers={
         'X-Atlas-Command-State': 'complete', 'X-Atlas-Command-Id': proof['commandId'],
-        'X-Atlas-Command-Outcome': 'not_sent', 'X-Atlas-Recovery-Version': '1'})
+        'X-Atlas-Command-Outcome': 'not_sent', 'X-Atlas-Recovery-Version': '1',
+        'Cache-Control': 'private, no-store'})
+
+
+async def _closed_prompt_absent(state, binding, op):
+    """Router 0.8.24 keeps closed sessions and turn identities across journal purge."""
+    node, boot = op["node_id"], op["boot_id"]
+    try:
+        info = await state.nodes.probe(node)
+        if (not info or info.get("bootId") != boot or info.get("routerVersion") != "0.8.24"
+                or not {"durable_commands", "durable_events"}.issubset(info.get("capabilities", []))):
+            return False
+        response = await state.nodes.request(node, "GET", _path(binding, "/reconcile"), expected_boot=boot)
+        if response.status_code != 200:
+            return False
+        source = response.json()
+        lifecycle = source.get("sessionRecovery", {})
+        if (source.get("id") != binding["local_id"] or source.get("nodeId") != node
+                or source.get("bootId") != boot or source.get("sdkSessionId") != binding["sdk_id"]
+                or source.get("closed") is not True or source.get("recoverable") is not False
+                or lifecycle.get("version") != 1 or lifecycle.get("busy") is not False
+                or lifecycle.get("replacementRequired") is not True
+                or "pendingTurnId" not in lifecycle or lifecycle["pendingTurnId"] is not None):
+            return False
+        turn = _path(binding, "/turns/" + quote(op["turn_id"], safe=""))
+        checks = (
+            ("/v1/commands/" + op["id"], None, "command_not_found"),
+            (turn + "/receipt", None, "receipt_not_found"),
+            (turn + "/events", {"after": 0, "wait": 0}, f"сессия {binding['local_id']} не найдена"),
+        )
+        for path, params, missing in checks:
+            evidence = await state.nodes.request(node, "GET", path, params=params, expected_boot=boot)
+            if evidence.status_code != 404 or evidence.json() != {"detail": missing}:
+                return False
+        latest = await state.nodes.probe(node)
+        return bool(latest and latest.get("bootId") == boot and not state.nodes.revoked(node))
+    except (GateError, ValueError, TypeError, AttributeError):
+        return False
+
+
+async def _resolve_closed_prompt(state, device, binding, key, turn_id, digest):
+    rid = state.operations.key(device, key)
+    async with state.operations.delivery_lock(rid):
+        proof = state.operations.resolve_prompt(device, binding, key, turn_id, digest)
+        op = state.store._one("SELECT * FROM router_operations WHERE id=?", (rid,))
+        if proof["outcome"] == "not_sent" or not op or not state.operations.closed_prompt_candidate(op, binding):
+            return proof, op
+        current = await _control_receipt(state, op)
+        if current.get("receiptState") == "missing" and await _closed_prompt_absent(state, binding, current):
+            proof = state.operations.resolve_prompt(device, binding, key, turn_id, digest, closed_journal=True)
+        return proof, current
 
 
 @router.post('/harness/agent/sessions/{sid}/commands/reconcile')
@@ -416,7 +479,19 @@ async def reconcile_prompt_admission(sid: str, body: PromptAdmissionResolve, req
     _policy(state, device, binding, request, require_model=False, require_sdk=False)
     if state.nodes.revoked(binding['node_id']):
         raise GateError(503, 'node_unavailable', 'Router отозван')
-    proof = state.operations.resolve_prompt(device, binding, body.requestId, body.turnId, body.bodySha256)
+    if binding['status'] == 'closed':
+        proof, current = await _resolve_closed_prompt(
+            state, device, binding, body.requestId, body.turnId, body.bodySha256)
+        if proof['outcome'] != 'not_sent' and current and current['state'] == 'complete' and current['status'] == 202:
+            try:
+                ack = json.loads(current['response'])
+            except (TypeError, ValueError):
+                ack = None
+            if isinstance(ack, dict) and ack.get('turnId') == body.turnId:
+                import httpx
+                return _operation_response(httpx.Response(202, content=current['response'].encode()), current)
+    else:
+        proof = state.operations.resolve_prompt(device, binding, body.requestId, body.turnId, body.bodySha256)
     if proof['outcome'] == 'not_sent':
         return _admission_negative(proof)
     return JSONResponse({'recovery': proof}, status_code=202, headers={'Retry-After': '1'})
@@ -488,6 +563,10 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
                             and proof.get("commandState") == "missing"):
                         raise _tool_result_pending(op)
             extra = {"tool_result_turn": tool_result_turn} if tool_result_turn is not None else {}
+            if op['path'].endswith('/prompt'):
+                source = state.store._one('SELECT status FROM router_bindings WHERE id=?', (op['session_id'],))
+                if not source or source['status'] != 'ready':
+                    raise _tool_result_pending(op)
             response = await state.nodes.request(
                 binding["node_id"], op['method'], op["path"], content=raw, params=params,
                 expected_boot=op["boot_id"] or binding["boot_id"], request_id=op["id"], **extra)
