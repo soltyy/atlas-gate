@@ -14,6 +14,17 @@ def body_sha256(body):
                                      ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
+def tool_result_not_sent(op):
+    """Recognize the Gate preflight response, including rows written before #124."""
+    if op['method'] != 'POST' or not op['path'].endswith('/tool_result') or op['status'] != 503:
+        return False
+    try:
+        error = json.loads(op['response'])['error']
+        return error['code'] == 'node_unavailable' and error['deliveryState'] == 'not_sent'
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 class Operations:
     def __init__(self, store):
         self.store = store
@@ -309,6 +320,13 @@ class Operations:
                             or failed.path != old['path'] or binding['id'] != old['session_id']
                             or binding['device_id'] != old['device_id'] or response.status_code != 503):
                         raise ValueError('invalid pre-dispatch provenance')
+                    if old['method'] == 'POST' and old['path'].endswith('/tool_result'):
+                        # The client still owns the saved result. Keep its original key and
+                        # digest open for exact recovery, even if this Gate restarts.
+                        db.execute("UPDATE router_operations SET state='unknown',status=?,response=? WHERE id=?",
+                                   (response.status_code, response.text, rid))
+                        db.execute('COMMIT')
+                        return
                     if old['method'] == 'POST' and old['path'].endswith('/prompt'):
                         rejection = {'version': 1, 'source': 'gate_node_preflight', 'reason': failed.reason,
                             'dispatchStarted': False, 'deviceId': old['device_id'], 'org': binding['org'],

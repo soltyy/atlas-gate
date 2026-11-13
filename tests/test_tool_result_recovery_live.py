@@ -5,11 +5,15 @@ import asyncio
 import httpx
 import pytest
 
+from atlas_gate.gate.errors import GateFreshNodeError
 from atlas_gate.gate.operations import body_sha256
 from .test_network_gate import create, network  # noqa: F401
 
 
-@pytest.mark.parametrize("failure", ["before", "after", "stop", "started", "stop_race", "context_error"])
+@pytest.mark.parametrize("failure", [
+    "before", "after", "stop", "started", "stop_race", "context_error",
+    "preflight", "legacy_preflight", "preflight_stop",
+])
 async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure):
     from atlas_router.backends.stub import StubSession
 
@@ -31,6 +35,7 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     actual_tool_result = StubSession.tool_result
     cut = False
     send_count = 0
+    preflight = failure in ("preflight", "legacy_preflight", "preflight_stop")
 
     async def scripted(self, turn_id, text, attachments=None):
         prompts.append(turn_id)
@@ -59,7 +64,7 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         nonlocal cut, send_count
         if method == "POST" and url.endswith("/tool_result") and call.encode() in kwargs["content"]:
             send_count += 1
-            if not cut:
+            if not cut and not preflight:
                 cut = True
                 if failure == "after":
                     assert (await actual_request(method, url, **kwargs)).status_code == 200
@@ -74,6 +79,15 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     monkeypatch.setattr(StubSession, "_turn", scripted)
     monkeypatch.setattr(StubSession, "tool_result", tool_result)
     monkeypatch.setattr(state.nodes.clients[node], "request", broken_request)
+    if preflight:
+        request_node = state.nodes.request
+
+        async def preflight_down(node_id, method, path, **kwargs):
+            if method == "POST" and path.endswith("/tool_result") and call.encode() in kwargs["content"]:
+                raise GateFreshNodeError("node probe unavailable", node_id=node_id, method=method,
+                                         path=path, reason="identity_unconfirmed", retryable=True)
+            return await request_node(node_id, method, path, **kwargs)
+
     assert (await client.post(prefix + "/prompt?mode=async", json={"id": turn, "text": "parallel"})).status_code == 202
     async with asyncio.timeout(8):
         while True:
@@ -91,12 +105,25 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         "nodeId": node, "bootId": binding["boot_id"], "pendingCallIds": [call, sibling],
     }
     assert (await client.post(prefix + "/tool_result", json={"callId": sibling, "content": "other"})).status_code == 200
-    first = await client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key})
+    with monkeypatch.context() as outage:
+        if preflight:
+            outage.setattr(state.nodes, "request", preflight_down)
+        first = await client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key})
     assert first.status_code == 503 and first.json()["error"]["code"] == "command_outcome_unknown"
-    if failure == "stop":
+    if preflight:
+        assert "X-Atlas-Command-State" not in first.headers
+        op = state.store._one("SELECT * FROM router_operations WHERE session_id=? AND path LIKE '%/tool_result' AND status=503", (sid,))
+        assert op["state"] == "unknown" and op["body_sha256"] == body_sha256(body)
+        if failure == "legacy_preflight":
+            state.store._exec("UPDATE router_operations SET state='complete' WHERE id=?", (op["id"],))
+        pending = await client.get(prefix + "/commands", params={"requestId": key})
+        assert pending.status_code == 202 and pending.json()["receiptState"] == "missing"
+        assert (await client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key})).status_code == 503
+        assert send_count == 0
+    if failure in ("stop", "preflight_stop"):
         assert (await client.post(prefix + "/interrupt")).json()["settled"]
     turn_status = (await client.get(f"{prefix}/turns/{turn}")).json()
-    if failure in ("before", "started", "stop_race", "context_error"):
+    if failure in ("before", "started", "stop_race", "context_error", "preflight", "legacy_preflight"):
         assert turn_status["toolCallbacks"]["pendingCallIds"] == [call]
     else:
         assert turn_status["done"] and "toolCallbacks" not in turn_status
@@ -104,7 +131,7 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     result = (await client.get(recovery, params=recovery_query)).json()
     assert result["requestId"] == key and result["bodySha256"] == body_sha256(body)
     assert result["outcome"] == ("accepted" if failure == "after" else "unknown")
-    assert result["retryAllowed"] is (failure in ("before", "stop_race", "context_error"))
+    assert result["retryAllowed"] is (failure in ("before", "stop_race", "context_error", "preflight", "legacy_preflight"))
     wrong = await client.get(recovery.replace(f"/{turn}/", "/wrong/"), params=recovery_query)
     assert wrong.json()["outcome"] == "unknown" and wrong.json()["retryAllowed"] is False
     foreign = await client.get(recovery, params=recovery_query,
@@ -113,13 +140,22 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     changed = await client.post(prefix + "/tool_result", json=dict(body, content="changed"), headers=retry_headers)
     assert changed.status_code == 409
 
-    if failure == "before":
+    if failure in ("before", "preflight"):
         fake_boot = dict(binding, boot_id="wrong-boot")
         from atlas_gate.gate.agent import _tool_recovery_state
         op = state.store._one("SELECT * FROM router_operations WHERE id=?", (result["commandId"],))
         assert await _tool_recovery_state(state, fake_boot, op, turn, call) is None
-    replay = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
-    if failure in ("before", "after", "context_error"):
+    if failure == "legacy_preflight":
+        replay, duplicate, observed = await asyncio.gather(
+            client.post(prefix + "/tool_result", json=body, headers=retry_headers),
+            client.post(prefix + "/tool_result", json=body, headers=retry_headers),
+            client.get(recovery, params=recovery_query),
+        )
+        assert duplicate.content == replay.content
+        assert observed.json()["outcome"] in ("accepted", "unknown")
+    else:
+        replay = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
+    if failure in ("before", "after", "context_error", "preflight", "legacy_preflight"):
         assert replay.status_code == 200 and replay.json()["status"] == "accepted"
         again = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
         assert again.content == replay.content
@@ -141,5 +177,5 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         assert effects == [sibling]
         if failure == "started":
             await client.post(prefix + "/interrupt")
-    assert send_count == (2 if failure in ("before", "stop_race", "context_error") else 1)
+    assert send_count == {"before": 2, "stop_race": 2, "context_error": 2, "preflight_stop": 0}.get(failure, 1)
     assert prompts == [turn]

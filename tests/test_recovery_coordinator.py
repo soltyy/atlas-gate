@@ -280,6 +280,25 @@ async def test_exact_closed_terminal_ack_output_pagination_and_no_business_dispa
     assert not state.store._all("SELECT * FROM usage")
 
 
+async def test_historical_tool_preflight_is_pending_until_router_receipt(recovery_http):
+    client, state, nodes = recovery_http
+    ref, operations = source(state, nodes, terminal=False)
+    callback = operations[-1]
+    command_id = state.operations.key(owner(state), callback["requestId"])
+    state.store._exec("UPDATE router_operations SET status=503,response=? WHERE id=?",
+        (json.dumps({"error": {"code": "node_unavailable", "deliveryState": "not_sent"}}), command_id))
+    inv = await inventory(client, [ref])
+    snapshot, _ = await case(client, inv, ref, operations)
+    assert snapshot["operations"][-1]["outcome"] == "outcome_unknown"
+    assert not any(e["body"]["kind"] == "tool_result" for e in snapshot["evidence"])
+
+    nodes.commands[command_id] = {"requestId": command_id, "state": "complete", "status": 200,
+                                 "response": {"ok": True, "callId": callback["callId"], "status": "accepted"}}
+    settled = (await client.get("/harness/recovery/cases/" + snapshot["recoveryId"])).json()
+    assert settled["operations"][-1]["outcome"] == "accepted"
+    assert not any(method == "POST" and path.endswith("/tool_result") for method, path, _ in nodes.calls)
+
+
 async def test_first_late_ack_survives_revision_stop_and_restart(recovery_http):
     client, state, nodes = recovery_http
     ref, operations = source(state, nodes)
