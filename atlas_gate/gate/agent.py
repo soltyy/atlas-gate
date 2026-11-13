@@ -18,7 +18,7 @@ from ..sdk_tools import SdkTools, permitted
 from .state import Device
 from .attachments import node_attachments, validate_prompt, validate_tool_result
 from .reasoning import model_policy, validate_new_prompt
-from .operations import body_sha256
+from .operations import body_sha256, tool_result_not_sent
 from .token_usage import accountable_terminal
 
 log = logging.getLogger("atlas_gate")
@@ -276,6 +276,9 @@ async def _bound_attachments(state, binding):
 async def _control_receipt(state, op):
     current = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
     pending_steer = current.get('steer') and json.loads(current['steer'])['state'] in ('accepted', 'unknown')
+    if tool_result_not_sent(current):
+        # Project an old local refusal as pending while looking for Router's receipt.
+        current["state"] = "unknown"
     if current["state"] != "complete" or pending_steer:
         current["receiptState"] = "unavailable"
         try:
@@ -448,7 +451,9 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
 
     async with state.operations.delivery_lock(op["id"]):
         op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
-        if op["state"] == "complete":
+        not_sent = tool_result_not_sent(op)
+        fresh = fresh and op["state"] == "prepared"
+        if op["state"] == "complete" and not not_sent:
             if op.get('steer'):
                 op = await _control_receipt(state, op)
             return httpx.Response(op["status"], content=op["response"].encode())
@@ -467,7 +472,7 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
                     raise _tool_result_pending(op)
                 if receipt.status_code != 404:
                     raise _tool_result_pending(op)
-                if op.get('steer'):
+                if op.get('steer') or (not_sent and tool_result_turn is None):
                     # Absence is not proof of non-admission, even on the same boot.
                     raise _tool_result_pending(op)
                 # 404 разрешает повтор только при прежнем boot и durable дедупликации.
@@ -495,6 +500,8 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
                 if op.get('steer'):
                     state.operations.observe_steer(op['id'], {**json.loads(op['steer']), 'state': 'not_applied'})
                 state.operations.complete(op['id'], response, pre_dispatch=(binding, failed))
+                if op['method'] == 'POST' and op['path'].endswith('/tool_result'):
+                    raise _tool_result_pending(op) from failed
                 return response
             state.operations.unknown(op["id"])
             log.warning("command pending: command=%s node=%s code=%s cause=%s",
@@ -614,13 +621,13 @@ def _original_tool_operation(state, device, binding, turn_id, call_id, digest):
 
 
 async def _tool_recovery_state(state, binding, op, turn_id, call_id):
-    if not op["boot_id"] or op["boot_id"] != binding["boot_id"]:
+    if op["node_id"] != binding["node_id"] or not op["boot_id"] or op["boot_id"] != binding["boot_id"]:
         return None
     info = state.nodes.snapshots.get(binding["node_id"])
     if not info or time.monotonic() - info.get("observed", 0) > 5:
         info = await state.nodes.probe(binding["node_id"])
     if (not info or info.get("bootId") != op["boot_id"]
-            or "tool_result_recovery_v1" not in info.get("capabilities", [])):
+            or not {"tool_result_recovery_v1", "durable_commands"}.issubset(info.get("capabilities", []))):
         return None
     response = await state.nodes.request(
         binding["node_id"], "GET", _path(binding, f"/turns/{quote(turn_id, safe='')}/tool-result-recovery"),
@@ -645,11 +652,12 @@ async def tool_result_recovery(sid: str, turn_id: str, callId: str, bodySha256: 
     op = _original_tool_operation(state, device, binding, turn_id, callId, bodySha256)
     if op is None:
         raise GateError(404, "not_found", "Исходная доставка не найдена")
-    current = await _control_receipt(state, op)
-    try:
-        proof = await _tool_recovery_state(state, binding, op, turn_id, callId)
-    except (GateError, ValueError):
-        proof = None
+    async with state.operations.delivery_lock(op["id"]):
+        current = await _control_receipt(state, op)
+        try:
+            proof = await _tool_recovery_state(state, binding, op, turn_id, callId)
+        except (GateError, ValueError):
+            proof = None
     outcome, retry = "unknown", False
     if proof and current["state"] == "complete":
         try:

@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .api import gate, org_of, require_device
 from .errors import GateError, GateRoute
-from .operations import body_sha256
+from .operations import body_sha256, tool_result_not_sent
 from .receipts import completed_response
 from .history_identity import CAPABILITY as SOURCE_HISTORY_IDENTITY
 
@@ -809,7 +809,7 @@ class Recovery:
                        or not op["path"].endswith("/" + kind) or (op["body_sha256"] and op["body_sha256"] != operation["bodySha256"])
                        or (kind == "prompt" and op["turn_id"] != operation["turnId"])):
                 _fail("recovery_source_conflict", "Исходные key/body/turn не соответствуют command ledger")
-            if op and op["state"] != "complete":
+            if op and (op["state"] != "complete" or tool_result_not_sent(op)):
                 try:
                     response = await self.state.nodes.request(binding["node_id"], "GET", "/v1/commands/" + quote(oid, safe=""))
                     confirmed = completed_response(response.json(), oid) if response.status_code == 200 else None
@@ -822,7 +822,7 @@ class Recovery:
             payload, action_kind = None, None
             if kind == "tool_effect":
                 outcome["outcome"] = "effect_unknown"
-            elif op and op["state"] == "complete":
+            elif op and op["state"] == "complete" and not tool_result_not_sent(op):
                 try:
                     response = json.loads(op["response"])
                 except (TypeError, ValueError):
