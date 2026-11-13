@@ -122,25 +122,48 @@ async def _events(state, binding, turn, device, after=0, wait=0):
     return response, doc
 
 
-async def _follow_event_page(state, binding, turn, device, after):
-    """Retry only observation of the accepted turn, at the same cursor."""
+async def _follow_event_page(state, binding, turn, device, after, wait=1000, *, retry_window=None):
+    """Retry the same journal read. JSON polling bounds recovery within one request."""
     delay = 0.25
+    loop = asyncio.get_running_loop()
+    deadline = None
+    failure = None
     while True:
         try:
-            response, doc = await _events(state, binding, turn, device, after, 1000)
+            async with asyncio.timeout_at(deadline):
+                response, doc = await _events(state, binding, turn, device, after, wait)
+        except TimeoutError:
+            if failure is None:
+                raise
+            break
         except GateError as failed:
             if failed.code != "node_unavailable" or (
                     isinstance(failed, GateFreshNodeError) and not failed.retryable):
                 raise
+            failure = failed
             reason = failed.code
         else:
             if response.status_code not in (502, 503, 504):
                 return response, doc
+            if retry_window is not None and "Retry-After" in response.headers:
+                return response, doc
+            failure = (response, doc)
             reason = f"HTTP {response.status_code}"
         if delay == 0.25:
-            log.warning("Чтение событий Router прервано: turn=%s after=%s reason=%s", turn, after, reason)
+            log.warning("Чтение событий Router прервано: node=%s turn=%s after=%s reason=%s",
+                        binding["node_id"], turn, after, reason)
+        if retry_window is not None:
+            if deadline is None:
+                deadline = loop.time() + retry_window
+            if loop.time() + delay >= deadline:
+                break
+            # After a failed long poll, fetch the saved page immediately when the link returns.
+            wait = 0
         await asyncio.sleep(delay)
         delay = min(delay * 2, 5)
+    if isinstance(failure, GateError):
+        raise failure
+    return failure
 
 
 async def _watch(state, binding, turn, device):
@@ -934,7 +957,8 @@ async def agent_events(sid: str, turn_id: str, request: Request, device: Device 
             raise ValueError
     except ValueError:
         raise GateError(422, "invalid_request", "after/wait должны быть неотрицательными числами")
-    response, doc = await _events(state, binding, turn_id, device, after, min(wait, 30000))
+    response, doc = await _follow_event_page(state, binding, turn_id, device, after, min(wait, 30000),
+                                            retry_window=3)
     return JSONResponse(doc) if doc is not None else _response(response)
 
 

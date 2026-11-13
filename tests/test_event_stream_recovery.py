@@ -1,5 +1,6 @@
 import asyncio
 import json
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -137,3 +138,95 @@ async def test_sse_does_not_retry_a_forbidden_router_probe(network, monkeypatch)
     events = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith("data: ")]
     assert len(failed_probes) in (1, 2)  # Routing and Nodes may both verify identity.
     assert len(events) == 1 and events[0]["type"] == "error" and events[0]["kind"] == "node_unavailable"
+
+
+async def test_json_poll_recovers_lost_page_after_delivered_tool_result(network, monkeypatch):
+    from atlas_router.backends.stub import StubSession
+
+    client, app, _, _, _, other = network
+    state = app.state.gate
+    state.recovery_task.cancel()
+    await asyncio.gather(state.recovery_task, return_exceptions=True)
+
+    async def no_watch(*args):
+        pass
+
+    monkeypatch.setattr("atlas_gate.gate.agent._watch", no_watch)
+    sid = await create(client)
+    binding = state.store._one("SELECT * FROM router_bindings WHERE id=?", (sid,))
+    node = binding["node_id"]
+    turn = "json-reconnect"
+    event_suffix = f"/turns/{turn}/events"
+    prefix = f"/harness/agent/sessions/{sid}"
+    events_url = prefix + event_suffix
+    requests, producers, actions = [], [], []
+    failures = asyncio.Queue()
+    actual_turn = StubSession._turn
+    transport = state.nodes.clients[node]._transport
+    actual_send = transport.handle_async_request
+
+    async def producer(self, turn_id, text, attachments=None):
+        producers.append(turn_id)
+        async for event in actual_turn(self, turn_id, text, attachments):
+            yield event
+
+    async def drop_response(request):
+        path = urlsplit(str(request.url)).path
+        if request.method == "POST" and path.startswith("/v1/sessions/"):
+            requests.append(("POST", path.rsplit("/", 1)[-1]))
+        if path.endswith(event_suffix):
+            requests.append(("GET", int(request.url.params["after"])))
+            if not failures.empty():
+                action = failures.get_nowait()
+                if action == "hang":
+                    await asyncio.Event().wait()
+                upstream = await actual_send(request)
+                await upstream.aread()
+                await upstream.aclose()
+                raise httpx.RemoteProtocolError("lost upstream HTTP reply", request=request)
+        return await actual_send(request)
+
+    monkeypatch.setattr(StubSession, "_turn", producer)
+    monkeypatch.setattr(transport, "handle_async_request", drop_response)
+    assert (await client.post(prefix + "/prompt?mode=async", json={"id": turn, "text": "call:echo"})).status_code == 202
+    cursor, seen = 0, []
+    async with asyncio.timeout(12):
+        while not actions:
+            initial = await client.get(events_url, params={"after": cursor, "wait": 200})
+            assert initial.status_code == 200
+            page = initial.json()
+            cursor = page["nextAfter"]
+            seen.extend(event["seq"] for event in page["events"])
+            for event in page["events"]:
+                if event["type"] == "tool_call":
+                    actions.append(event["callId"])
+                    reply = await client.post(prefix + "/tool_result", json={
+                        "callId": event["callId"], "content": "one local execution",
+                    })
+                    assert reply.status_code == 200
+        failures.put_nowait("drop")
+        failures.put_nowait("hang")
+        before = len(requests)
+        stalled = await client.get(events_url, params={"after": cursor, "wait": 200})
+        assert stalled.status_code == 503 and stalled.json()["error"]["code"] == "node_unavailable"
+        assert requests[before:] == [("GET", cursor)] * 2
+
+        failures.put_nowait("drop")
+        before = len(requests)
+        recovered = await client.get(events_url, params={"after": cursor, "wait": 200})
+        assert recovered.status_code == 200
+        assert requests[before:] == [("GET", cursor)] * 2
+        terminal = recovered.json()
+        assert terminal["done"] and terminal["state"] == "done"
+        assert all(event["type"] != "tool_call" for event in terminal["events"])
+        assert terminal["events"][-1]["text"].endswith("one local execution")
+        seen.extend(event["seq"] for event in terminal["events"])
+        assert seen == list(range(1, terminal["nextAfter"] + 1))
+        assert (await client.get(events_url, params={"after": cursor})).json() == terminal
+        foreign = await client.get(events_url, headers={"Authorization": "Bearer " + other["device_token"]})
+        assert foreign.status_code in (403, 404)
+        missing = await client.get(prefix + "/turns/absent/events")
+        assert missing.status_code == 404
+    assert len(actions) == 1 and producers == [turn]
+    assert [op for method, op in requests if method == "POST"] == ["prompt", "tool_result"]
+    assert state.store._one("SELECT COUNT(*) n FROM router_usage_receipts")["n"] == 1

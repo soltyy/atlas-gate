@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import math
 import os
 import time
@@ -14,6 +15,9 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, Field, model_validator
 from .errors import GateError, GateFreshNodeError
+
+
+log = logging.getLogger("atlas_gate")
 
 
 class Node(BaseModel):
@@ -156,6 +160,8 @@ class Nodes:
                     self.store._exec("INSERT INTO router_catalogs VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET models=excluded.models", (node_id, json.dumps(info["models"])))
             return self.snapshots[node_id]
         except (httpx.HTTPError, ValueError, TypeError, KeyError, GateError) as failed:
+            if isinstance(failed, httpx.TransportError):
+                log.warning("Router transport failed: node=%s phase=probe cause=%s", node_id, type(failed).__name__)
             if (isinstance(failed, httpx.TransportError)
                     or isinstance(failed, httpx.HTTPStatusError) and failed.response.status_code in (502, 503, 504)
                     or isinstance(failed, GateError) and failed.code == "node_unavailable"):
@@ -207,6 +213,8 @@ class Nodes:
             response = await self.clients[node_id].request(method, path, content=content,
                 params=params, headers=headers, **options)
         except httpx.HTTPError as failed:
+            log.warning("Router transport failed: node=%s phase=request method=%s cause=%s",
+                        node_id, method, type(failed).__name__)
             raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable",
                             "ответ Router не получен; повтор на другом узле запрещён", node_id=node_id) from failed
         if response.status_code == 429 and "capacity_exceeded" not in response.text:
