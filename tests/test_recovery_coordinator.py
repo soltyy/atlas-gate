@@ -280,6 +280,39 @@ async def test_exact_closed_terminal_ack_output_pagination_and_no_business_dispa
     assert not state.store._all("SELECT * FROM usage")
 
 
+async def test_existing_unknown_effect_is_resolved_by_a_later_exact_result(recovery_http):
+    client, state, nodes = recovery_http
+    ref, operations = source(state, nodes, tool=False)
+    call, turn = "late-call", operations[0]["turnId"]
+    nodes.turns[turn][0] = {"type": "tool_call", "seq": 1, "id": turn, "callId": call, "name": "echo", "input": {}}
+    key = f"tool-result:{ref['sessionId']}:{call}"
+    operations.append({"kind": "tool_effect", "requestId": key, "turnId": turn, "callId": call,
+                       "bodySha256": body_sha256({"name": "echo", "arguments": {}}), "localState": "effect_unknown"})
+    inv = await inventory(client, [ref])
+    snapshot, _ = await case(client, inv, ref, operations)
+    assert snapshot["operations"][-1]["outcome"] == "effect_unknown"
+    path = "/harness/recovery/cases/" + snapshot["recoveryId"]
+    binding = state.store._one("SELECT * FROM router_bindings WHERE id=?", (ref["sessionId"],))
+    output = {"callId": call, "content": "verified output"}
+    command, _ = state.operations.begin(owner(state), binding, "POST", "/v1/sessions/local-old/tool_result",
+                                         output, request_id=key)
+    state.operations.complete(command["id"], httpx.Response(200, json={"ok": True, "callId": call, "status": "accepted"}))
+    assert body_sha256(output) != operations[-1]["bodySha256"]
+    updated = await client.get(path)
+    assert updated.status_code == 200, updated.text
+    updated = updated.json()
+    assert [op["outcome"] for op in updated["operations"]] == ["terminal_success", "accepted"]
+    evidence = next(e["body"]["payload"] for e in updated["evidence"] if e["body"]["kind"] == "tool_effect")
+    assert evidence["resultBodySha256"] == body_sha256(output)
+    assert evidence["operation"]["bodySha256"] == operations[-1]["bodySha256"]
+    assert "content" not in evidence["receipt"]
+    await post(client, "/harness/recovery/inventories/" + inv["inventoryId"] + "/seal", {"version": 1}, "seal")
+    ack = await client.post(path + "/ack", json=ack_body(updated))
+    assert ack.status_code == 200, ack.text
+    admit(state, "old")
+    assert not any(method == "POST" and path.endswith(("/prompt", "/tool_result")) for method, path, _ in nodes.calls)
+
+
 async def test_historical_tool_preflight_is_pending_until_router_receipt(recovery_http):
     client, state, nodes = recovery_http
     ref, operations = source(state, nodes, terminal=False)
