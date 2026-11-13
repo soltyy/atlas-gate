@@ -459,11 +459,9 @@ class Recovery:
                              (inventory["id"], body["sourceRef"])).fetchone()
             if not ref or ref["run_id"] != body["sourceRunId"] or ref["session_id"] != binding["id"]:
                 _fail("recovery_source_conflict", "Source отсутствует в inventory")
-            supplied = {(o["kind"], o["requestId"], o["bodySha256"]) for o in body["operations"]}
             for prior in db.execute("SELECT manifest FROM recovery_cases WHERE branch_id=? AND run_id=? AND session_id=? AND resolved=0",
                                     (branch["id"], body["sourceRunId"], binding["id"])).fetchall():
-                missing = [o["requestId"] for o in json.loads(prior["manifest"])["operations"]
-                           if (o["kind"], o["requestId"], o["bodySha256"]) not in supplied]
+                missing = self._uncovered_operations(json.loads(prior["manifest"]), body, binding["id"])
                 if missing:
                     _fail("recovery_manifest_incomplete", "Новый case не может отбросить прежние pending операции source", missingOperations=missing)
             cid = str(uuid.uuid4())
@@ -665,18 +663,48 @@ class Recovery:
             return {"actionId": step["action_id"], "status": confirmed.status_code, "outcome": "rejected"}
         return None
 
-    def _mark_resolved(self, db, case, manifest):
-        """A proof applied to a complete source also settles equivalent older cases.
+    @staticmethod
+    def _uncovered_operations(previous, current, session_id, accepted=None):
+        """Carry forward exact operations, allowing a durable output to advance its own effect."""
+        def identity(operation):
+            return tuple(operation.get(field) for field in ("kind", "requestId", "turnId", "callId", "bodySha256"))
 
-        A later superset carrying another unknown operation remains unresolved.
-        The cancellation facts and immutable receipts themselves are retained.
-        """
-        supplied = {(o["kind"], o["requestId"], o["bodySha256"]) for o in manifest["operations"]}
-        siblings = db.execute("SELECT id,manifest FROM recovery_cases WHERE branch_id=? AND run_id=? AND session_id=?",
+        supplied = {identity(operation) for operation in current["operations"]}
+        advanced = {}
+        if current.get("sourceCheckpointVersion", 0) > previous.get("sourceCheckpointVersion", 0):
+            for operation in current["operations"]:
+                call = operation.get("callId")
+                if (call and operation["kind"] == "tool_result" and operation.get("localState") == "output_durable"
+                        and operation.get("outputRef") and operation["requestId"] == f"tool-result:{session_id}:{call}"):
+                    advanced[(operation["requestId"], operation["turnId"], call)] = operation
+        missing = []
+        for operation in previous["operations"]:
+            if identity(operation) in supplied:
+                continue
+            candidate = advanced.get((operation["requestId"], operation.get("turnId"), operation.get("callId")))
+            if operation["kind"] != "tool_effect" or candidate is None or (accepted is not None and not accepted(candidate)):
+                missing.append(operation["requestId"])
+        return missing
+
+    def _mark_resolved(self, db, case, manifest):
+        """Settle older sources covered by an acknowledged checkpoint and exact receipts."""
+        def accepted(operation):
+            oid = hashlib.sha256(f"{case['device_id']}:{operation['requestId']}".encode()).hexdigest()
+            row = db.execute("SELECT * FROM router_operations WHERE id=?", (oid,)).fetchone()
+            if (not row or row["device_id"] != case["device_id"] or row["session_id"] != case["session_id"]
+                    or not row["path"].endswith("/tool_result") or row["state"] != "complete"
+                    or not 200 <= row["status"] < 300 or row["body_sha256"] != operation["bodySha256"]):
+                return False
+            try:
+                response = json.loads(row["response"])
+            except (TypeError, ValueError):
+                return False
+            return isinstance(response, dict) and response.get("status") == "accepted" and response.get("callId") == operation["callId"]
+
+        siblings = db.execute("SELECT id,manifest FROM recovery_cases WHERE branch_id=? AND run_id=? AND session_id=? AND resolved=0",
                               (case["branch_id"], case["run_id"], case["session_id"])).fetchall()
         for sibling in siblings:
-            required = {(o["kind"], o["requestId"], o["bodySha256"]) for o in json.loads(sibling["manifest"])["operations"]}
-            if required <= supplied:
+            if not self._uncovered_operations(json.loads(sibling["manifest"]), manifest, case["session_id"], accepted):
                 db.execute("UPDATE recovery_cases SET resolved=1 WHERE id=?", (sibling["id"],))
 
     def _applied_facts(self, rows, manifest, client_epoch):
