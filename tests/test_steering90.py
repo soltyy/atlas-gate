@@ -322,6 +322,7 @@ async def test_contract_headers_and_original_boot_are_required_without_auto_rebi
         value = await original_probe(node)
         return {**value, 'bootId': 'new-boot'} if node == original_binding['node_id'] else value
     monkeypatch.setattr(state.nodes, 'probe', rebooted)
+    state.nodes.snapshots.pop(original_binding['node_id'], None)
     result = await client.post(prefix + '/steer', json=body, headers=headers_for(client, prefix, 'old-boot'))
     assert result.status_code == 409 and result.json()['steer']['state'] == 'not_applied'
     assert result.json()['steer']['targetBootId'] == original_binding['boot_id'] and not calls
@@ -346,6 +347,70 @@ async def test_contract_headers_and_original_boot_are_required_without_auto_rebi
     wrong_read = await client.get(prefix + '/commands', params={'requestId': 'accepted-boot'}, headers=wrong)
     assert wrong_read.status_code == 409
     state.store._exec('UPDATE router_bindings SET boot_id=? WHERE id=?', (original_binding['boot_id'], sid))
+    assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
+
+
+@pytest.mark.parametrize('recovery', ['same_boot', 'reboot', 'lost_ack'])
+async def test_steer_metadata_disconnect_reserves_before_probe_and_never_duplicates(network, monkeypatch, recovery):
+    consumed, calls = await setup_native(network, monkeypatch)
+    client, app, routers, *_ = network
+    state = app.state.gate
+    sid, prefix = await active(client)
+    binding = state.store._one('SELECT * FROM router_bindings WHERE id=?', (sid,))
+    node, boot = binding['node_id'], binding['boot_id']
+    transport = state.nodes.clients[node]
+    original = transport.request
+    entered, release = asyncio.Event(), asyncio.Event()
+    reads, posts = [], []
+
+    async def flaky(method, path, **kwargs):
+        if method == 'GET' and path.endswith('/sdk-tools') and kwargs.get('params') == {'steering': '1'}:
+            reads.append(kwargs['headers']['X-Atlas-Boot'])
+            if len(reads) == 1:
+                entered.set()
+                await release.wait()
+                if recovery == 'reboot':
+                    state.nodes.snapshots[node]['bootId'] = 'rebooted'
+                raise httpx.RemoteProtocolError('forwarded connection closed before HTTP response')
+        if method == 'POST' and path.endswith('/steer'):
+            posts.append(kwargs['headers']['Idempotency-Key'])
+            response = await original(method, path, **kwargs)
+            if recovery == 'lost_ack':
+                raise httpx.ReadError('ACK lost after Router accepted')
+            return response
+        return await original(method, path, **kwargs)
+
+    monkeypatch.setattr(transport, 'request', flaky)
+    body = payload()
+    headers = headers_for(client, prefix, 'preflight-disconnected')
+    pending = asyncio.create_task(client.post(prefix + '/steer', json=body, headers=headers))
+    try:
+        await asyncio.wait_for(entered.wait(), 4)
+        for response in (
+            await client.get(prefix + '/commands', params={'requestId': 'preflight-disconnected'}, headers=headers),
+            await client.post(prefix + '/steer', json=body, headers=headers),
+        ):
+            assert response.status_code == 202 and response.json()['steer']['state'] == 'unknown'
+        assert not posts
+    finally:
+        release.set()
+    first = await pending
+    if recovery == 'reboot':
+        assert first.status_code == 409 and first.json()['steer']['state'] == 'not_applied'
+        assert reads == [boot] and not posts and not calls
+        state.nodes.snapshots[node]['bootId'] = boot
+        replay = await client.post(prefix + '/steer', json=body, headers=headers)
+        assert replay.status_code == 409 and not posts
+    else:
+        assert first.status_code == (503 if recovery == 'lost_ack' else 200)
+        assert reads == [boot, boot] and len(posts) == len(calls) == 1
+        consumed[body['clientMessageId']]()
+        saved = await client.get(prefix + '/commands', params={'requestId': 'preflight-disconnected'}, headers=headers)
+        assert saved.json()['steer']['state'] == 'absorbed'
+        assert saved.json()['steer']['turnId'] == 'original'
+        replay = await client.post(prefix + '/steer', json=body, headers=headers)
+        assert replay.status_code == 200 and replay.json()['steer']['state'] == 'absorbed'
+        assert len(posts) == len(calls) == 1
     assert (await client.post(prefix + '/interrupt', json={})).status_code == 200
 
 

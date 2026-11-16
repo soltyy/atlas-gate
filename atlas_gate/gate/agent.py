@@ -796,7 +796,7 @@ async def agent_interrupt(sid: str, request: Request, device: Device = Depends(r
 
 @router.post("/harness/agent/sessions/{sid}/steer")
 async def agent_steer(sid: str, body: SteerRequest, request: Request, device: Device = Depends(require_device)):
-    from .steering import capability, validate, CONTRACT_HEADER, TARGET_HEADER
+    from .steering import capability, validate, verify_target, CONTRACT_HEADER, TARGET_HEADER
     contract, target_boot = request.headers.get(CONTRACT_HEADER), request.headers.get(TARGET_HEADER)
     if body.expectedTurnId is None and contract is None and target_boot is None:
         return await _delegate(request, device, sid, "POST", "/steer")
@@ -807,42 +807,26 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request)
     key = request.headers.get('idempotency-key')
-    rid = state.operations.key(device, key)  # strong v1 requires the original stable key
+    state.operations.key(device, key)  # strong v1 requires the original stable key
     raw = await request.body()
     original = json.loads(raw)
     # Steering identity is over immutable outbox HTTP bytes, including omission
     # of defaults and Unicode encoding; prompt recovery keeps its own old rule.
     digest = hashlib.sha256(raw).hexdigest()
-    existing = state.store._one('SELECT id FROM router_operations WHERE id=?', (rid,))
-    info, preflight_error = None, None
-    if existing is None:
-        try:
-            # The target was captured by the client before admission. A restart
-            # cannot make a fresh steer target a newly restored SDK transport.
-            if binding['boot_id'] != target_boot:
-                raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime сессии изменился')
-            info = await state.nodes.probe(binding['node_id'])
-            if not info or info.get('bootId') != target_boot:
-                raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime Router изменился')
-        except GateError as failed:
-            preflight_error = failed
     metadata = {'version': 1, 'sessionId': binding['local_id'], 'turnId': body.expectedTurnId,
                 'clientMessageId': body.clientMessageId, 'uuid': None, 'state': 'unknown',
                 'bodySha256': digest, '_targetBoot': target_boot, '_contract': 1, '_org': device.org}
     op, fresh = state.operations.begin(device, binding, 'POST', _path(binding, '/steer'), original, key,
                                       body_digest=digest, steer=metadata)
+    if not fresh and op['state'] == 'prepared':
+        # The original handler owns preflight/dispatch. A concurrent retry
+        # must not turn a missing Router receipt into unknown before it sends.
+        return _pending_control(op)
     if fresh:
         # Persist preflight negatives under the original key too: a later
         # capability/profile change must not admit the same rejected intent.
         try:
-            if preflight_error is not None:
-                raise preflight_error
-            validate(body, capability((info or {}).get('steering')))
-            if (info['steering'].get('targetNodeId') != binding['node_id'] or
-                    info['steering'].get('targetBootId') != target_boot):
-                raise GateError(409, 'steer_target_boot_mismatch', 'Capability относится к другому runtime')
-            negotiated = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/sdk-tools'),
-                                                   params={'steering': '1'}, expected_boot=binding['boot_id'])
+            negotiated = await verify_target(state.nodes, binding, target_boot, body)
             if negotiated.status_code != 200:
                 error = json.loads(_response(negotiated).body).get('error') or {}
                 error = error if isinstance(error, dict) else {}
@@ -850,7 +834,7 @@ async def agent_steer(sid: str, body: SteerRequest, request: Request, device: De
                                 error.get('message', 'Router не подтвердил активный runtime'))
             try:
                 caps = capability(negotiated.json().get('steering'))
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):
                 caps = capability(None)
             validate(body, caps)
             if caps['targetBootId'] != target_boot or caps['targetNodeId'] != binding['node_id']:
