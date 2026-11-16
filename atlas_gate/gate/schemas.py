@@ -182,7 +182,14 @@ class AdaptiveFilesOffer(BaseModel):
     branchId: str = Field(min_length=1, max_length=200)
 
 
+class SessionScope(BaseModel):
+    version: Literal[1]
+    agentId: str = Field(min_length=1, max_length=200)
+    conversationId: str = Field(min_length=1, max_length=200)
+
+
 class GateAgentSessionCreate(BaseModel):
+    sessionScope: SessionScope | None = None
     adaptiveFiles: AdaptiveFilesOffer | None = None
     reasoning: ReasoningSettings | None = None
     sdkTools: SdkTools | None = None

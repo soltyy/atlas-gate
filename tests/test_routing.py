@@ -91,6 +91,9 @@ async def test_concurrent_reservations_and_duplicate_local_ids(tmp_path):
 @pytest.mark.asyncio
 async def test_least_busy_cooldown_and_unknown_ack(tmp_path):
     store, nodes = Store(str(tmp_path / "test.db")), FakeNodes(capacity=4)
+    async def probe(node):
+        return nodes.snapshots[node]
+    nodes.probe = probe
     nodes.snapshots["a"]["activeTurns"] = 3
     nodes.snapshots["a"]["sessions"] = 3
     routing = Routing(store, nodes)
@@ -102,9 +105,9 @@ async def test_least_busy_cooldown_and_unknown_ack(tmp_path):
     nodes.fail = True
     nodes.snapshots["a"]["sessions"] = 0
     with pytest.raises(GateError):
-        await routing.create(device("lost"), "sub", "claude", {}, 10)
+        await routing.create(device("lost"), "sub", "claude", {}, 10, request_id='same-create')
     with pytest.raises(GateError) as repeated:
-        await routing.create(device("lost"), "sub", "claude", {}, 10)
+        await routing.create(device("lost"), "sub", "claude", {}, 10, request_id='same-create')
     assert repeated.value.code == "command_outcome_unknown"
     assert store._one("SELECT COUNT(*) n FROM router_bindings WHERE device_id='lost'")["n"] == 1
     store.close()
