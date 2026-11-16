@@ -6,7 +6,7 @@ import time
 import uuid
 import hashlib
 from .errors import GateError
-from ..sdk_tools import SdkTools, supports, enabled, defaults
+from ..sdk_tools import SdkTools, supports, enabled, defaults, permitted
 from .reasoning import select_request, validate_node, confirm
 from .node_channel import ChannelClient
 from ..reasoning import ReasoningError, concrete
@@ -29,10 +29,12 @@ class Routing:
     def __init__(self, store, nodes):
         self.store, self.nodes = store, nodes
         self.lock = asyncio.Lock()
+        self.active_creations = set()
         with store._lock:
             store._db.executescript(DDL)
             columns = {r[1] for r in store._db.execute("PRAGMA table_info(router_bindings)")}
-            for name in ("request_key", "fingerprint", "response", "sdk_tools", "reasoning_snapshot", "recovery_source"):
+            for name in ("request_key", "fingerprint", "response", "sdk_tools", "reasoning_snapshot",
+                         "recovery_source", "creation_scope", "resume_sdk_id", "create_body_sha256"):
                 if name not in columns:
                     store._db.execute(f"ALTER TABLE router_bindings ADD COLUMN {name} TEXT")
             for name, kind in (("rejection_status", "INTEGER"), ("rejection_body", "BLOB")):
@@ -75,7 +77,7 @@ class Routing:
 
     def reject_creation(self, sid, status, body):
         # Исход и ответ фиксируются одной транзакцией, в том числе пустое тело.
-        self.store._exec("UPDATE router_bindings SET status='rejected',rejection_status=?,rejection_body=? WHERE id=?",
+        self.store._exec("UPDATE router_bindings SET status='rejected',rejection_status=?,rejection_body=? WHERE id=? AND status IN ('creating','unknown','rejected')",
                          (status, body, sid))
 
     def accept_creation(self, sid, local_id, created):
@@ -121,30 +123,132 @@ class Routing:
         client = getattr(self.nodes, 'clients', {}).get(node_id)
         return not isinstance(client, ChannelClient) or client.supports_adaptive_files()
 
+    def resolve_resume(self, device, route, model, alias):
+        if not alias:
+            return None
+        resume = self.store._one(
+            "SELECT * FROM router_bindings WHERE sdk_alias=? AND device_id=? AND org=? AND sdk_id IS NOT NULL",
+            (alias, device.device_id, device.org))
+        if resume is None:
+            legacy = self.store._one(
+                "SELECT * FROM legacy_router_history WHERE sdk_id=? AND device_id=? AND org=?",
+                (alias, device.device_id, device.org))
+            if legacy:
+                resume = dict(legacy, route=route, model=model)
+        if resume is None:
+            raise GateError(404, "not_found", "история SDK для возобновления не найдена")
+        return resume
+
+    def creation_body(self, payload, model, reasoning, sdk_tools, node_id, resume):
+        body = {k: v for k, v in payload.items() if k != 'sessionScope'}
+        body.update(model=model, sdkTools=sdk_tools)
+        if reasoning['selected'] is not None:
+            body['reasoning'] = reasoning['selected']
+        if body.get('adaptiveFiles') and not self.adaptive_transport(node_id):
+            body.pop('adaptiveFiles')
+        if resume:
+            body['resumeSessionId'] = resume['sdk_id']
+        return json.dumps(body, sort_keys=True).encode()
+
+    @staticmethod
+    def creation_pending():
+        return GateError(409, "command_outcome_unknown", "создание требует сверки")
+
+    async def retry_creation(self, old, device, route, model, payload, fingerprint, sdk_policy):
+        if old["org"] != device.org or old["device_id"] != device.device_id:
+            raise GateError(404, "not_found", "сессия не найдена")
+        if old["fingerprint"] != fingerprint:
+            raise GateError(409, "idempotency_conflict", "создание с другими параметрами")
+        cached = self.creation_response(old)
+        if cached is not None:
+            return cached
+        sid, node_id, boot_id, key = (old[k] for k in ('id', 'node_id', 'boot_id', 'request_key'))
+        if sid in self.active_creations:
+            raise self.creation_pending()
+        self.active_creations.add(sid)
+        try:
+            missing = await self.reconcile(sid)
+            old = self.store._one("SELECT * FROM router_bindings WHERE id=?", (sid,))
+            cached = self.creation_response(old)
+            if cached is not None:
+                return cached
+            if not missing or old['status'] not in ('creating', 'unknown') or old['local_id']:
+                raise self.creation_pending()
+            node, info = self.nodes.config.get(node_id), self.nodes.snapshots.get(node_id)
+            if (not node or not node.enabled or device.org not in node.orgs or route not in node.routes
+                    or not info or info.get('bootId') != boot_id or not info.get('ready') or info.get('draining')
+                    or 'durable_commands' not in info.get('capabilities', ())):
+                raise self.creation_pending()
+            reasoning = json.loads(old['reasoning_snapshot'] or 'null')
+            tools = json.loads(old['sdk_tools'] or 'null')
+            if not isinstance(reasoning, dict) or not isinstance(tools, dict):
+                raise self.creation_pending()
+            if sdk_policy is not None and not permitted(SdkTools.model_validate(tools), sdk_policy):
+                raise GateError(403, 'policy_denied', 'SDK tools больше не разрешены организацией')
+            resume = self.resolve_resume(device, route, model, payload.get('resumeSessionId'))
+            source = json.loads(old['recovery_source'] or 'null')
+            if resume:
+                if (not source or source['previousSessionId'] != resume.get('id')
+                        or resume['node_id'] != node_id or resume['route'] != route or resume['model'] != model
+                        or (old['resume_sdk_id'] and old['resume_sdk_id'] != resume['sdk_id'])):
+                    raise self.creation_pending()
+                if resume.get('local_id'):
+                    proof = await self.nodes.request(node_id, 'GET', '/v1/sessions/' + resume['local_id'] + '/reconcile',
+                                                     expected_boot=boot_id)
+                    saved = proof.json() if proof.status_code == 200 else {}
+                    recovery = saved.get('sessionRecovery') or {}
+                    if (saved.get('id') != resume['local_id'] or saved.get('nodeId') != node_id
+                            or saved.get('bootId') != boot_id or saved.get('sdkSessionId') != resume['sdk_id']
+                            or recovery.get('busy') is not False or recovery.get('pendingTurnId') is not None):
+                        raise self.creation_pending()
+            elif source:
+                raise self.creation_pending()
+            body = self.creation_body(payload, model, reasoning, tools, node_id, resume)
+            digest = hashlib.sha256(body).hexdigest()
+            if old['create_body_sha256']:
+                if old['create_body_sha256'] != digest:
+                    raise self.creation_pending()
+            elif not resume or not resume.get('local_id') or getattr(node, 'transport', None) != 'direct':
+                # Legacy Gate kept the immutable client hash and pinned selection,
+                # but not the wire digest. Only the direct, identified history is reconstructible.
+                raise self.creation_pending()
+            return await self.dispatch_creation(sid, node_id, boot_id, key, body, reasoning, old['recovery_source'],
+                                                reconciling=True)
+        finally:
+            self.active_creations.discard(sid)
+
     async def create(self, device, route, model, payload, limit, request_id=None, sdk_policy=None, reasoning_policy=None):
         if request_id is not None and (not request_id or len(request_id) > 200):
             raise GateError(422, "invalid_request", "request_id должен содержать 1..200 знаков")
         key = hashlib.sha256((device.device_id + ":" + (request_id or str(uuid.uuid4()))).encode()).hexdigest()
         fingerprint = hashlib.sha256(json.dumps({"route": route, "model": model, "payload": payload}, sort_keys=True).encode()).hexdigest()
+        old = self.store._one("SELECT * FROM router_bindings WHERE request_key=?", (key,))
+        if old:
+            return await self.retry_creation(old, device, route, model, payload, fingerprint, sdk_policy)
+        scope = json.dumps(payload['sessionScope'], sort_keys=True) if payload.get('sessionScope') else None
         # Замок покрывает выбор+резерв, но не медленное open_session.
         async with self.lock:
             await self.sync_bindings(device.device_id)
             old = self.store._one("SELECT * FROM router_bindings WHERE request_key=?", (key,))
             if old:
+                if old['org'] != device.org or old['device_id'] != device.device_id:
+                    raise GateError(404, 'not_found', 'сессия не найдена')
                 if old["fingerprint"] != fingerprint:
                     raise GateError(409, "idempotency_conflict", "создание с другими параметрами")
                 cached = self.creation_response(old)
                 if cached is not None:
                     return cached
-                await self.reconcile(old["id"])
-                old = self.store._one("SELECT * FROM router_bindings WHERE request_key=?", (key,))
-                cached = self.creation_response(old)
-                if cached is not None:
-                    return cached
-                raise GateError(409, "command_outcome_unknown", "создание требует сверки")
-            unresolved = self.store._one("SELECT id FROM router_bindings WHERE device_id=? AND status='unknown'", (device.device_id,))
+                raise self.creation_pending()
+            resume = self.resolve_resume(device, route, model, payload.get("resumeSessionId"))
+            resume_sdk_id = resume['sdk_id'] if resume else None
+            unresolved = self.store._one("""SELECT b.id FROM router_bindings b
+                LEFT JOIN router_bindings prior ON prior.id=json_extract(b.recovery_source,'$.previousSessionId')
+                    AND prior.org=b.org AND prior.device_id=b.device_id
+                WHERE b.device_id=? AND b.org=? AND b.status IN ('creating','unknown') AND
+                  (b.creation_scope=? OR COALESCE(b.resume_sdk_id,prior.sdk_id)=?) LIMIT 1""",
+                (device.device_id, device.org, scope, resume_sdk_id))
             if unresolved:
-                raise GateError(409, "command_outcome_unknown", "предыдущее создание требует сверки")
+                raise self.creation_pending()
             # Resolve AFTER the immutable receipt lookup. Reload cannot rewrite an old create.
             reasoning_snapshot = select_request(payload.get('reasoning'), reasoning_policy)
             if any(concrete(a.get('reasoning')) for a in payload.get('agents', [])):
@@ -154,18 +258,8 @@ class Routing:
             if limit and mine >= limit:
                 raise GateError(409, "agent_sessions_limit", "достигнут предел сессий устройства")
             await self.nodes.refresh()
-            resume = None
-            if payload.get("resumeSessionId"):
-                resume = self.store._one("SELECT * FROM router_bindings WHERE sdk_alias=? AND device_id=? AND org=? AND sdk_id IS NOT NULL",
-                    (payload["resumeSessionId"], device.device_id, device.org))
-                if resume is None:
-                    legacy = self.store._one("SELECT * FROM legacy_router_history WHERE sdk_id=? AND device_id=? AND org=?", (payload["resumeSessionId"], device.device_id, device.org))
-                    if legacy:
-                        resume = dict(legacy, route=route, model=model)
-                if resume is None:
-                    raise GateError(404, "not_found", "история SDK для возобновления не найдена")
-                if resume["route"] != route or resume["model"] != model:
-                    raise GateError(403, "policy_denied", "resume требует прежнего маршрута и модели")
+            if resume and (resume["route"] != route or resume["model"] != model):
+                raise GateError(403, "policy_denied", "resume требует прежнего маршрута и модели")
             candidates = []
             excluded = []
             model_compatible = False
@@ -262,33 +356,44 @@ class Routing:
                             'SELECT id FROM router_operations WHERE session_id=? AND turn_id IS NOT NULL AND finished=0 LIMIT 1',
                             (resume['id'],))):
                         raise GateError(409, 'session_recovery_pending', 'Прежний Router не подтвердил завершение хода')
-            body = dict(payload, model=model)
-            if reasoning_snapshot['selected'] is not None:
-                body['reasoning'] = reasoning_snapshot['selected']
-            if body.get('sdkTools') is None:
-                body['sdkTools'] = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
-            if body.get('adaptiveFiles') and not self.adaptive_transport(node_id):
-                body.pop('adaptiveFiles')
+            tools = payload.get('sdkTools')
+            if tools is None:
+                tools = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
+            body = self.creation_body(payload, model, reasoning_snapshot, tools, node_id, resume)
             sid, alias = str(uuid.uuid4()), str(uuid.uuid4())
             boot_id = self.nodes.snapshots[node_id]["bootId"]
             recovery_source = json.dumps({'previousSessionId': resume.get('id'),
                 'allowHistoryFallback': bool(payload.get('allowHistoryFallback'))}) if resume else None
-            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools,reasoning_snapshot,recovery_source) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?,?,?)",
-                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(body['sdkTools']), json.dumps(reasoning_snapshot), recovery_source))
-            if resume:
-                body["resumeSessionId"] = resume["sdk_id"]
+            self.store._exec("INSERT INTO router_bindings(id,device_id,org,route,node_id,boot_id,model,roles,status,created,sdk_alias,request_key,fingerprint,sdk_tools,reasoning_snapshot,recovery_source,creation_scope,resume_sdk_id,create_body_sha256) VALUES (?,?,?,?,?,?,?,?,'creating',?,?,?,?,?,?,?,?,?,?)",
+                (sid, device.device_id, device.org, route, node_id, boot_id, model, json.dumps(payload.get("agents", [])), time.time(), alias, key, fingerprint, json.dumps(tools), json.dumps(reasoning_snapshot), recovery_source, scope, resume_sdk_id, hashlib.sha256(body).hexdigest()))
+            self.active_creations.add(sid)
         try:
-            response = await self.nodes.request(node_id, "POST", "/v1/sessions", content=json.dumps(body).encode(), expected_boot=boot_id, request_id="create:" + key)
+            return await self.dispatch_creation(sid, node_id, boot_id, key, body, reasoning_snapshot, recovery_source)
+        finally:
+            self.active_creations.discard(sid)
+
+    async def dispatch_creation(self, sid, node_id, boot_id, key, body, reasoning_snapshot, recovery_source,
+                                *, reconciling=False):
+        try:
+            response = await self.nodes.request(node_id, "POST", "/v1/sessions", content=body, expected_boot=boot_id, request_id="create:" + key)
         except GateError:
-            self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))
+            self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=? AND status IN ('creating','unknown')", (sid,))
             raise
         if response.status_code >= 400:
+            if reconciling:
+                # A transport/identity refusal or conflict is not a negative receipt for this create.
+                await self.reconcile(sid)
+                old = self.store._one("SELECT * FROM router_bindings WHERE id=?", (sid,))
+                cached = self.creation_response(old)
+                if cached is not None:
+                    return cached
+                raise self.creation_pending()
             self.reject_creation(sid, response.status_code, response.content)
             return response.status_code, response.content
         try:
             created = response.json()
             confirm(reasoning_snapshot, created)
-            requested = SdkTools.model_validate(body.get('sdkTools') or {})
+            requested = SdkTools.model_validate(json.loads(body).get('sdkTools') or {})
             if enabled(requested) and created.get('sdkTools') != requested.model_dump():
                 raise ValueError('SDK tools acknowledgement missing')
             local_id = created["id"]
@@ -296,7 +401,7 @@ class Routing:
                 raise ValueError("invalid session id")
             self.recovery_ack({'recovery_source': recovery_source}, created)
         except (ValueError, KeyError, TypeError):
-            self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=?", (sid,))
+            self.store._exec("UPDATE router_bindings SET status='unknown' WHERE id=? AND status IN ('creating','unknown')", (sid,))
             raise GateError(502, "command_outcome_unknown", "Router вернул неверный ответ создания")
         created["id"] = sid
         if 'steering' in created:
@@ -317,6 +422,10 @@ class Routing:
             try:
                 await self.nodes.probe(binding["node_id"])
                 response = await self.nodes.request(binding["node_id"], "GET", "/v1/commands/create:" + binding["request_key"])
+                if (binding_id and response.status_code == 404
+                        and isinstance(missing := response.json(), dict)
+                        and missing.get('detail') == 'command_not_found'):
+                    return True
                 if response.status_code != 200:
                     continue
                 command = response.json()
