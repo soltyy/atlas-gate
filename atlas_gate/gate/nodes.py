@@ -115,6 +115,9 @@ class Nodes:
         async with self._probe_locks.setdefault(node_id, asyncio.Lock()):
             return await self._probe(node_id)
 
+    def probe_retryable(self, node_id: str) -> bool:
+        return node_id in self._retryable_probes
+
     async def _probe(self, node_id: str) -> dict | None:
         self._retryable_probes.discard(node_id)
         if self.revoked(node_id):
@@ -188,7 +191,7 @@ class Nodes:
         if info is None:
             raise GateFreshNodeError('идентичность Router не подтверждена', node_id=node_id,
                                      method=method, path=path, reason='identity_unconfirmed',
-                                     retryable=node_id in self._retryable_probes)
+                                     retryable=self.probe_retryable(node_id))
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
         steering_probe = (method == 'GET' and path.endswith('/sdk-tools')

@@ -1,8 +1,75 @@
 """Steering v1: only Router's exact runtime may promise absorption evidence."""
-from .errors import GateError
+import asyncio
+import logging
+import time
+from urllib.parse import quote
+
+import httpx
+
+from .errors import GateError, GateFreshNodeError
 
 CONTRACT_HEADER = 'X-Atlas-Steer-Contract'
 TARGET_HEADER = 'X-Atlas-Steer-Target-Boot'
+_log = logging.getLogger('atlas_gate')
+
+
+def _transient_read(failed):
+    if isinstance(failed, GateFreshNodeError):
+        return failed.retryable
+    return failed.code == 'node_unavailable' and isinstance(failed.__cause__, httpx.TransportError)
+
+
+async def verify_target(nodes, binding, target_boot, body):
+    """Retry metadata reads before the first possible dispatch, on the captured boot only."""
+    if binding['boot_id'] != target_boot:
+        raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime сессии изменился')
+    node_id = binding['node_id']
+    path = '/v1/sessions/' + quote(binding['local_id'], safe='') + '/sdk-tools'
+    loop = asyncio.get_running_loop()
+    deadline = None
+    failure = None
+    stage = 'node_identity'
+    for delay in (0.15, 0.35, 0.70, 1.2, None):
+        try:
+            async with asyncio.timeout_at(deadline):
+                stage = 'node_identity'
+                info = nodes.snapshots.get(node_id)
+                if not info or time.monotonic() - info.get('observed', 0) > 5:
+                    info = await nodes.probe(node_id)
+                if info is None:
+                    raise GateFreshNodeError('Идентичность Router не подтверждена',
+                        node_id=node_id, method='GET', path='/v1/node', reason='identity_unconfirmed',
+                        retryable=nodes.probe_retryable(node_id))
+                if info.get('bootId') != target_boot:
+                    raise GateError(409, 'steer_target_boot_mismatch', 'Исходный runtime Router изменился')
+                declared = capability(info.get('steering'))
+                validate(body, declared)
+                if declared['targetNodeId'] != node_id or declared['targetBootId'] != target_boot:
+                    raise GateError(409, 'steer_target_boot_mismatch', 'Capability относится к другому runtime')
+                stage = 'bound_metadata'
+                response = await nodes.request(node_id, 'GET', path, params={'steering': '1'},
+                                               expected_boot=target_boot)
+                if response.status_code not in (502, 503, 504) or 'Retry-After' in response.headers:
+                    return response
+                failure = response
+        except TimeoutError:
+            break
+        except GateError as failed:
+            if not _transient_read(failed):
+                raise
+            failure = failed
+        if deadline is None:
+            # The budget bounds recovery reads, not the SDK turn or its tool.
+            deadline = loop.time() + 4
+            _log.warning('Steer metadata read interrupted: node=%s stage=%s boot=%s',
+                         node_id, stage, target_boot)
+        if delay is None or loop.time() + delay >= deadline:
+            break
+        await asyncio.sleep(delay)
+    if isinstance(failure, httpx.Response):
+        return failure
+    raise GateError(503, 'node_unavailable', 'Router не подтвердил назначение досыла',
+                    node_id=node_id, preflightStage=stage) from failure
 
 
 def capability(value):
