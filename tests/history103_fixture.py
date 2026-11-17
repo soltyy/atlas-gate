@@ -96,7 +96,10 @@ async def main():
             print(json.dumps({'url':str(client.base_url)}),flush=True)
             await stopped.wait()
         finally:
-            await fixture.aclose();patch.undo()
+            await fixture.aclose()
+            for router in routers:
+                router.state.journal.db.close()
+            patch.undo()
 
 
 if __name__=='__main__':
