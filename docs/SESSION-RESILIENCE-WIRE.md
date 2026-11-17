@@ -170,7 +170,7 @@ node/boot и `callKnown=true` от Router. После смены boot он мо�
 
 Защищённый `POST {G-root}/tool_result` принимает **сохранённое тело**, исходный
 `Idempotency-Key: tool-result:{sessionId}:{callId}` и
-`X-Atlas-Tool-Result-Turn: {turnId}`. Требуется исходная операция Gate,
+`X-Atlas-Tool-Result-Turn: {turnId}`. Для зарегистрированной доставки требуется исходная операция Gate,
 без query-параметров в клиентском POST. Gate проверяет owner/политику/привязку,
 сверяет хеш и под замком доставки проверяет квитанцию и допуск. Router проверяет
 ожидание callback перед доставкой. `404 not_found` означает, что исходная
@@ -181,6 +181,37 @@ HTTP 409 с `status=recovery_unconfirmed` и
 `error.code=tool_result_recovery_unconfirmed`. Во всех этих случаях сохраняются
 вывод и исходные ID для сверки. Статус доставки не определяет успех хода,
 наличие внешнего эффекта или состояние окна контекста.
+
+### Первая доставка сохранённого результата
+
+До публикации Gate #139 этот раздел описывает разрабатываемое расширение.
+Оно объявляется в подписанном профиле как
+`toolResultRecovery.initialAdmission` с `version=1`,
+`proofField=admissionProof`, `proofHeader=X-Atlas-Tool-Result-Admission` и
+`registeredField=operationRegistered`.
+
+Если первый POST потерян до регистрации Gate, тот же status GET возвращает
+`operationRegistered=false`. При подтверждённых прежнем node/boot, известном
+Router вызове, `waiting=true` и `commandState=missing` ответ содержит
+`outcome=unknown`, `retryAllowed=true` и `admissionProof`. Сам GET не создаёт
+операцию доставки. Gate подписывает разрешение своим Ed25519-ключом и связывает
+его с device/org, node/boot, session/turn/call, исходным commandId и bodySha256.
+Срок разрешения составляет 300 секунд. Истёкшее разрешение получают заново тем же GET.
+
+Клиент проверяет все исходные поля ответа и передаёт `admissionProof` непрозрачной
+строкой в `X-Atlas-Tool-Result-Admission` вместе с двумя прежними заголовками и
+сохранённым телом результата. Gate проверяет подпись и идентичность, вновь сверяет
+Router, регистрирует исходную команду и повторно проверяет допуск под замком доставки.
+Поздний первоначальный POST и повтор с тем же телом сходятся к одной операции.
+Изменённое тело, ключ или turn отклоняются. Для зарегистрированной операции
+продолжает действовать прежняя проверка точного хеша и квитанции.
+
+При недостатке доказательств status GET возвращает `unknown`, `retryAllowed=false`
+без разрешения. `operationRegistered=false` само по себе не разрешает отправку.
+При Stop клиент сохраняет отмену и продолжает чтение квитанций. Для отсутствующей
+операции узкий GET после Stop также сохраняет `unknown`, поскольку отсутствие
+ожидания callback не доказывает его исход. Точное закрытие локального
+`output_durable` выполняется через coordinator и его terminal/journal proof.
 
 Внутренний Router wire использует `?toolResultRecovery=1` на status GET,
 GET `{R-root}/turns/{turnId}/tool-result-recovery?callId=…&commandId=…` и
