@@ -27,6 +27,7 @@ async def main():
             accepted = []
             shutdown = asyncio.Event()
             state = app.state.gate
+            state.settings.ATLAS_GATE_PUBLIC_URL = str(client.base_url).rstrip("/")
             org = state.orgs["test-org"].model_dump(mode="json")
             org["agents"] = [dict(id="stub-agent", name="Delivery acceptance", version="1", default=True,
                                   model="inherit", allowed_routes=["claude-sub"],
