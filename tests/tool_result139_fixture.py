@@ -1,4 +1,4 @@
-"""Loopback Gate and two Router processes for EDT delivery acceptance.
+"""Loopback Gate and two Router servers for EDT delivery acceptance.
 
 Run with ATLAS_TEST_ROUTER_ROOT and python -m tests.tool_result139_fixture.
 All credentials, databases and scripted tool calls belong to this temporary fixture.
