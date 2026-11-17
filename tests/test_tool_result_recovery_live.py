@@ -1,8 +1,10 @@
 """Real Gate and Router HTTP with a scripted producer and a cut response."""
 
 import asyncio
+import time
 
 import httpx
+import jwt
 import pytest
 
 from atlas_gate.gate.errors import GateFreshNodeError
@@ -13,6 +15,7 @@ from .test_network_gate import create, network  # noqa: F401
 @pytest.mark.parametrize("failure", [
     "before", "after", "stop", "started", "stop_race", "context_error",
     "preflight", "legacy_preflight", "preflight_stop",
+    "unregistered", "unregistered_late", "unregistered_stop",
 ])
 async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure):
     from atlas_router.backends.stub import StubSession
@@ -36,6 +39,9 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     cut = False
     send_count = 0
     preflight = failure in ("preflight", "legacy_preflight", "preflight_stop")
+    unregistered = failure.startswith("unregistered")
+    if unregistered:
+        recovery_query["initialAdmission"] = "1"
 
     async def scripted(self, turn_id, text, attachments=None):
         prompts.append(turn_id)
@@ -64,7 +70,7 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         nonlocal cut, send_count
         if method == "POST" and url.endswith("/tool_result") and call.encode() in kwargs["content"]:
             send_count += 1
-            if not cut and not preflight:
+            if not cut and not preflight and not unregistered:
                 cut = True
                 if failure == "after":
                     assert (await actual_request(method, url, **kwargs)).status_code == 200
@@ -105,11 +111,16 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         "nodeId": node, "bootId": binding["boot_id"], "pendingCallIds": [call, sibling],
     }
     assert (await client.post(prefix + "/tool_result", json={"callId": sibling, "content": "other"})).status_code == 200
-    with monkeypatch.context() as outage:
-        if preflight:
-            outage.setattr(state.nodes, "request", preflight_down)
-        first = await client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key})
-    assert first.status_code == 503 and first.json()["error"]["code"] == "command_outcome_unknown"
+    if not unregistered:
+        with monkeypatch.context() as outage:
+            if preflight:
+                outage.setattr(state.nodes, "request", preflight_down)
+            first = await client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key})
+        assert first.status_code == 503 and first.json()["error"]["code"] == "command_outcome_unknown"
+    else:
+        legacy_query = {k: v for k, v in recovery_query.items() if k != "initialAdmission"}
+        legacy = await client.get(recovery, params=legacy_query)
+        assert legacy.status_code == 404 and legacy.json()["error"]["code"] == "not_found"
     if preflight:
         assert "X-Atlas-Command-State" not in first.headers
         op = state.store._one("SELECT * FROM router_operations WHERE session_id=? AND path LIKE '%/tool_result' AND status=503", (sid,))
@@ -123,7 +134,7 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     if failure in ("stop", "preflight_stop"):
         assert (await client.post(prefix + "/interrupt")).json()["settled"]
     turn_status = (await client.get(f"{prefix}/turns/{turn}")).json()
-    if failure in ("before", "started", "stop_race", "context_error", "preflight", "legacy_preflight"):
+    if failure in ("before", "started", "stop_race", "context_error", "preflight", "legacy_preflight") or unregistered:
         assert turn_status["toolCallbacks"]["pendingCallIds"] == [call]
     else:
         assert turn_status["done"] and "toolCallbacks" not in turn_status
@@ -131,7 +142,46 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     result = (await client.get(recovery, params=recovery_query)).json()
     assert result["requestId"] == key and result["bodySha256"] == body_sha256(body)
     assert result["outcome"] == ("accepted" if failure == "after" else "unknown")
-    assert result["retryAllowed"] is (failure in ("before", "stop_race", "context_error", "preflight", "legacy_preflight"))
+    assert result["retryAllowed"] is (failure in ("before", "stop_race", "context_error", "preflight", "legacy_preflight") or unregistered)
+    if unregistered:
+        assert result["operationRegistered"] is False and result["admissionProof"]
+        assert state.store._one("SELECT id FROM router_operations WHERE id=?", (result["commandId"],)) is None
+        retry_headers["X-Atlas-Tool-Result-Admission"] = result["admissionProof"]
+        denied = await client.post(prefix + "/tool_result", json=body, headers={
+            **retry_headers, "X-Atlas-Tool-Result-Admission": "invalid"})
+        assert denied.status_code == 409 and send_count == 0
+        claims = jwt.decode(result["admissionProof"], state.key.public, algorithms=["EdDSA"],
+                            audience="atlas-gate:tool-result-admission")
+        expired = state.key.sign({**claims, "exp": int(time.time()) - 1})
+        denied = await client.post(prefix + "/tool_result", json=body, headers={
+            **retry_headers, "X-Atlas-Tool-Result-Admission": expired})
+        assert denied.status_code == 409 and send_count == 0
+        for field, value in (("Idempotency-Key", "wrong-key"), ("X-Atlas-Tool-Result-Turn", "wrong-turn")):
+            denied = await client.post(prefix + "/tool_result", json=body, headers={**retry_headers, field: value})
+            assert denied.status_code == 409 and send_count == 0
+        snapshot = state.nodes.snapshots[node]
+        for changes in ({"bootId": "different-boot"}, {"capabilities": []}):
+            with monkeypatch.context() as unavailable:
+                unavailable.setitem(state.nodes.snapshots, node, {**snapshot, **changes, "observed": time.monotonic()})
+                blocked = (await client.get(recovery, params=recovery_query)).json()
+                assert blocked["retryAllowed"] is False and "admissionProof" not in blocked
+                denied = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
+                assert denied.status_code == 503 and send_count == 0
+        node_request = state.nodes.request
+
+        async def unavailable_evidence(node_id, method, path, **kwargs):
+            if path.endswith("/tool-result-recovery"):
+                from atlas_gate.gate.errors import GateError
+                raise GateError(503, "node_unavailable", "fixture unavailable")
+            return await node_request(node_id, method, path, **kwargs)
+
+        with monkeypatch.context() as unavailable:
+            unavailable.setattr(state.nodes, "request", unavailable_evidence)
+            blocked = (await client.get(recovery, params=recovery_query)).json()
+            assert blocked["retryAllowed"] is False and "admissionProof" not in blocked
+            denied = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
+            assert denied.status_code == 503 and send_count == 0
+        assert state.store._one("SELECT id FROM router_operations WHERE id=?", (result["commandId"],)) is None
     wrong = await client.get(recovery.replace(f"/{turn}/", "/wrong/"), params=recovery_query)
     assert wrong.json()["outcome"] == "unknown" and wrong.json()["retryAllowed"] is False
     foreign = await client.get(recovery, params=recovery_query,
@@ -145,7 +195,15 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         from atlas_gate.gate.agent import _tool_recovery_state
         op = state.store._one("SELECT * FROM router_operations WHERE id=?", (result["commandId"],))
         assert await _tool_recovery_state(state, fake_boot, op, turn, call) is None
-    if failure == "legacy_preflight":
+    if failure == "unregistered_stop":
+        assert (await client.post(prefix + "/interrupt")).json()["settled"]
+    if failure == "unregistered_late":
+        replay, duplicate = await asyncio.gather(
+            client.post(prefix + "/tool_result", json=body, headers=retry_headers),
+            client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key}),
+        )
+        assert duplicate.content == replay.content
+    elif failure == "legacy_preflight":
         replay, duplicate, observed = await asyncio.gather(
             client.post(prefix + "/tool_result", json=body, headers=retry_headers),
             client.post(prefix + "/tool_result", json=body, headers=retry_headers),
@@ -155,7 +213,7 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
         assert observed.json()["outcome"] in ("accepted", "unknown")
     else:
         replay = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
-    if failure in ("before", "after", "context_error", "preflight", "legacy_preflight"):
+    if failure in ("before", "after", "context_error", "preflight", "legacy_preflight", "unregistered", "unregistered_late"):
         assert replay.status_code == 200 and replay.json()["status"] == "accepted"
         again = await client.post(prefix + "/tool_result", json=body, headers=retry_headers)
         assert again.content == replay.content
@@ -175,7 +233,11 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     else:
         assert replay.status_code == 503
         assert effects == [sibling]
+        if failure == "unregistered_stop":
+            closed = (await client.get(recovery, params=recovery_query)).json()
+            assert closed["retryAllowed"] is False and "admissionProof" not in closed
         if failure == "started":
             await client.post(prefix + "/interrupt")
-    assert send_count == {"before": 2, "stop_race": 2, "context_error": 2, "preflight_stop": 0}.get(failure, 1)
+    assert send_count == {"before": 2, "stop_race": 2, "context_error": 2, "preflight_stop": 0,
+                          "unregistered_stop": 0}.get(failure, 1)
     assert prompts == [turn]

@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import quote
+import jwt
 from fastapi import Depends, Request
 from fastapi.responses import Response, JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -707,9 +708,23 @@ async def agent_tool_result(sid: str, body: ToolResultRequest, request: Request,
         if request.headers.get("idempotency-key") != key or request.query_params:
             raise GateError(409, "tool_result_recovery_mismatch", "Требуется исходный ключ результата")
         raw = await request.body()
-        op = _original_tool_operation(state, device, binding, turn_id, body.callId, body_sha256(json.loads(raw)))
+        digest = body_sha256(json.loads(raw))
+        op = _original_tool_operation(state, device, binding, turn_id, body.callId, digest)
         if op is None:
-            raise GateError(404, "not_found", "Исходная доставка не найдена")
+            candidate = _unregistered_tool_operation(state, device, binding, turn_id, body.callId)
+            _check_tool_admission(state, device, binding, candidate, body.callId, digest,
+                                  request.headers.get("x-atlas-tool-result-admission", ""))
+            try:
+                proof = await _tool_recovery_state(state, binding, candidate, turn_id, body.callId)
+            except (GateError, ValueError):
+                proof = None
+            if not _waiting_tool_retry(proof):
+                raise _tool_result_pending(candidate)
+            # The original POST can arrive while Router evidence is read. begin()
+            # binds both arrivals to the same key and exact body before forwarding.
+            op, _ = state.operations.begin(
+                device, binding, "POST", _path(binding, "/tool_result"), json.loads(raw), key,
+                turn_id=turn_id, nodes=state.nodes, body_digest=digest)
         try:
             proof = await _tool_recovery_state(state, binding, op, turn_id, body.callId)
         except (GateError, ValueError):
@@ -729,6 +744,37 @@ def _original_tool_operation(state, device, binding, turn_id, call_id, digest):
     if op and (op["body_sha256"] != digest or not turn_id or op["turn_id"] not in (None, turn_id)):
         raise GateError(409, "tool_result_recovery_mismatch", "Ход или хеш исходного результата не совпадает")
     return op
+
+
+def _unregistered_tool_operation(state, device, binding, turn_id, call_id):
+    # Evidence lookup must not register a command or manufacture an ACK.
+    return {"id": state.operations.key(device, f"tool-result:{binding['id']}:{call_id}"),
+            "node_id": binding["node_id"], "boot_id": binding["boot_id"], "turn_id": turn_id}
+
+
+def _tool_admission_identity(device, binding, op, call_id, digest):
+    return {"purpose": "tool_result_initial_admission", "deviceId": device.device_id,
+            "org": device.org, "sessionId": binding["id"], "turnId": op["turn_id"],
+            "callId": call_id, "commandId": op["id"], "bodySha256": digest,
+            "nodeId": op["node_id"], "bootId": op["boot_id"]}
+
+
+def _check_tool_admission(state, device, binding, op, call_id, digest, token):
+    try:
+        claims = jwt.decode(token, state.key.public, algorithms=["EdDSA"],
+                            audience="atlas-gate:tool-result-admission",
+                            options={"require": ["iat", "exp", "aud"]})
+    except jwt.InvalidTokenError as failed:
+        raise GateError(409, "tool_result_admission_mismatch",
+                        "Требуется действующее разрешение доставки исходного результата") from failed
+    expected = _tool_admission_identity(device, binding, op, call_id, digest)
+    if any(claims.get(key) != value for key, value in expected.items()):
+        raise GateError(409, "tool_result_admission_mismatch", "Разрешение принадлежит другому результату")
+
+
+def _waiting_tool_retry(proof):
+    return bool(proof and proof.get("waiting") is True and proof.get("retryAllowed") is True
+                and proof.get("commandState") == "missing")
 
 
 async def _tool_recovery_state(state, binding, op, turn_id, call_id):
@@ -761,16 +807,21 @@ async def tool_result_recovery(sid: str, turn_id: str, callId: str, bodySha256: 
     binding = state.routing.get(sid, device)
     _policy(state, device, binding, request, require_model=False)
     op = _original_tool_operation(state, device, binding, turn_id, callId, bodySha256)
-    if op is None:
-        raise GateError(404, "not_found", "Исходная доставка не найдена")
+    registered = op is not None
+    if not registered:
+        if request.query_params.get("initialAdmission") != "1":
+            raise GateError(404, "not_found", "Исходная доставка не найдена")
+        op = _unregistered_tool_operation(state, device, binding, turn_id, callId)
+        if len(bodySha256) != 64 or any(c not in "0123456789abcdef" for c in bodySha256):
+            raise GateError(422, "invalid_request", "Требуется SHA-256 исходного результата")
     async with state.operations.delivery_lock(op["id"]):
-        current = await _control_receipt(state, op)
+        current = await _control_receipt(state, op) if registered else None
         try:
             proof = await _tool_recovery_state(state, binding, op, turn_id, callId)
         except (GateError, ValueError):
             proof = None
     outcome, retry = "unknown", False
-    if proof and current["state"] == "complete":
+    if proof and current is not None and current["state"] == "complete":
         try:
             receipt = json.loads(current["response"])
         except (ValueError, TypeError):
@@ -780,12 +831,18 @@ async def tool_result_recovery(sid: str, turn_id: str, callId: str, bodySha256: 
                 outcome = "accepted"
             elif current["status"] == 409 and receipt.get("status") == "turn_not_waiting":
                 outcome = "closed"
-    elif proof and current.get("receiptState") == "missing":
-        retry = (proof.get("waiting") is True and proof.get("retryAllowed") is True
-                 and proof.get("commandState") == "missing")
-    return JSONResponse({"version": 1, "sessionId": sid, "turnId": turn_id, "callId": callId,
+    elif current is None or current.get("receiptState") == "missing":
+        retry = _waiting_tool_retry(proof)
+    document = {"version": 1, "sessionId": sid, "turnId": turn_id, "callId": callId,
                          "requestId": f"tool-result:{sid}:{callId}", "commandId": op["id"],
-                         "bodySha256": bodySha256, "outcome": outcome, "retryAllowed": retry},
+                         "bodySha256": bodySha256, "outcome": outcome, "retryAllowed": retry,
+                         "operationRegistered": registered}
+    if not registered and retry:
+        now = int(time.time())
+        document["admissionProof"] = state.key.sign({
+            **_tool_admission_identity(device, binding, op, callId, bodySha256),
+            "aud": "atlas-gate:tool-result-admission", "iat": now, "exp": now + 300})
+    return JSONResponse(document,
                         headers={"Cache-Control": "private, no-store"})
 
 
