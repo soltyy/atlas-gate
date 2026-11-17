@@ -188,9 +188,11 @@ HTTP 409 с `status=recovery_unconfirmed` и
 Оно объявляется в подписанном профиле как
 `toolResultRecovery.initialAdmission` с `version=1`,
 `proofField=admissionProof`, `proofHeader=X-Atlas-Tool-Result-Admission` и
-`registeredField=operationRegistered`.
+`registeredField=operationRegistered`, `queryParam=initialAdmission`.
 
-Если первый POST потерян до регистрации Gate, тот же status GET возвращает
+Клиент, поддерживающий это расширение, добавляет `initialAdmission=1` к status GET.
+Без этого параметра для отсутствующей операции сохраняется прежний HTTP 404.
+Если первый POST потерян до регистрации Gate, согласованный status GET возвращает
 `operationRegistered=false`. При подтверждённых прежнем node/boot, известном
 Router вызове, `waiting=true` и `commandState=missing` ответ содержит
 `outcome=unknown`, `retryAllowed=true` и `admissionProof`. Сам GET не создаёт

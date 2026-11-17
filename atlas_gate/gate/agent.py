@@ -809,6 +809,8 @@ async def tool_result_recovery(sid: str, turn_id: str, callId: str, bodySha256: 
     op = _original_tool_operation(state, device, binding, turn_id, callId, bodySha256)
     registered = op is not None
     if not registered:
+        if request.query_params.get("initialAdmission") != "1":
+            raise GateError(404, "not_found", "Исходная доставка не найдена")
         op = _unregistered_tool_operation(state, device, binding, turn_id, callId)
         if len(bodySha256) != 64 or any(c not in "0123456789abcdef" for c in bodySha256):
             raise GateError(422, "invalid_request", "Требуется SHA-256 исходного результата")

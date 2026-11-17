@@ -242,6 +242,7 @@ class GateState:
                     'canonicalBody': 'json-sort-keys-compact-utf8-v1',
                     'initialAdmission': {'version': 1, 'proofField': 'admissionProof',
                                          'proofHeader': 'X-Atlas-Tool-Result-Admission',
+                                         'queryParam': 'initialAdmission',
                                          'registeredField': 'operationRegistered'},
                 }
                 from .recovery import CAPABILITY as RECOVERY_CAPABILITY

@@ -40,6 +40,8 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
     send_count = 0
     preflight = failure in ("preflight", "legacy_preflight", "preflight_stop")
     unregistered = failure.startswith("unregistered")
+    if unregistered:
+        recovery_query["initialAdmission"] = "1"
 
     async def scripted(self, turn_id, text, attachments=None):
         prompts.append(turn_id)
@@ -115,6 +117,10 @@ async def test_recover_exact_parallel_tool_result(network, monkeypatch, failure)
                 outage.setattr(state.nodes, "request", preflight_down)
             first = await client.post(prefix + "/tool_result", json=body, headers={"Idempotency-Key": key})
         assert first.status_code == 503 and first.json()["error"]["code"] == "command_outcome_unknown"
+    else:
+        legacy_query = {k: v for k, v in recovery_query.items() if k != "initialAdmission"}
+        legacy = await client.get(recovery, params=legacy_query)
+        assert legacy.status_code == 404 and legacy.json()["error"]["code"] == "not_found"
     if preflight:
         assert "X-Atlas-Command-State" not in first.headers
         op = state.store._one("SELECT * FROM router_operations WHERE session_id=? AND path LIKE '%/tool_result' AND status=503", (sid,))
