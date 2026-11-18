@@ -57,6 +57,13 @@ async def verify_target(nodes, binding, target_boot, body):
         except GateError as failed:
             if not _transient_read(failed):
                 raise
+            # A metadata failure can coincide with positive evidence of a new
+            # boot. Observe it before yielding to another discovery request:
+            # its delayed old response must not erase this pre-dispatch fence.
+            observed = nodes.snapshots.get(node_id)
+            if observed is not None and observed.get('bootId') != target_boot:
+                raise GateError(409, 'steer_target_boot_mismatch',
+                                'Исходный runtime Router изменился') from failed
             failure = failed
         if deadline is None:
             # The budget bounds recovery reads, not the SDK turn or its tool.

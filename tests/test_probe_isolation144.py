@@ -9,6 +9,7 @@ import pytest
 from atlas_gate.gate.nodes import Nodes
 from atlas_gate.gate.routing import Routing
 from atlas_gate.gate.store import Store
+from atlas_gate.gate.errors import GateError
 
 
 async def node_pool(tmp_path):
@@ -110,6 +111,36 @@ async def test_create_does_not_hold_global_reservation_lock_during_other_probe(t
         await asyncio.gather(blocked, return_exceptions=True)
         await nodes.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_observed_boot_change_fences_steer_before_late_old_discovery():
+    from atlas_gate.gate.steering import verify_target
+    caps = {'version': 1, 'expectedTurnId': True, 'clientMessageId': True,
+        'durableAbsorption': True, 'delivery': 'next_boundary',
+        'requiredHeader': 'X-Atlas-Steer-Contract', 'targetNodeId': 'a',
+        'targetBootId': 'original', 'attachments': {'images': False, 'documents': False}}
+    original = {'bootId': 'original', 'observed': time.monotonic(), 'steering': caps}
+    nodes = SimpleNamespace(snapshots={'a': original})
+    reads = []
+    async def request(node, method, path, **kwargs):
+        reads.append((method, path))
+        nodes.snapshots[node] = dict(original, bootId='new-boot')
+        # Another request has already read the previous boot; its late reply
+        # arrives on the next event-loop tick, before the metadata retry.
+        asyncio.get_running_loop().call_soon(nodes.snapshots.__setitem__, node, original)
+        try:
+            raise httpx.RemoteProtocolError('lost metadata reply')
+        except httpx.RemoteProtocolError as failed:
+            raise GateError(503, 'node_unavailable', 'link lost') from failed
+    nodes.request = request
+    with pytest.raises(GateError) as refusal:
+        await verify_target(nodes, {'node_id': 'a', 'boot_id': 'original', 'local_id': 's'},
+                            'original', SimpleNamespace(attachments=[]))
+    assert refusal.value.status == 409 and refusal.value.code == 'steer_target_boot_mismatch'
+    await asyncio.sleep(0)
+    assert nodes.snapshots['a']['bootId'] == 'original'
+    assert len(reads) == 1 and reads[0][0] == 'GET'
 
 
 @pytest.mark.asyncio
