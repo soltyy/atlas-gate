@@ -671,6 +671,11 @@ async def _delegate(request, device, sid, method, suffix, *, tool_result=None):
     if method == 'GET' and suffix in ('/files', '/sdk-tools') and response.status_code == 200:
         from .input_recovery import validate, public
         doc = response.json()
+        if suffix == '/sdk-tools' and 'questionAnswers' in doc:
+            from .question_answers import capability as question_capability, negotiate as negotiate_questions
+            doc['questionAnswers'] = (question_capability(doc['questionAnswers'], binding)
+                if request.query_params.get('questionAnswers') == '1'
+                else await negotiate_questions(state.nodes, binding))
         if suffix == '/sdk-tools' and 'steering' in doc:
             from .steering import bound_capability, capability, negotiate
             if (request.query_params.get('steering') != '1'

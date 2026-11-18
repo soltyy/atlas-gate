@@ -71,6 +71,7 @@ class SessionCreate(BaseModel):
 
 
 class SessionCreated(BaseModel):
+    questionAnswers: dict[str, Any] | None = None
     configuredReasoning: dict[str, Any] | None = None
     """Create ACK. SDK history identity is obtained from SessionInfo/session events.
 
