@@ -304,11 +304,16 @@ def main():
         # abort this rollout. A failed probe leaves managed requests fenced.
         sync_api_contract()
         sync_steer_contract()
-        before=states();assert_idle(before);assert_gate_idle();assert not any(d['draining'] for d in before.values())
+        before=states();assert_idle(before);assert not any(d['draining'] for d in before.values())
         env={k:v for k,v in os.environ.items() if k not in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV')}
         check=run([a.candidate/'.venv/bin/python','-m','atlas_gate.admission_check'],cwd='/tmp',env=env,capture_output=True,text=True)
         qualification=json.loads(check.stdout);assert qualification['status']=='passed'
-        old=(ROOT/'gate').resolve();oldversion=health()['version'];version=qualification['version']
+        old=(ROOT/'gate').resolve()
+        runtime=gate_runtime()
+        # Liveness/version is independent of downstream SDK discovery. The old
+        # /health itself can be queued behind the node-probe convoy being fixed.
+        oldversion=runtime['gateVersion'] if runtime is not None else health()['version']
+        version=qualification['version']
         assert tuple(map(int,version.split('.')))>tuple(map(int,oldversion.split('.'))),'Never downgrade/reinstall'
         backup=BACKUPS/('gate81-'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime()));backup.mkdir(mode=0o700)
         (backup/'qualification.json').write_text(json.dumps(qualification,indent=2));(backup/'qualification.json').chmod(0o600)

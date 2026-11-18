@@ -26,6 +26,14 @@ from .token_usage import accountable_terminal
 log = logging.getLogger("atlas_gate")
 
 
+async def _refresh_binding(state, binding):
+    # Admission for an existing chat depends only on its pinned Router.
+    if hasattr(state.nodes, 'probe'):
+        await state.nodes.probe(binding['node_id'])
+    else:
+        await state.nodes.refresh()
+
+
 def _response(response):
     raw = response.content
     headers = {"Retry-After": response.headers["Retry-After"]} if "Retry-After" in response.headers else {}
@@ -236,7 +244,7 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     if mode not in ("", "sse", "async"):
         raise GateError(422, "invalid_request", "неизвестный mode")
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    await state.nodes.refresh()
+    await _refresh_binding(state, binding)
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     def validate_admission():
         _policy(state, device, binding, request)
@@ -364,7 +372,7 @@ async def _execute_control(state, binding, op, raw):
 
 async def _compact_control(request, device, binding, raw, request_id):
     state = gate(request)
-    await state.nodes.refresh()
+    await _refresh_binding(state, binding)
     op, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/compact"),
                                       json.loads(raw) if raw else {}, request_id, nodes=state.nodes)
     if fresh:
