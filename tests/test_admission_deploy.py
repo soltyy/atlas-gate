@@ -356,7 +356,7 @@ def test_unprivileged_nginx_contract_fence_and_existing_stream_callbacks(tmp_pat
                 def chunk(value):
                     self.wfile.write(('%x\r\n'%len(value)).encode()+value+b'\r\n');self.wfile.flush()
                 chunk(b'data: waiting-tool\n\n')
-                if done.wait(5):chunk(b'data: terminal\n\n')
+                if done.wait(30):chunk(b'data: terminal\n\n')
                 self.wfile.write(b'0\r\n\r\n');self.wfile.flush()
                 return
             self.reply()
@@ -397,7 +397,8 @@ http {{ access_log off;
     try:
         with (tmp_path/'startup.log').open('wb') as startup:
             process=subprocess.Popen(command,stdout=subprocess.DEVNULL,stderr=startup)
-        with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=3) as client:
+        with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=3,
+                          limits=httpx.Limits(max_keepalive_connections=0)) as client:
             for _ in range(50):
                 try:
                     if client.get('/harness/health').status_code==200:break
@@ -435,9 +436,11 @@ http {{ access_log off;
                 iterator=stream.iter_text();assert 'waiting-tool' in next(iterator)
                 admission.touch()
                 subprocess.run(command+['-s','reload'],check=True,capture_output=True)
-                # A separate pool guarantees a new downstream TCP connection;
-                # the old worker still owns the streaming request above.
-                with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=3) as callbacks:
+                # Each control uses a new downstream TCP connection. Reusing an
+                # old worker's idle keep-alive would test its retirement race,
+                # not whether the admission fence permits result delivery.
+                with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=3,
+                                  limits=httpx.Limits(max_keepalive_connections=0)) as callbacks:
                     assert callbacks.post('/harness/agent/sessions',json={}).status_code==503
                     assert callbacks.post(path,json={},headers=headers).json()['error']['code']=='gate_maintenance'
                     assert callbacks.post('/harness/agent/sessions/s/tool_result',json={}).status_code==200
