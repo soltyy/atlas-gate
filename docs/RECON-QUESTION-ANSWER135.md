@@ -53,9 +53,13 @@ Gate e9777f1 / Router 58a4129 (3 failed), поэтому не выдаются �
 они могут содержать только тестовые enrollment tokens, а не рабочие credentials.
 
 Полная Linux-регрессия Router: 577 passed / 46 skipped. Полная Linux-регрессия
-Gate не зелёная: кроме известного admission сбоя, PDF connector fixtures
-получают timeout. Прямой PDF transport прошёл; причина connector тестов
-ещё не установлена. Установленные wheels прошли отдельный live-web release_check.
+Gate не зелёная: кроме известного admission сбоя, в общем прогоне PDF connector
+fixtures получили timeout. Тот же отдельный кейс прошёл на чистой базе (1 passed)
+и кандидате (1 passed); затем вся PDF-матрица кандидата прошла: 10 passed за 88 с,
+direct/connector, SSE/async, scoped authorization и восстановление кеша без inference.
+Причина нестабильности общего прогона не установлена, отдельный успешный прогон
+не объявляется полной зелёной регрессией. Установленные wheels прошли
+отдельный live-web release_check.
 
 Кандидат 0.4.42 не считать поставленным до финальной проверки
 артефактов и штатного переключения после освобождения ходов. Контракт v1 имеет
