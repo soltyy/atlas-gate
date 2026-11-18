@@ -304,7 +304,12 @@ def main():
         # abort this rollout. A failed probe leaves managed requests fenced.
         sync_api_contract()
         sync_steer_contract()
-        before=states();assert_idle(before);assert not any(d['draining'] for d in before.values())
+        before=states()
+        if any(not d['ready'] or d['draining'] for d in before.values()):
+            raise RuntimeError('Unready Router or another drain owner; no activation')
+        # Busy SDK work may finish behind phase-1 admission fencing. Checking
+        # idle before establishing that fence starves rollout under new traffic.
+        # wait_idle and the final phase-2 check still prohibit a busy restart.
         env={k:v for k,v in os.environ.items() if k not in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV')}
         check=run([a.candidate/'.venv/bin/python','-m','atlas_gate.admission_check'],cwd='/tmp',env=env,capture_output=True,text=True)
         qualification=json.loads(check.stdout);assert qualification['status']=='passed'

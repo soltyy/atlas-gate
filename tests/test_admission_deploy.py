@@ -34,8 +34,9 @@ def guard_module(monkeypatch,tmp_path):
 
 @pytest.mark.parametrize('failure', [None,'busy','qualification','maintenance','startup','rollback',
                                      'drain_ack','stop_ack','contract','undrain_ack','legacy_rollback'])
+@pytest.mark.parametrize('starts_busy', [False, True])
 @pytest.mark.skipif(os.name=='nt',reason='Linux systemd/symlink deployment guard')
-def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guard_module):
+def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,starts_busy,guard_module):
     m=guard_module
     root=tmp_path/'atlas';releases=root/'releases';releases.mkdir(parents=True)
     old=releases/'gate-old';old.mkdir();candidate=releases/'gate-new';candidate.mkdir()
@@ -51,10 +52,10 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guar
     for name,value in dict(ROOT=root,FLAG=tmp_path/'maintenance',ADMISSION_FLAG=tmp_path/'admission',API_FLAG=tmp_path/'api-v1',SITE=site,LOCK=tmp_path/'lock',BACKUPS=backups,DATABASE=database).items():monkeypatch.setattr(m,name,value)
     monkeypatch.setattr(m.os,'geteuid',lambda:0,raising=False)
     monkeypatch.setattr(sys,'argv',['guard','--candidate',str(candidate),'--wheel',str(wheel),'--sha256',sha,'--tests-proof',str(tests)])
-    events=[];draining=set();failed=False
+    events=[];draining=set();failed=False;settled=False
     def states():return {k:{'ready':True,'draining':k in draining,
         'bootId':k+('-changed' if failure=='legacy_rollback' and (root/'gate').resolve()==candidate else ''),
-        'activeTurns':int(failure=='busy'),'activeSubagents':0,'reservedUnits':0} for k in ('router','router-claude')}
+        'activeTurns':int(failure=='busy' or starts_busy and not settled),'activeSubagents':0,'reservedUnits':0} for k in ('router','router-claude')}
     def node(kind,drain=None):
         nonlocal failed
         if drain:draining.add(kind)
@@ -65,6 +66,8 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guar
     def run(args,**kw):
         nonlocal failed
         args=list(map(str,args));events.append(tuple(args))
+        if args==['systemctl','stop','atlas-gate']:
+            assert not any(s['activeTurns'] for s in states().values()), 'Stop before SDK quiescence'
         if 'atlas_gate.admission_check' in args:
             if failure=='qualification':raise RuntimeError('failed qualification')
             return SimpleNamespace(stdout=json.dumps({'status':'passed','version':'0.4.17'}))
@@ -113,8 +116,10 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guar
     monkeypatch.setattr(m,'sync_api_contract',sync_contract)
     monkeypatch.setattr(m,'drain_ingress',lambda:events.append(('ingress-drain',m.FLAG.exists())))
     def wait_idle():
+        nonlocal settled
         assert m.ADMISSION_FLAG.exists() and not m.FLAG.exists()
         events.append(('wait-idle',False))
+        settled=True  # existing SDK work finishes only behind the admission fence
     monkeypatch.setattr(m,'wait_idle',wait_idle)
     monkeypatch.setattr(m.httpx,'Client',Client)
     if failure:
