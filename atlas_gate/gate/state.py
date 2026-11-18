@@ -63,6 +63,8 @@ class GateState:
         self.nodes = Nodes(s.ATLAS_GATE_NODES_FILE, self.store, self.channel)
         self.routing = Routing(self.store, self.nodes)
         self.operations = Operations(self.store)
+        from .question_answers import Answers
+        self.question_answers = Answers(self.store)
         from .api_reasoning import ApiReasoning
         self.api_reasoning = ApiReasoning(self.store)
         from .recovery import Recovery
@@ -245,6 +247,10 @@ class GateState:
                                          'queryParam': 'initialAdmission',
                                          'registeredField': 'operationRegistered'},
                 }
+                from .question_answers import SUBMIT_PATH, STATUS_PATH
+                body['questionAnswers'] = {'version': 1, 'scope': 'pinned_node',
+                    'requiresSessionNegotiation': True, 'submitPath': SUBMIT_PATH,
+                    'statusPath': STATUS_PATH, 'bodyHash': 'sha256-original-http-body-utf8'}
                 from .recovery import CAPABILITY as RECOVERY_CAPABILITY
                 from .api_attempts import api_attempt_contract
                 body['sessionRecoveryCoordinator'] = dict(RECOVERY_CAPABILITY)
@@ -252,6 +258,7 @@ class GateState:
                 for model in body['models']:
                     model.setdefault('sessionRecovery', None)
                     model.setdefault('steering', None)
+                    model.setdefault('questionAnswers', None)
                     route = org.route(model['route_id'])
                     if route and route.kind == 'router-agent':
                         model.update(self.context_windows.project(org.id,route.id,model['model']))
@@ -259,6 +266,7 @@ class GateState:
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
                         model['sessionRecovery'] = self.project_recovery(org.id, route.id, model['model'])
                         model['steering'] = self.project_steering(org.id, route.id, model['model'])
+                        model['questionAnswers'] = self.project_question_answers(org.id, route.id, model['model'])
                     options = [info.get('sdkTools') or {} for node_id, info in self.nodes.snapshots.items()
                         if self.nodes.config[node_id].enabled and org.id in self.nodes.config[node_id].orgs
                         and model['route_id'] in self.nodes.config[node_id].routes
@@ -308,6 +316,14 @@ class GateState:
             if (node := self.nodes.config[nid]).enabled and org_id in node.orgs
             and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}
 
+    def project_question_answers(self, org_id, route_id, model):
+        from .question_answers import capability
+        return {'version': 1, 'scope': 'pinned_node', 'nodes': {
+            nid: capability(info.get('questionAnswers'), {'node_id': nid, 'boot_id': info.get('bootId')})
+            for nid, info in self.nodes.snapshots.items()
+            if (node := self.nodes.config[nid]).enabled and org_id in node.orgs
+            and route_id in node.routes and model in {m.get('value') for m in info.get('models', [])}}}
+
     async def publish_contexts(self):
         """Метаданные меняются без пересоздания агентов, сессий и org config."""
         import copy
@@ -325,6 +341,7 @@ class GateState:
                         model['reasoningCapabilities'] = project_capabilities(self, org.id, route.id, model['model'])
                         model['sessionRecovery'] = self.project_recovery(org.id, route.id, model['model'])
                         model['steering'] = self.project_steering(org.id, route.id, model['model'])
+                        model['questionAnswers'] = self.project_question_answers(org.id, route.id, model['model'])
                 row = publish(self.store,self.key,org.id,body,dump(org))
                 self.snapshot(org,int(row['profile_version']))
             self.bodies = bodies

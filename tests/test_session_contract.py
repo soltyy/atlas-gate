@@ -46,6 +46,11 @@ def _legacy_shape(schema):
         extra=schema['properties'].pop('configuredReasoning')
         assert extra['anyOf'][0]['type']=='object'
         assert 'configuredReasoning' not in schema.get('required',[])
+    for name in ('questionAnswers', 'steering', 'adaptiveFiles'):
+        if name in schema.get('properties',{}):
+            extra=schema['properties'].pop(name)
+            assert extra['anyOf'][0]['type']=='object'
+            assert name not in schema.get('required',[])
     return _shape(schema)
 
 

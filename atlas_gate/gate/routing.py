@@ -93,6 +93,9 @@ class Routing:
             if 'steering' in created:
                 from .steering import bound_capability
                 created = dict(created, steering=bound_capability(created['steering'], saved))
+            if 'questionAnswers' in created:
+                from .question_answers import capability
+                created = dict(created, questionAnswers=capability(created['questionAnswers'], saved))
             if 'adaptiveFiles' in created:
                 offer = created['adaptiveFiles']
                 if (not isinstance(offer, dict) or offer.get('version') != 1
@@ -409,6 +412,10 @@ class Routing:
             if capability(created['steering']).get('supported') is not False:
                 created['steering'] = await negotiate(self.nodes,
                     {'node_id': node_id, 'boot_id': boot_id, 'local_id': local_id})
+        if isinstance(created.get('questionAnswers'), dict) and created['questionAnswers'].get('supported') is True:
+            from .question_answers import negotiate as negotiate_questions
+            created['questionAnswers'] = await negotiate_questions(self.nodes,
+                {'node_id': node_id, 'boot_id': boot_id, 'local_id': local_id})
         return self.accept_creation(sid, local_id, created)
 
     async def reconcile(self, binding_id=None):
@@ -451,6 +458,9 @@ class Routing:
                     from .steering import capability, negotiate
                     if capability(created['steering']).get('supported') is not False:
                         created['steering'] = await negotiate(self.nodes, dict(binding, local_id=local))
+                if isinstance(created.get('questionAnswers'), dict) and created['questionAnswers'].get('supported') is True:
+                    from .question_answers import negotiate as negotiate_questions
+                    created['questionAnswers'] = await negotiate_questions(self.nodes, dict(binding, local_id=local))
                 self.accept_creation(binding['id'], local, created)
             except (GateError, ValueError, KeyError, TypeError):
                 continue

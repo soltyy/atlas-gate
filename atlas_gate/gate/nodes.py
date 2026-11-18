@@ -194,6 +194,11 @@ class Nodes:
                                      retryable=self.probe_retryable(node_id))
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
+        question_probe = method == 'GET' and path.endswith('/sdk-tools') and dict(params or {}).get('questionAnswers') == '1'
+        if method == 'POST' and path.endswith('/question-answer') or question_probe:
+            if not expected_boot:
+                raise GateError(422, 'question_answer_target_boot_required', 'Нужен исходный boot для ответа')
+            headers['X-Atlas-Question-Answer-Contract'] = '1'
         steering_probe = (method == 'GET' and path.endswith('/sdk-tools')
                           and dict(params or {}).get('steering') == '1')
         if method == 'POST' and path.endswith('/steer') or steering_probe:
@@ -226,7 +231,8 @@ class Nodes:
             raise GateError(503, "command_outcome_unknown", "Router ещё не подтвердил итог команды; требуется сверка", node_id=node_id)
         if 300 <= response.status_code < 400:
             raise GateError(502, "node_protocol_error", "redirect Router запрещён")
-        if method != 'GET' and request_id and response.status_code >= 500 and '/files/adaptive/' not in path:
+        if (method != 'GET' and request_id and response.status_code >= 500
+                and '/files/adaptive/' not in path and not path.endswith('/question-answer')):
             # 5xx может принадлежать relay, а команда уже принята Router.
             # Только его дисковая квитанция подтверждает итог, включая настоящий 5xx.
             from .receipts import completed_response

@@ -28,6 +28,7 @@ class ProfileModel(ModelContract):
     # Private org projection; PublicModel/ModelContract must not expose node IDs.
     sessionRecovery: dict[str, Any] | None = None
     steering: dict[str, Any] | None = None
+    questionAnswers: dict[str, Any] | None = None
 
 
 def project_model(model, attachments=None, kind="gateway"):
