@@ -1,0 +1,18 @@
+{
+  "version": "0.4.43",
+  "wheelSha256": "de758cd3a140c5a102e331e7c2a82e5db109e044384eef214486c653df38b5c3",
+  "requiredQualification": "passed",
+  "newIsolationAndBootRaceCases": {"passed": 6, "failed": 0, "platform": "Linux"},
+  "metadataDisconnectRecheck": {"passed": 3, "failed": 0, "variants": ["same_boot", "reboot", "lost_ack"]},
+  "canonicalDeployChecks": {"passed": 35, "failed": 0, "platform": "Linux", "includes": ["rollback", "ingress_fence", "existing_stream_callbacks"]},
+  "installedAdmissionCheck": {"passed": true, "races": 20, "exactRestartProof": true, "sdkActions": 0},
+  "initialExtendedHttpRun": {"passed": 100, "failed": 2, "skipped": 0, "seconds": 1085.48},
+  "initialFailures": {
+    "metadata_disconnect_reboot": "fixed and rechecked in all three variants, plus a deterministic late-discovery regression",
+    "cold_files_restore": "Router test helper was missing from installed-wheel test root; rerun with exact v0.8.30 test sources reproduced the previously known generation 0 != 1 baseline failure"
+  },
+  "remainingKnownBaseline": ["test_gate_cold_files_restore_keeps_scope_owner_and_upload_ack: generation 0 != 1"],
+  "fullGateSuite": "not claimed green",
+  "wireCoveragePassed": ["SSE/async cursor resume after disconnect", "lost event page after delivered tool result", "tool-result missing command and lost ACK", "no redelivery without original boot proof", "CREATE restart and exact-key replay", "question-answer direct/connector lost POST/ACK"],
+  "scope": "Node discovery concurrency, admission isolation and guarded Gate rollout; no claim that every historical Gate issue is resolved"
+}
