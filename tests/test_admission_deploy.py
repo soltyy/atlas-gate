@@ -87,7 +87,13 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,guar
     monkeypatch.setattr(m,'states',states);monkeypatch.setattr(m,'node',node);monkeypatch.setattr(m,'run',run)
     monkeypatch.setattr(m,'health',lambda:{'version':'0.4.16'})
     monkeypatch.setattr(m,'ready',lambda version:events.append(('ready',version)))
-    monkeypatch.setattr(m,'assert_gate_idle',lambda:None)
+    def gate_idle():
+        # Existing I/O must drain AFTER new admission is fenced. Requiring an
+        # empty gateway before establishing that fence cannot quiesce overload.
+        assert m.ADMISSION_FLAG.exists(), 'Gate I/O checked before admission fence'
+        events.append(('gate-idle', m.FLAG.exists()))
+    monkeypatch.setattr(m,'assert_gate_idle',gate_idle)
+    monkeypatch.setattr(m,'gate_runtime',lambda:None)
     monkeypatch.setattr(m,'assert_contract_lifecycle',lambda:None)
     monkeypatch.setattr(m,'assert_steer_ingress',lambda:None)
     monkeypatch.setattr(m,'sync_steer_contract',lambda expected_version=None: expected_version!='0.4.16')
