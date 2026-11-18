@@ -29,6 +29,11 @@ Capability включает `version=1`, `scope=root_turn`, `tool=ask_user`,
 `linkedCallback`, `userMessage`, `durableAdmission`, `separateApplicationReceipt`,
 `immutableRetry` (все true), исходные `targetNodeId`, `targetBootId`.
 Gate дополнительно возвращает `submitPath`, `statusPath`, `requiredHeaders`.
+Для маршрута Gate эти поля обязательны: проверять ожидаемые пути `/harness/agent/…`
+и полный набор заголовков, включая исходный target boot. Один `supported=true`
+недостаточен: старая Gate может пропустить незнакомую Router capability как
+непрозрачное расширение ответа, но собственного обработчика ещё не иметь.
+Raw Router capability без Gate URL/requiredHeaders не включает клиентскую функцию.
 
 ## Запрос
 
