@@ -91,7 +91,7 @@ class Nodes:
                 headers={"X-Atlas-Token": token}, follow_redirects=False, trust_env=False,
                 verify=context, timeout=httpx.Timeout(70, connect=5),
                 limits=httpx.Limits(keepalive_expiry=3.0))
-        self._probe_locks = {n.node_id: asyncio.Lock() for n in nodes}
+        self._probes: dict[str, asyncio.Task] = {}
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
         self._retryable_probes: set[str] = set()
@@ -109,11 +109,21 @@ class Nodes:
 
 
     async def close(self):
+        pending = list(self._probes.values())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         await asyncio.gather(*(c.aclose() for c in self.clients.values()))
 
     async def probe(self, node_id: str) -> dict | None:
-        async with self._probe_locks.setdefault(node_id, asyncio.Lock()):
-            return await self._probe(node_id)
+        # Concurrent observers need the same fresh identity, not N serial SDK
+        # auth/catalog requests. A timed-out observer must not cancel that check
+        # for event delivery, another CREATE, or the background reconciler.
+        task = self._probes.get(node_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._probe(node_id), name='atlas-node-probe-' + node_id)
+            self._probes[node_id] = task
+        return await asyncio.shield(task)
 
     def probe_retryable(self, node_id: str) -> bool:
         return node_id in self._retryable_probes
@@ -178,6 +188,11 @@ class Nodes:
 
     async def refresh(self):
         await asyncio.gather(*(self.probe(n.node_id) for n in self.config.values() if n.enabled))
+
+    async def refresh_for(self, org, route, pinned_node=None):
+        await asyncio.gather(*(self.probe(n.node_id) for n in self.config.values()
+            if n.enabled and org in n.orgs and route in n.routes
+            and (pinned_node is None or n.node_id == pinned_node)))
 
     async def request(self, node_id: str, method: str, path: str, *, content=b"", params=None,
                       expected_boot=None, request_id=None, tool_result_turn=None):

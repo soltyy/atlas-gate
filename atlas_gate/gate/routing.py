@@ -220,6 +220,30 @@ class Routing:
         finally:
             self.active_creations.discard(sid)
 
+    async def check_resume(self, resume):
+        if not resume or not resume.get('local_id'):
+            return
+        node_id = resume['node_id']
+        previous = await self.nodes.request(node_id, 'GET', '/v1/sessions/' + resume['local_id'] + '/reconcile')
+        if previous.status_code not in (200, 404):
+            raise GateError(503, 'session_recovery_unavailable', 'Состояние прежней сессии не подтверждено', outcome='not_sent')
+        if previous.status_code == 200:
+            saved = previous.json()
+            if (saved.get('id') != resume['local_id'] or saved.get('nodeId') != node_id or
+                    saved.get('bootId') != self.nodes.snapshots[node_id]['bootId'] or
+                    saved.get('sdkSessionId') != resume['sdk_id']):
+                raise GateError(409, 'router_identity_mismatch', 'Прежняя история не подтверждена')
+            writer = self.nodes.snapshots[node_id].get('writerRecovery') or {}
+            if ((saved.get('sessionRecovery') or {}).get('busy')
+                    and not (writer.get('version') == 1 and writer.get('idleHandoff') is True)):
+                raise GateError(409, 'session_recovery_pending', 'Сначала требуется сверить незавершённый ход прежней сессии',
+                    phase='session_create', outcome='not_sent', retryable=True)
+            if (not saved.get('sessionRecovery') and
+                    self.store._one("SELECT name FROM sqlite_master WHERE type='table' AND name='router_operations'") and self.store._one(
+                    'SELECT id FROM router_operations WHERE session_id=? AND turn_id IS NOT NULL AND finished=0 LIMIT 1',
+                    (resume['id'],))):
+                raise GateError(409, 'session_recovery_pending', 'Прежний Router не подтвердил завершение хода')
+
     async def create(self, device, route, model, payload, limit, request_id=None, sdk_policy=None, reasoning_policy=None):
         if request_id is not None and (not request_id or len(request_id) > 200):
             raise GateError(422, "invalid_request", "request_id должен содержать 1..200 знаков")
@@ -229,9 +253,21 @@ class Routing:
         if old:
             return await self.retry_creation(old, device, route, model, payload, fingerprint, sdk_policy)
         scope = json.dumps(payload['sessionScope'], sort_keys=True) if payload.get('sessionScope') else None
-        # Замок покрывает выбор+резерв, но не медленное open_session.
-        async with self.lock:
+        # Network preflight is outside the atomic reservation. Ordinary CREATE
+        # must not scan every old chat on this device: the background reconciler
+        # releases closed bindings. Refresh them here only at the device limit.
+        mine = self.store._one("SELECT COUNT(*) n FROM router_bindings WHERE device_id=? AND status IN ('creating','ready','unknown')", (device.device_id,))["n"]
+        if limit and mine >= limit:
             await self.sync_bindings(device.device_id)
+        checked_resume = self.resolve_resume(device, route, model, payload.get('resumeSessionId'))
+        if hasattr(self.nodes, 'refresh_for'):
+            await self.nodes.refresh_for(device.org, route, checked_resume['node_id'] if checked_resume else None)
+        else:
+            await self.nodes.refresh()
+        await self.check_resume(checked_resume)
+        # No await under this lock: recheck identity, duplicate key, scope and
+        # all capacities together, then persist the immutable reservation.
+        async with self.lock:
             old = self.store._one("SELECT * FROM router_bindings WHERE request_key=?", (key,))
             if old:
                 if old['org'] != device.org or old['device_id'] != device.device_id:
@@ -243,6 +279,8 @@ class Routing:
                     return cached
                 raise self.creation_pending()
             resume = self.resolve_resume(device, route, model, payload.get("resumeSessionId"))
+            if resume != checked_resume:
+                raise self.creation_pending()
             resume_sdk_id = resume['sdk_id'] if resume else None
             unresolved = self.store._one("""SELECT b.id FROM router_bindings b
                 LEFT JOIN router_bindings prior ON prior.id=json_extract(b.recovery_source,'$.previousSessionId')
@@ -260,7 +298,6 @@ class Routing:
             mine = self.store._one("SELECT COUNT(*) n FROM router_bindings WHERE device_id=? AND status IN ('creating','ready','unknown')", (device.device_id,))["n"]
             if limit and mine >= limit:
                 raise GateError(409, "agent_sessions_limit", "достигнут предел сессий устройства")
-            await self.nodes.refresh()
             if resume and (resume["route"] != route or resume["model"] != model):
                 raise GateError(403, "policy_denied", "resume требует прежнего маршрута и модели")
             candidates = []
@@ -337,28 +374,6 @@ class Routing:
             ties = [row[-1] for row in candidates if row[:-1] == best]
             import secrets
             node_id = secrets.choice(ties)
-            if resume and resume.get('local_id'):
-                # Same pinned node, read-only journal check before a NEW transport.
-                # Never resurrect a live/pending turn, or lose its tool ACKs.
-                previous = await self.nodes.request(node_id, 'GET', '/v1/sessions/' + resume['local_id'] + '/reconcile')
-                if previous.status_code not in (200, 404):
-                    raise GateError(503, 'session_recovery_unavailable', 'Состояние прежней сессии не подтверждено', outcome='not_sent')
-                if previous.status_code == 200:
-                    saved = previous.json()
-                    if (saved.get('id') != resume['local_id'] or saved.get('nodeId') != node_id or
-                            saved.get('bootId') != self.nodes.snapshots[node_id]['bootId'] or
-                            saved.get('sdkSessionId') != resume['sdk_id']):
-                        raise GateError(409, 'router_identity_mismatch', 'Прежняя история не подтверждена')
-                    writer = self.nodes.snapshots[node_id].get('writerRecovery') or {}
-                    if ((saved.get('sessionRecovery') or {}).get('busy')
-                            and not (writer.get('version') == 1 and writer.get('idleHandoff') is True)):
-                        raise GateError(409, 'session_recovery_pending', 'Сначала требуется сверить незавершённый ход прежней сессии',
-                            phase='session_create', outcome='not_sent', retryable=True)
-                    if (not saved.get('sessionRecovery') and
-                            self.store._one("SELECT name FROM sqlite_master WHERE type='table' AND name='router_operations'") and self.store._one(
-                            'SELECT id FROM router_operations WHERE session_id=? AND turn_id IS NOT NULL AND finished=0 LIMIT 1',
-                            (resume['id'],))):
-                        raise GateError(409, 'session_recovery_pending', 'Прежний Router не подтвердил завершение хода')
             tools = payload.get('sdkTools')
             if tools is None:
                 tools = defaults(self.nodes.snapshots[node_id].get('sdkTools'), sdk_policy).model_dump()
