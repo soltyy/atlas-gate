@@ -94,6 +94,11 @@ class Answers:
             fingerprint TEXT NOT NULL, key TEXT NOT NULL, target_boot TEXT NOT NULL,
             raw BLOB NOT NULL, receipt TEXT NOT NULL,
             UNIQUE(device_id,org,client_message_id))''')
+        # Keep the legacy answer table shape: older releases INSERT ten values.
+        # A missing marker denotes an old possibly dispatched row, never proof
+        # that no request reached Router. Rollback keeps its original schema.
+        store._exec('''CREATE TABLE IF NOT EXISTS gate_question_answer_dispatches(
+            id TEXT PRIMARY KEY, dispatched INTEGER NOT NULL)''')
 
     def get(self, key=None, *, device=None, sid=None, message=None):
         if key is not None:
@@ -123,16 +128,32 @@ class Answers:
                 db.execute('INSERT INTO gate_question_answers VALUES (?,?,?,?,?,?,?,?,?,?)',
                     (rid, device.device_id, device.org, binding['id'], body.clientMessageId,
                      fingerprint, key, boot, raw, json.dumps(receipt)))
+                db.execute('INSERT INTO gate_question_answer_dispatches VALUES (?,0)', (rid,))
             except sqlite3.IntegrityError:
                 raise GateError(409, 'question_answer_identity_conflict', 'Сообщение уже принадлежит исходному ключу') from None
             return dict(db.execute('SELECT * FROM gate_question_answers WHERE id=?', (rid,)).fetchone()), True
 
-    def save(self, row, receipt):
+    def dispatch(self, row):
+        """Linearize possible delivery against a concurrent preflight rejection."""
         with self.store._lock:
             db = self.store._db
             current = json.loads(db.execute('SELECT receipt FROM gate_question_answers WHERE id=?', (row['id'],)).fetchone()['receipt'])
             if current['state'] in ('applied', 'not_applied'):
+                return current, False
+            db.execute('INSERT INTO gate_question_answer_dispatches VALUES (?,1) '
+                       'ON CONFLICT(id) DO UPDATE SET dispatched=1', (row['id'],))
+            return current, True
+
+    def save(self, row, receipt, *, pre_dispatch_rejection=False):
+        with self.store._lock:
+            db = self.store._db
+            stored = db.execute('SELECT a.receipt,d.dispatched FROM gate_question_answers a '
+                                'LEFT JOIN gate_question_answer_dispatches d ON d.id=a.id WHERE a.id=?', (row['id'],)).fetchone()
+            current = json.loads(stored['receipt'])
+            if current['state'] in ('applied', 'not_applied'):
                 return current
+            if pre_dispatch_rejection and stored['dispatched'] != 0:
+                return current  # An older probe cannot negate a possible native admission.
             if current.get('uuid') and receipt.get('uuid') and current['uuid'] != receipt['uuid']:
                 raise GateError(502, 'question_answer_receipt_identity_mismatch', 'UUID исходного SDK-ввода изменился')
             if current['application'] == 'applied':
@@ -195,8 +216,8 @@ async def submit(sid: str, body: AnswerRequest, request: Request, device: Device
         if fresh:
             cached.update(state='not_applied', admission='rejected', callback='not_released',
                 application='not_applied', reason='question_answer_target_not_active')
-            state.question_answers.save(row, cached)
-        return response(cached, status=409)
+            cached = state.question_answers.save(row, cached, pre_dispatch_rejection=True)
+        return response(cached, status=409 if cached['admission'] == 'rejected' else None)
     try:
         negotiated = await state.nodes.request(binding['node_id'], 'GET', _path(binding, '/sdk-tools'),
             params={'questionAnswers': '1'}, expected_boot=target)
@@ -207,10 +228,13 @@ async def submit(sid: str, body: AnswerRequest, request: Request, device: Device
             if fresh:
                 cached.update(state='not_applied', admission='rejected', callback='not_released',
                     application='not_applied', reason='question_answer_unsupported')
-                state.question_answers.save(row, cached)
-            return response(cached, status=422)
+                cached = state.question_answers.save(row, cached, pre_dispatch_rejection=True)
+            return response(cached, status=422 if cached['admission'] == 'rejected' else None)
         # Router owns the atomic native admission. A retry of the identical key
         # is safe even if the first HTTP request is still in flight at that node.
+        cached, dispatch = state.question_answers.dispatch(row)
+        if not dispatch:
+            return response(cached)
         upstream = await state.nodes.request(binding['node_id'], 'POST', _path(binding, '/question-answer'),
             content=bytes(row['raw']), expected_boot=row['target_boot'], request_id=row['id'])
         doc = upstream.json()

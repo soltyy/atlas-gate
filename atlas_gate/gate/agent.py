@@ -56,7 +56,16 @@ def _response(response):
                 code = 'sdk_session_recovery_unavailable'
             elif isinstance(detail, str) and detail.startswith('adaptive_file'):
                 code = detail
-            raw = json.dumps({"error": {"code": code, "message": str(detail)}}, ensure_ascii=False).encode()
+            public = {"error": {"code": code, "message": str(detail)}}
+            if (response.status_code == 409 and isinstance(doc, dict)
+                    and doc.get('status') in ('answered', 'unknown_call', 'turn_not_waiting')
+                    and isinstance(doc.get('callId'), str) and 0 < len(doc['callId']) <= 200):
+                # EDT legacy reads top-level fields; Harness reads error.status.
+                # These are callback outcomes, not an exact-body recovery ACK.
+                outcome = {'status': doc['status'], 'callId': doc['callId']}
+                public.update(outcome)
+                public['error'].update(outcome)
+            raw = json.dumps(public, ensure_ascii=False).encode()
     return Response(content=raw, status_code=response.status_code, media_type="application/json", headers=headers)
 
 
@@ -461,11 +470,13 @@ def _admission_negative(proof):
 
 
 async def _closed_prompt_absent(state, binding, op):
-    """Router 0.8.24 keeps closed sessions and turn identities across journal purge."""
+    """Require the closed-journal contract, never infer it from a newer version."""
     node, boot = op["node_id"], op["boot_id"]
     try:
         info = await state.nodes.probe(node)
-        if (not info or info.get("bootId") != boot or info.get("routerVersion") != "0.8.24"
+        if (not info or info.get("bootId") != boot
+                or not ("closed_prompt_absence_v1" in info.get("capabilities", [])
+                        or info.get("routerVersion") == "0.8.24")
                 or not {"durable_commands", "durable_events"}.issubset(info.get("capabilities", []))):
             return False
         response = await state.nodes.request(node, "GET", _path(binding, "/reconcile"), expected_boot=boot)
@@ -588,8 +599,12 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
                     raise _tool_result_pending(op)
                 if receipt.status_code != 404:
                     raise _tool_result_pending(op)
-                if op.get('steer') or (not_sent and tool_result_turn is None):
+                if (op.get('steer') or op['path'].endswith('/interrupt')
+                        or (not_sent and tool_result_turn is None)):
                     # Absence is not proof of non-admission, even on the same boot.
+                    # A legacy interrupt targets the current session turn at handler
+                    # entry, so a previously missing command can stop a successor.
+                    # Observe its original receipt; never re-dispatch an unknown Stop.
                     raise _tool_result_pending(op)
                 # 404 разрешает повтор только при прежнем boot и durable дедупликации.
                 # Для старой записи без boot свидетельств недостаточно: ничего не посылаем.

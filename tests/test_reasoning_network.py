@@ -64,10 +64,16 @@ async def test_rollout_old_node_rejected_before_create_and_legacy_unchanged(netw
     client,app,routers=await configure(network,monkeypatch)
     state=app.state.gate
     # Simulate a pre-v1 Router snapshot, including refresh during admission.
-    async def old_refresh():
-        for info in state.nodes.snapshots.values():info.pop('reasoningSettings',None)
-    monkeypatch.setattr(state.nodes,'refresh',old_refresh)
-    await old_refresh()
+    probe = state.nodes.probe
+    async def old_probe(node_id):
+        info = await probe(node_id)
+        if info is not None:
+            info.pop('reasoningSettings', None)
+        return info
+    # Admission now refreshes only relevant nodes with refresh_for; mutate the
+    # actual discovery boundary, rather than an unused whole-pool refresh hook.
+    monkeypatch.setattr(state.nodes, 'probe', old_probe)
+    await state.nodes.refresh()
     r=await client.post('/harness/agent/sessions',json={'model':'stub-fast','reasoning':{'effort':'high'}})
     assert r.status_code==422 and 'protocol_unsupported' in r.text
     assert all(len(r.state.registry)==0 for r in routers)

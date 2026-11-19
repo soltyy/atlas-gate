@@ -53,17 +53,30 @@ async def test_gate_cold_files_restore_keeps_scope_owner_and_upload_ack(network,
         node=routers[0 if binding['node_id']=='a' else 1]
         await node.state.registry.remove(binding['local_id'],persist_close=False)
         ScriptedRpc.histories={}
+        instances = len(ScriptedRpc.instances)
         gate.state.gate.store._exec('UPDATE router_bindings SET boot_id=? WHERE id=?',('prior-boot',sid))
         result=await client.get(prefix+'/files')
         assert result.status_code==200,result.text
         assert result.json()['files']==before['files']
-        assert result.json()['inputRecovery']['generation']==1
+        # A read of durable manifest/proof is not permission to open an SDK.
+        assert result.json()['inputRecovery']['generation']==0
+        assert node.state.registry.get(binding['local_id']) is None
+        assert len(ScriptedRpc.instances) == instances
         assert result.json()['inputRecovery']['sessionId']==sid
         assert result.json()['inputRecovery']['logicalSdkSessionId']==binding['sdk_alias']
-        assert node.state.registry.get(binding['local_id']).session.session_id not in result.text
         assert result.json()['inputRecovery']['logicalSdkSessionId']==before['inputRecovery']['logicalSdkSessionId']
         replay=await client.post(prefix+'/files',json=upload,headers={'Idempotency-Key':'original-upload'})
         assert replay.content==first.content and len((await client.get(prefix+'/files')).json()['files'])==1
+        assert len(ScriptedRpc.instances) == instances  # replayed ACK is read-only too
+        # A new explicit upload may restore the exact virgin native transport.
+        restored = await client.post(prefix+'/files',json={**upload,'id':'next-upload'},
+                                    headers={'Idempotency-Key':'next-upload'})
+        assert restored.status_code == 200, restored.text
+        status = (await client.get(prefix+'/files')).json()
+        assert status['inputRecovery']['generation'] == 1
+        assert status['inputRecovery']['logicalSdkSessionId'] == binding['sdk_alias']
+        assert len(status['files']) == 1
+        assert node.state.registry.get(binding['local_id']).session.session_id not in str(status)
         assert (await client.get(prefix+'/files',headers={'Authorization':'Bearer '+other['device_token']})).status_code==404
         assert not any(ScriptedRpc.histories.values()),'No prompt was submitted during recovery'
     finally:
