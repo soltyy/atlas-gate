@@ -410,49 +410,50 @@ async def _managed_proxy(request, state, device, org, route, model, suffix, body
             log.error('сохранение API attempt %s не завершено: %s', aid, type(failed).__name__)
         finally:
             try:
-                if admission_rejected:
-                    return
-                if resp is not None:
-                    await resp.aclose()
-                current = manager.owned(aid, device)
-                if current['status'] is None:
-                    status = 504 if failure == 'upstream_timeout' else 502
-                    manager.response_headers(aid, status, {'content-type': 'application/json'})
-                    manager.append(aid, json.dumps({'error': {'code': failure or 'upstream_unknown',
-                                   'message': 'исход API attempt неизвестен', 'attemptId': aid,
-                                   'deliveryState': 'unknown'}}).encode())
+                # A rejected admission already owns a terminal receipt. Do not
+                # return from finally (PEP765 / Python3.14 warnings-as-errors).
+                if not admission_rejected:
+                    if resp is not None:
+                        await resp.aclose()
                     current = manager.owned(aid, device)
-                usage = normalized_usage()
-                summary = facts.summary(current['status'], headers, usage)
-                if failure:
-                    summary['error'] = {'code': failure, 'category': 'transport_or_persistence'}
-                    summary['retry'] = {'allowed': False, 'scope': 'reconcile', 'owner': 'agent_loop'}
-                    # A durable native terminal is still valid if only the usage
-                    # tail or connection close failed afterwards.
-                    if not facts.terminal:
-                        summary.update(outcome='partial' if current['status'] == 200 else 'unknown',
-                                       terminalKnown=False, runState='waiting-recovery')
-                usage_row = None
-                cost = None
-                if usage is not None:
-                    image_billing = suffix.startswith('/images/') or (suffix == '/responses' and
-                        any(t.get('type') == 'image_generation' for t in (json.loads(body).get('tools') or []) if isinstance(t, dict)))
-                    cache_write = suffix == '/messages' and bool((facts.usage or {}).get('cache_creation_input_tokens'))
-                    if not image_billing and not cache_write:
-                        if period:
-                            cost = period.rates.cost(usage)
-                        elif static_price:
-                            cost = ((usage['prompt'] - usage['cached']) * static_price['input_uncached']
-                                    + usage['cached'] * static_price['input_cached']
-                                    + usage['completion'] * static_price['output']) / 1_000_000
-                    usage_row = dict(org=org.id, user_id=device.user_id, device_id=device.device_id, kind='gateway',
-                                     model=model, prompt_tokens=usage['prompt'], completion_tokens=usage['completion'],
-                                     cached_tokens=usage['cached'], cost=cost, route=route.id,
-                                     session_id=request.headers.get('x-harness-session'), model_call=aid)
-                summary.update(cost=cost, costKind='estimate', costStatus='estimate' if cost is not None else 'unknown',
-                               costCoverage='model_tokens_only', pricingDecision=price_decision, staticPrice=static_price)
-                terminal_state = 'complete' if summary['terminalKnown'] or summary['outcome'] == 'accepted-running' else 'outcome_unknown'
-                manager.finish(aid, summary, state=terminal_state, usage_row=usage_row, pricing_decision=price_decision)
+                    if current['status'] is None:
+                        status = 504 if failure == 'upstream_timeout' else 502
+                        manager.response_headers(aid, status, {'content-type': 'application/json'})
+                        manager.append(aid, json.dumps({'error': {'code': failure or 'upstream_unknown',
+                                       'message': 'исход API attempt неизвестен', 'attemptId': aid,
+                                       'deliveryState': 'unknown'}}).encode())
+                        current = manager.owned(aid, device)
+                    usage = normalized_usage()
+                    summary = facts.summary(current['status'], headers, usage)
+                    if failure:
+                        summary['error'] = {'code': failure, 'category': 'transport_or_persistence'}
+                        summary['retry'] = {'allowed': False, 'scope': 'reconcile', 'owner': 'agent_loop'}
+                        # A durable native terminal is still valid if only the usage
+                        # tail or connection close failed afterwards.
+                        if not facts.terminal:
+                            summary.update(outcome='partial' if current['status'] == 200 else 'unknown',
+                                           terminalKnown=False, runState='waiting-recovery')
+                    usage_row = None
+                    cost = None
+                    if usage is not None:
+                        image_billing = suffix.startswith('/images/') or (suffix == '/responses' and
+                            any(t.get('type') == 'image_generation' for t in (json.loads(body).get('tools') or []) if isinstance(t, dict)))
+                        cache_write = suffix == '/messages' and bool((facts.usage or {}).get('cache_creation_input_tokens'))
+                        if not image_billing and not cache_write:
+                            if period:
+                                cost = period.rates.cost(usage)
+                            elif static_price:
+                                cost = ((usage['prompt'] - usage['cached']) * static_price['input_uncached']
+                                        + usage['cached'] * static_price['input_cached']
+                                        + usage['completion'] * static_price['output']) / 1_000_000
+                        usage_row = dict(org=org.id, user_id=device.user_id, device_id=device.device_id, kind='gateway',
+                                         model=model, prompt_tokens=usage['prompt'], completion_tokens=usage['completion'],
+                                         cached_tokens=usage['cached'], cost=cost, route=route.id,
+                                         session_id=request.headers.get('x-harness-session'), model_call=aid)
+                    summary.update(cost=cost, costKind='estimate', costStatus='estimate' if cost is not None else 'unknown',
+                                   costCoverage='model_tokens_only', pricingDecision=price_decision, staticPrice=static_price)
+                    terminal_state = 'complete' if summary['terminalKnown'] or summary['outcome'] == 'accepted-running' else 'outcome_unknown'
+                    manager.finish(aid, summary, state=terminal_state, usage_row=usage_row, pricing_decision=price_decision)
             except Exception as failed:
                 log.error('квитанция API attempt %s недоступна: %s', aid, type(failed).__name__)
                 manager.producer_failed(aid, 'receipt_persistence_error')

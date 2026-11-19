@@ -260,6 +260,7 @@ async def test_shared_account_capacity_and_drain(network):
     call = next(e for e in await events(client, sids[0], "busy") if e["type"] == "tool_call")
     denied = await client.post(f"/harness/agent/sessions/{sids[1]}/prompt?mode=async", json={"id": "later", "text": "hello"})
     assert denied.status_code == 429, denied.text
+    assert not state.store._one("SELECT id FROM router_operations WHERE turn_id='later'")
     assert (await client.post("/harness/agent/sessions", json={"system": "test", "model": "stub-fast", "tools": []})).status_code == 503
     await client.post(f"/harness/agent/sessions/{sids[0]}/tool_result", json={"callId": call["callId"], "content": "ok"})
     await events(client, sids[0], "busy", True)
@@ -365,14 +366,15 @@ async def test_sse_and_control_mirrors(network):
 @pytest.mark.asyncio
 async def test_stop_after_route_disabled_and_quota_before_send(network, monkeypatch):
     from datetime import datetime, timezone
-    from atlas_gate.gate.errors import GateError
+    from atlas_gate.gate.errors import GateFreshNodeError
     client, app, routers, settings, creds, other = network
     sid = await create(client)
     state = app.state.gate
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     original = state.nodes.request
-    async def unavailable(*args, **kwargs):
-        raise GateError(503, "node_unavailable", "discovery failed before POST")
+    async def unavailable(node, method, path, **kwargs):
+        raise GateFreshNodeError("discovery failed before POST", node_id=node,
+                                 method=method, path=path, reason='identity_unconfirmed')
     monkeypatch.setattr(state.nodes, "request", unavailable)
     refused = await client.post(f"/harness/agent/sessions/{sid}/prompt?mode=async", json={"id": "refused", "text": "hello"})
     assert refused.status_code == 503
@@ -386,6 +388,86 @@ async def test_stop_after_route_disabled_and_quota_before_send(network, monkeypa
     assert stopped.status_code == 200, stopped.text
     terminal = await events(client, sid, "active", True)
     assert next(e for e in terminal if e["type"] == "result")["subtype"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_transport_failure_keeps_quota_until_receipt(network, monkeypatch):
+    from datetime import datetime, timezone
+    from atlas_gate.gate.errors import GateError
+    client, app, *_ = network
+    sid = await create(client)
+    state = app.state.gate
+    async def ambiguous(*args, **kwargs):
+        raise GateError(503, 'node_unavailable', 'No proof whether POST reached Router')
+    monkeypatch.setattr(state.nodes, 'request', ambiguous)
+    response = await client.post(f'/harness/agent/sessions/{sid}/prompt?mode=async',
+                                 json={'id': 'ambiguous', 'text': 'hello'})
+    assert response.status_code == 503
+    assert state.store.agent_turns('first', datetime.now(timezone.utc).strftime('%Y-%m-%d')) == 1
+    saved = state.store._one("SELECT state,admission_rejection FROM router_operations WHERE turn_id='ambiguous'")
+    assert saved['state'] == 'unknown' and saved['admission_rejection'] is None
+
+
+@pytest.mark.asyncio
+async def test_shared_peer_unknown_blocks_new_admission_but_not_exact_ack(network, monkeypatch):
+    client, app, *_ = network
+    sid = await create(client)
+    state = app.state.gate
+    target = state.store._one('SELECT node_id FROM router_bindings WHERE id=?', (sid,))['node_id']
+    peer = next(n for n in state.nodes.config if n != target)
+    for node in state.nodes.config.values():
+        node.account_group = 'shared'
+        node.account_turn_capacity = 1
+    probe = state.nodes.probe
+    async def missing_peer(node):
+        if node == peer:
+            state.nodes.snapshots.pop(node, None)
+            return None
+        return await probe(node)
+    body = {'id': 'once', 'text': 'hello'}
+    url = f'/harness/agent/sessions/{sid}/prompt?mode=async'
+    with monkeypatch.context() as outage:
+        outage.setattr(state.nodes, 'probe', missing_peer)
+        refused = await client.post(url, json=body)
+        assert refused.status_code == 503 and refused.json()['error']['code'] == 'node_unavailable'
+        assert not state.store._one("SELECT id FROM router_operations WHERE turn_id='once'")
+    accepted = await client.post(url, json=body)
+    assert accepted.status_code == 202
+    await events(client, sid, 'once', True)
+    with monkeypatch.context() as outage:
+        outage.setattr(state.nodes, 'probe', missing_peer)
+        replay = await client.post(url, json=body)
+        assert replay.status_code == 202 and replay.content == accepted.content
+    assert state.store._one("SELECT COUNT(*) n FROM router_operations WHERE turn_id='once'")['n'] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('joins_account', [False, True])
+async def test_bounded_account_scope_isolated_and_rechecked_after_probe(network, monkeypatch, joins_account):
+    client, app, *_ = network
+    sid = await create(client)
+    state = app.state.gate
+    target = state.store._one('SELECT node_id FROM router_bindings WHERE id=?', (sid,))['node_id']
+    peer = next(n for n in state.nodes.config if n != target)
+    state.nodes.config[target].account_turn_capacity = 1
+    probe = state.nodes.probe
+    async def changing(node):
+        assert node == target, 'A different account must not be probed'
+        info = await probe(node)
+        if joins_account:
+            state.nodes.config[peer].account_group = state.nodes.config[target].account_group
+            state.nodes.config[peer].account_turn_capacity = 1
+            state.nodes.snapshots.pop(peer, None)
+        return info
+    monkeypatch.setattr(state.nodes, 'probe', changing)
+    response = await client.post(f'/harness/agent/sessions/{sid}/prompt?mode=async',
+                                 json={'id': 'scope-change', 'text': 'hello'})
+    if joins_account:
+        assert response.status_code == 503 and response.json()['error']['code'] == 'node_unavailable'
+        assert not state.store._one("SELECT id FROM router_operations WHERE turn_id='scope-change'")
+    else:
+        assert response.status_code == 202
+        await events(client, sid, 'scope-change', True)
 
 
 @pytest.mark.asyncio

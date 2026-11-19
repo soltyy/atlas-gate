@@ -1,4 +1,8 @@
-# HTTP-карта recovery: Gate 0.4.31 / Router 0.8.24
+# HTTP-карта recovery
+
+Актуальные версии, клиентская проводка и найденные ограничения:
+[аудит 19.11.2026](CONTRACT-AUDIT-20261119.md). Базовая карта ниже квалифицирована
+11.11 на Gate0.4.31 / Router0.8.24; последующие расширения имеют отдельные разделы.
 
 Приложение к [RFC](SESSION-RESILIENCE-CONTRACT.md), сверка 11.11.2026.
 Развёрнутые версии, условия согласования и границы приёмки указаны
@@ -60,7 +64,7 @@ Create/list используют пути без `/{sid}`. SDK alias — тре�
 | GET `/turns/{turnId}/events?after=N&wait=M` | События после `N`, `nextAfter`, `state`, `done`. `wait` в мс, максимум 30 000 | Допускает чтение своего closed binding. При временном обрыве Gate до 3 секунд повторяет только чтение с тем же `after` на закреплённом Router. Если связь всё ещё недоступна, клиент сохраняет курсор и повторяет GET. При 410 отдельно запросить summary receipt. 404 оставляет отсутствие данных или доступа |
 | GET `/turns/{turnId}/receipt` | Сохранённый terminal summary | Не SDK generation. Чтение own closed turn сохраняет ownership checks/usage dedup |
 | POST `/tool_result` | Доставка сохранённого результата exact callId | Accepted ACK не означает success задания; инструмент не исполняется этим endpoint заново |
-| POST `/interrupt` | Прервать текущий сессионный ход | Legacy target scope ограничен; RFC требует exact turn/generation fencing для позднего Stop |
+| POST `/interrupt` | Прервать текущий сессионный ход | Legacy target scope ограничен; unknown Stop сверяется по исходной квитанции. Candidate аудита19.11 запрещает повторный upstream POST после missing; exact turn/generation fencing для впервые позднего Stop этим не появляется |
 | POST `/steer` | Новое сообщение в активный turn | accepted/absorbed различаются; неизменный steer ID |
 | POST `/tasks/{taskId}/stop` | Stop конкретного subagent/task | Не отменяет уже совершённый эффект; нужны child receipts |
 | POST `/tools` | Изменение согласованного каталога | State-changing, key/config snapshot; не простое обновление UI |

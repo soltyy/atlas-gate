@@ -21,6 +21,11 @@ resumed=false не подменяется true: пустая сессия не �
 state=empty_confirmed|protected, generation, actionsReplayed=false. Gate проверяет
 эти поля вместе с device/org/node/boot/policy до принятия нового boot. GET файлов
 не выдаёт proof отсутствовавшего или завершённого business turn.
+В актуальном Router GET `/files` читает сохранённый manifest и proof без открытия
+native SDK; generation при таком чтении не увеличивается. Повтор ранее принятой
+загрузки возвращает прежний ACK и тоже не создаёт native transport. Восстановление
+virgin identity и увеличение generation происходят при новом явно допущенном
+изменяющем запросе, которому нужен SDK. Read-only сверка не подменяется таким запросом.
 В публичном ответе Gate sessionId и logicalSdkSessionId заменены его непрозрачными
 публичными IDs; внутренние Router/SDK IDs клиенту не раскрываются.
 

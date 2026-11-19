@@ -9,7 +9,7 @@ from atlas_gate.gate.operations import body_sha256
 from .test_network_gate import create, events, network  # noqa: F401
 
 
-@pytest.mark.parametrize("evidence", ["missing", "lost_ack", "expired", "other_key", "other_boot", "unavailable"])
+@pytest.mark.parametrize("evidence", ["missing", "future_optin", "legacy024", "future_unsupported", "lost_ack", "expired", "other_key", "other_boot", "unavailable"])
 async def test_closed_prompt_admission(network, monkeypatch, evidence):
     client, app, routers, _, credentials, other = network
     state = app.state.gate
@@ -72,6 +72,17 @@ async def test_closed_prompt_admission(network, monkeypatch, evidence):
             return dict(await probe(node_id), bootId="different")
 
         monkeypatch.setattr(state.nodes, "probe", changed_boot)
+    if evidence in ('future_optin', 'legacy024', 'future_unsupported'):
+        probe = state.nodes.probe
+
+        async def advertised(node_id):
+            info = dict(await probe(node_id))
+            info['routerVersion'] = '0.8.24' if evidence == 'legacy024' else '99.0.0'
+            if evidence != 'future_optin':
+                info['capabilities'] = [c for c in info['capabilities'] if c != 'closed_prompt_absence_v1']
+            return info
+
+        monkeypatch.setattr(state.nodes, 'probe', advertised)
     if evidence == "unavailable":
         async def bad_read(method, target, **kwargs):
             if method == "GET" and target.endswith("/events"):
@@ -86,7 +97,7 @@ async def test_closed_prompt_admission(network, monkeypatch, evidence):
     async def reconcile(**changes):
         return await client.post(path + "/commands/reconcile", json={**query, **changes})
 
-    if evidence == "missing":
+    if evidence in ("missing", "future_optin", "legacy024"):
         assert (await reconcile(bodySha256="f" * 64)).status_code == 409
         assert (await reconcile(turnId="another")).status_code == 409
         assert (await client.get(path + "/commands", params={"requestId": key}, headers={

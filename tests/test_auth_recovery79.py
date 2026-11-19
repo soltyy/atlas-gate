@@ -54,14 +54,16 @@ async def test_existing_create_path_replaces_closed_transport_after_login(networ
     await client.delete('/harness/agent/sessions/'+sid)
     if not history_present: StubBackend.memories.pop(native,None)
     request=dict(body,resumeSessionId=alias,allowHistoryFallback=True)
-    refresh=state.nodes.refresh
-    async def logged_out(*args,**kwargs):
-        await refresh(*args,**kwargs)
-        state.nodes.snapshots['a'].update(ready=False,authentication={'state':'required'})
-    monkeypatch.setattr(state.nodes,'refresh',logged_out)
+    probe=state.nodes.probe
+    async def logged_out(node):
+        info=await probe(node)
+        if node=='a':
+            info.update(ready=False,authentication={'state':'required'})
+        return info
+    monkeypatch.setattr(state.nodes,'probe',logged_out)
     waiting=await client.post('/harness/agent/sessions',json=request,headers={'Idempotency-Key':'after-login'})
     assert waiting.status_code==503 and waiting.json()['error']['code']=='sdk_auth_required'
-    monkeypatch.setattr(state.nodes,'refresh',refresh)
+    monkeypatch.setattr(state.nodes,'probe',probe)
     node_request=state.nodes.request
     dropped=False
     async def lose_once(node,method,path,**kw):
