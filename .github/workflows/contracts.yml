@@ -13,35 +13,28 @@ concurrency:
   cancel-in-progress: true
 jobs:
   linux:
-    name: full-suite and Router wire (Linux)
+    name: Gate core (Linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: soltyy/atlas-router
-          ref: 4696d47008a0554c5c2bcba69c1de0481d2901cf
-          path: out/router
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install uv==0.12.23
       - name: Install isolated test environment
-        run: |
-          uv sync --locked
-          uv export --locked --no-dev --no-emit-project --project out/router --output-file out/router-requirements.txt
-          uv pip install --python .venv/bin/python -r out/router-requirements.txt
-          uv pip install --python .venv/bin/python --no-deps out/router
-      - name: Full Gate suite with actual Router HTTP handlers
+        run: uv sync --locked
+      # The private Router checkout is tested by the paired Router workflow.
+      # A Gate-scoped GITHUB_TOKEN must not be replaced by a broad personal token.
+      - name: Gate core suite
         env:
           ATLAS_LIVE: '0'
-          ATLAS_TEST_ROUTER_ROOT: ${{ github.workspace }}/out/router
-        run: uv run --no-sync pytest -q --junitxml=out/gate-full.xml
+        run: |
+          mkdir -p out
+          uv run --no-sync pytest -q --junitxml=out/gate-core.xml
       - name: Preserve qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gate-contracts-linux
-          path: out/gate-full.xml
+          path: out/gate-core.xml
