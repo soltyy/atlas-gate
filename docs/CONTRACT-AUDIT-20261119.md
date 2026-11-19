@@ -128,13 +128,15 @@ questionAnswers v1. EDT: `RouterSidecar`, `GateRecoveryWire`, `RecoveryStore`,
 
 8. **Разные envelopes вложений Gate и direct Router.** Router `/attachments`
    возвращает capabilities, Gate — attachments. Harness читал только второй
-   вариант и при bind, и при preflight. Исправлен общий parser с точным выбором
-   по сохранённому transport path. Проверена полная цепочка rich result → bind →
+   вариант и при bind, и при preflight. Для агента Harness подготовлен candidate
+   общего parser с точным выбором по сохранённому transport path. Проверена полная цепочка rich result → bind →
    preflight для обоих путей, лимит whole batch и неизменные call/content/bytes.
    Нельзя включить поддержку по чужому envelope, без create ACK или с false flag.
    Реальные Router metadata сняты на изолированном SDK stub; опубликованный
    consumer0.1.183 на тех же данных давал false, candidate — true. Реальный SDK
-   image inference этим не проверялся.
+   image inference этим не проверялся. По уточнению пользователя дальнейшую
+   реализацию и выпуск Harness ведёт его агент. PR #576 переведён в draft;
+   это материал анализа, не готовое исправление для слияния.
 
 ## Незавершённые возможности, которые не объявляются готовыми
 
@@ -169,8 +171,8 @@ Linux worker на Windows). Сама capability проверена с NODE_DB и
 Harness: сетевой create-restart/ACK-loss driver с настоящими Gate Nodes/Routing/Store,
 pricing transport, steering, admission и HTTP delivery: **130 passed**, exit0.
 Это Python3.14 на Windows и изолированные HTTP backend fixtures, не установленный
-Electron/WebView и не новая живая приёмка платных API/SDK. Дополнительные клиентские
-cases и независимый проход записываются по завершении.
+Electron/WebView и не новая живая приёмка платных API/SDK. Эти результаты служат
+материалом анализа для владельца Harness, а не разрешением на его выпуск.
 
 После замечаний независимого агента окончательные questions/race/refusal/tool
 recovery: **26 passed**, 49.12с. Включены обе противоположные интерливинговые
@@ -188,6 +190,17 @@ shared venv; tzdata2026.5 установлена только в собстве�
 authorization/restore case: **1 passed**, 21.02с, без моков access checks, но с
 мокированным documents HTTP.
 
+Отдельная opt-in HTTP fault квалификация Harness не пройдена полностью.
+Последний запуск `harness-contract1911-http-conformance`: **3 passed / 1 failed**,
+82.83с, `lost_prompt_ack-connector`: наблюдатель не дождался перехода Run из
+running, хотя Router уже сообщил done. Более ранние прогоны также обнаружили
+расхождение deadline наблюдателя с receipt polling и teardown connector resources;
+их FAIL сохранены. Эти причины нельзя подменять утверждением о полностью
+исправленной доставке. Все дальнейшие изменения клиента и test drivers переданы
+в анализ владельцу Harness; root их больше не дорабатывает и не выпускает.
+Материалы, candidate и отдельный test-driver diff:
+[Harness draft #576 — передача анализа](https://github.com/soltyy/atlas_harness/pull/576#issuecomment-7005910247).
+
 ## Независимый второй проход
 
 Отдельный агент получил те же репозитории и исходную задачу, самостоятельно
@@ -195,10 +208,13 @@ authorization/restore case: **1 passed**, 21.02с, без моков access chec
 После исправления повторил собственные исходные HTTP воспроизведения: **4 passed**,
 7.59с. Основные closed-prompt/Stop candidates независимо: **13 passed**, 41.92с.
 В дополнительном direct-images изменении агент нашёл пропущенный второй consumer
-(preflight); он также исправлен. Последний независимый полный клиентский
+(preflight); предложение исправления включено в материалы владельцу. Последний независимый полный клиентский
 rich-result/bind/preflight тест: **4 случая PASS**, 6.86с wall.
 После этих корректировок дополнительных подтверждённых блокеров в проверенном
 scope агент не обнаружил. Это не универсальная live SDK/UI/внешняя TLS/mTLS приёмка.
+Завершающий read-only контроль после передачи Harness также не обнаружил новых
+подтверждённых серверных блокеров в проверенном scope. Серверная причина последнего
+end-to-end FAIL не доказана; квалификация этого сценария остаётся открытой.
 
 POSIX mode600 проверен отдельно на Linux: выполнена исходная async-функция
 `test_large_file_queue_metadata_stays_small_and_payload_survives_replay` с её
@@ -213,3 +229,7 @@ Windows FAIL mode600 сохранён; он не доказывает прове
 бизнес-сессии и пользовательская история не изменены. Нельзя закрывать связанные
 тикеты по этому отчёту до поставки и требуемой живой приёмки. Удалению подлежат
 только собственные временные QA данные; рабочие профили/БД/журналы сохраняются.
+После завершения запусков удалены 26 собственных QA-каталогов под `C:\Temp`,
+458527173 логических байта (437.29 MiB), с проверкой whitelist и ссылок до удаления.
+Исходные PASS/FAIL журналы, XML, независимые repro и handoff diff сохранены в
+`release-reports`; рабочие деревья и пользовательские данные не очищались.
