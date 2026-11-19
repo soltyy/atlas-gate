@@ -140,6 +140,23 @@ questionAnswers v1. EDT: `RouterSidecar`, `GateRecoveryWire`, `RecoveryStore`,
 
 ## Незавершённые возможности, которые не объявляются готовыми
 
+Дополнение при подготовке выпуска: полный paired Linux CI
+[44506129779](https://github.com/soltyy/atlas-router/actions/runs/44506129779)
+обнаружил **558 passed / 6 failed / 7 skipped**. Четыре auth fixture подменяли
+устаревший `Nodes.refresh`, а quota fixture ошибочно называл общий GateError503
+доказательством неотправки. Их проверки перенесены на pinned probe и отдельные
+proven-preflight/ambiguous случаи, исходные assertions сохранены.
+Один отказ выявил настоящую регрессию 0.4.43: target-only refresh оставлял
+устаревшую peer reservedUnits в bounded shared account. Исправление обновляет
+ровно этот account_group; неизвестная peer нагрузка блокирует только новый
+admission, не повтор существующего ACK. Исходный тест с тем же turn ID сохранён.
+Окончательная квалификация этого дополнения фиксируется отдельно.
+
+Нагрузочный Linux прогон на машине рабочих Router был прекращён после сообщения
+пользователя о замедлении; его частичные FAIL и interrupted лог сохранены, PASS
+не объявлен. Собственная QA-копия удалена. Дальнейшие полные тесты выполняются
+на отдельных GitHub runners. Рабочие Router/Gate не перезапускались этой пробой.
+
 - Harness #545: подключение подписочного questionAnswers v1 к карточке клиента.
 - Gate #147 / Router #130 / Harness #568: per-role native subagent capabilities
   и exact ACK. Общий agents DTO не доказывает отдельную модель/reasoning на роль.

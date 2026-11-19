@@ -27,11 +27,33 @@ log = logging.getLogger("atlas_gate")
 
 
 async def _refresh_binding(state, binding):
-    # Admission for an existing chat depends only on its pinned Router.
+    # A bounded shared account also needs current peer load. Other accounts
+    # never participate, and all network work stays outside the reservation lock.
     if hasattr(state.nodes, 'probe'):
-        await state.nodes.probe(binding['node_id'])
+        nodes = state.nodes
+        def account_scope():
+            node = nodes.config.get(binding['node_id'])
+            if node is None:
+                return None
+            peers = sorted(n.node_id for n in nodes.config.values()
+                           if node.account_turn_capacity and n.enabled
+                           and n.node_id != node.node_id and n.account_group == node.account_group)
+            return node.account_group, node.account_turn_capacity, (node.node_id, *peers)
+        scope = account_scope()
+        members = scope[2] if scope is not None else ()
+        observations = await asyncio.gather(*(nodes.probe(n) for n in members))
+        def validate_account():
+            # Called by begin only AFTER its existing-operation lookup. Missing
+            # peer metadata cannot become zero load or block an old exact ACK.
+            if (scope is None or state.nodes is not nodes or account_scope() != scope or len(members) > 1 and any(
+                    info is None or member not in nodes.snapshots
+                    for member, info in zip(members, observations))):
+                raise GateError(503, 'node_unavailable',
+                                'Не подтверждена нагрузка общего аккаунта Router')
+        return validate_account
     else:
         await state.nodes.refresh()
+        return lambda: None
 
 
 def _response(response):
@@ -253,9 +275,10 @@ async def agent_prompt(sid: str, body: PromptRequest, request: Request, device: 
     if mode not in ("", "sse", "async"):
         raise GateError(422, "invalid_request", "неизвестный mode")
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    await _refresh_binding(state, binding)
+    validate_account = await _refresh_binding(state, binding)
     validate_prompt(body, node_attachments(state.nodes.snapshots.get(binding['node_id'])))
     def validate_admission():
+        validate_account()
         _policy(state, device, binding, request)
         if body.adaptiveFiles and not _adaptive_offer(binding):
             raise GateError(409, 'adaptive_files_not_negotiated', 'Ход не согласовал адаптивные файлы')
@@ -381,9 +404,10 @@ async def _execute_control(state, binding, op, raw):
 
 async def _compact_control(request, device, binding, raw, request_id):
     state = gate(request)
-    await _refresh_binding(state, binding)
+    validate_account = await _refresh_binding(state, binding)
     op, fresh = state.operations.begin(device, binding, "POST", _path(binding, "/compact"),
-                                      json.loads(raw) if raw else {}, request_id, nodes=state.nodes)
+                                      json.loads(raw) if raw else {}, request_id, nodes=state.nodes,
+                                      validate_new=validate_account)
     if fresh:
         task = asyncio.create_task(_execute_control(state, binding, op, raw))
         state.watchers.add(task)
