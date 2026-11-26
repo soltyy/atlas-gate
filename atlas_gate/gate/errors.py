@@ -40,8 +40,8 @@ class GateFreshNodeError(GateError):
     cannot establish this fact. Never construct this from an HTTP response.
     """
     def __init__(self, message: str, *, node_id: str, method: str, path: str, reason: str,
-                 retryable: bool = False) -> None:
-        super().__init__(503, 'node_unavailable', message, node_id=node_id)
+                 retryable: bool = False, diagnostics: dict | None = None) -> None:
+        super().__init__(503, 'node_unavailable', message, node_id=node_id, **(diagnostics or {}))
         self.node_id, self.method, self.path, self.reason = node_id, method, path, reason
         self.retryable = retryable
 
@@ -67,7 +67,14 @@ class GateRoute(APIRoute):
                                           headers={'Retry-After': '1'}, retryable=True)
                 return await inner(request)
             except GateError as failed:
-                return error_response(failed.status, failed.code, failed.message, **failed.extra)
+                extra = dict(failed.extra)
+                if 'correlationId' in extra:
+                    extra['operation'] = self.name
+                    if 'sid' in request.path_params:
+                        extra['sessionId'] = request.path_params['sid']
+                    if 'turn_id' in request.path_params:
+                        extra['turnId'] = request.path_params['turn_id']
+                return error_response(failed.status, failed.code, failed.message, **extra)
             except RequestValidationError as bad:
                 first = bad.errors()[0] if bad.errors() else {}
                 where = ".".join(str(x) for x in first.get("loc", ()))

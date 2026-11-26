@@ -9,15 +9,38 @@ import math
 import os
 import time
 import ssl
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, quote
 from typing import Literal
+from uuid import uuid4
 import httpx
 from pydantic import BaseModel, Field, model_validator
 from .errors import GateError, GateFreshNodeError
 
 
 log = logging.getLogger("atlas_gate")
+
+# Frequency of rechecking a failed direct link. Only a new, valid /v1/node
+# response can allow dispatch, regardless of how much time has elapsed.
+PROBE_RECHECK_INTERVAL = 1.0
+
+
+def _http_cause(failed: httpx.HTTPError) -> str:
+    name = type(failed).__name__
+    return name if getattr(httpx, name, None) is type(failed) else "HTTPError"
+
+
+@dataclass(frozen=True)
+class ProbeFailure:
+    reason: str
+    cause: str
+    correlation_id: str
+    retryable: bool
+    retry_at: float
+
+    def diagnostics(self):
+        return dict(reason=self.reason, phase='probe', cause=self.cause, correlationId=self.correlation_id)
 
 
 class Node(BaseModel):
@@ -94,7 +117,7 @@ class Nodes:
         self._probes: dict[str, asyncio.Task] = {}
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
-        self._retryable_probes: set[str] = set()
+        self._probe_failures: dict[str, ProbeFailure] = {}
         self.cooldown: dict[str, float] = {}
         self.quota_seen: dict[str, float] = {}
         self.store = store
@@ -121,17 +144,35 @@ class Nodes:
         # for event delivery, another CREATE, or the background reconciler.
         task = self._probes.get(node_id)
         if task is None or task.done():
+            failure = self._probe_failures.get(node_id)
+            if failure and time.monotonic() < failure.retry_at and not self.revoked(node_id):
+                return None
             task = asyncio.create_task(self._probe(node_id), name='atlas-node-probe-' + node_id)
             self._probes[node_id] = task
-        return await asyncio.shield(task)
+        verified = await asyncio.shield(task)
+        # A later check or a failed request may have invalidated this result
+        # before this waiter was scheduled again.
+        return self.snapshots.get(node_id) if verified is not None else None
 
     def probe_retryable(self, node_id: str) -> bool:
-        return node_id in self._retryable_probes
+        failure = self._probe_failures.get(node_id)
+        return bool(failure and failure.retryable)
+
+    def _record_probe_failure(self, node_id, reason, cause, message, *, retryable=False):
+        retry_at = 0.0
+        if reason == 'transport_unavailable' and self.config[node_id].transport == "direct":
+            retry_at = time.monotonic() + PROBE_RECHECK_INTERVAL
+        failure = ProbeFailure(reason, cause, uuid4().hex, retryable, retry_at)
+        self.snapshots.pop(node_id, None)
+        self.probe_errors[node_id] = message
+        self._probe_failures[node_id] = failure
+        log.warning("Router probe failed: node=%s phase=probe reason=%s cause=%s correlationId=%s",
+                    node_id, reason, cause, failure.correlation_id)
 
     async def _probe(self, node_id: str) -> dict | None:
-        self._retryable_probes.discard(node_id)
-        if self.revoked(node_id):
+        if not self.config[node_id].enabled or self.revoked(node_id):
             self.snapshots.pop(node_id, None)
+            self._probe_failures.pop(node_id, None)
             return None
         client = self.clients[node_id]
         if self.config[node_id].transport == "connector" and time.monotonic() - getattr(client.channel, "last_poll", {}).get(node_id, 0) > 60:
@@ -142,20 +183,26 @@ class Nodes:
             while time.monotonic() < deadline and time.monotonic() - client.channel.last_poll.get(node_id, 0) > 60:
                 await asyncio.sleep(0.02)
         if self.config[node_id].transport == "connector" and time.monotonic() - getattr(client.channel, "last_poll", {}).get(node_id, 0) > 60:
-            self.snapshots.pop(node_id, None)
-            self.probe_errors[node_id] = "Ожидается исходящее подключение. Выполните регистрацию, одобрите заявку и запустите atlas-node run."
-            self._retryable_probes.add(node_id)
+            self._record_probe_failure(node_id, 'transport_unavailable', 'ConnectorOffline',
+                "Ожидается исходящее подключение. Выполните регистрацию, одобрите заявку и запустите atlas-node run.",
+                retryable=True)
             return None
         try:
             response = await self.clients[node_id].get("/v1/node")
             response.raise_for_status()
             info = response.json()
+            if not isinstance(info, dict) or not isinstance(info.get("nodeId"), str) or not info["nodeId"]:
+                raise ValueError("missing identity")
+            if info["nodeId"] != node_id:
+                self._record_probe_failure(node_id, 'node_id_mismatch', 'UnexpectedNodeId',
+                                           "Router сообщил другой NODE_ID. Проверьте привязку узла.")
+                return None
             info['connectorProtocol'] = (2 if response.headers.get('x-atlas-transport-contract') == '2' else 1) if self.config[node_id].transport == 'connector' else None
             if self.config[node_id].backend and info.get("backend") != self.config[node_id].backend:
-                self.probe_errors[node_id] = "Router использует другого поставщика. Проверьте ATLAS_BACKEND."
-                self.snapshots.pop(node_id, None)
+                self._record_probe_failure(node_id, 'backend_mismatch', 'UnexpectedBackend',
+                                           "Router использует другого поставщика. Проверьте ATLAS_BACKEND.")
                 return None
-            if info.get("nodeId") != node_id or info.get("protocolVersion") != 1 or not info.get("bootId"):
+            if info.get("protocolVersion") != 1 or not info.get("bootId"):
                 raise ValueError("identity/protocol mismatch")
             if type(info.get("capacity")) is not int or info["capacity"] < 0:
                 raise ValueError("invalid capacity")
@@ -163,7 +210,12 @@ class Nodes:
                 raise ValueError("invalid catalog")
             if not {"durable_commands", "durable_events"}.issubset(info.get("capabilities", [])):
                 raise ValueError("Gate требует дисковый журнал Router")
+            if not self.config[node_id].enabled or self.revoked(node_id):
+                self.snapshots.pop(node_id, None)
+                self._probe_failures.pop(node_id, None)
+                return None
             self.snapshots[node_id] = dict(info, observed=time.monotonic())
+            self._probe_failures.pop(node_id, None)
             self.probe_errors.pop(node_id, None)
             if isinstance(info.get("quota"), dict):
                 self.observe_event(node_id, dict(info["quota"], type="rate_limit"))
@@ -173,17 +225,19 @@ class Nodes:
                     self.store._exec("INSERT INTO router_catalogs VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET models=excluded.models", (node_id, json.dumps(info["models"])))
             return self.snapshots[node_id]
         except (httpx.HTTPError, ValueError, TypeError, KeyError, GateError) as failed:
-            if isinstance(failed, httpx.TransportError):
-                log.warning("Router transport failed: node=%s phase=probe cause=%s", node_id, type(failed).__name__)
-            if (isinstance(failed, httpx.TransportError)
-                    or isinstance(failed, httpx.HTTPStatusError) and failed.response.status_code in (502, 503, 504)
-                    or isinstance(failed, GateError) and failed.code == "node_unavailable"):
-                self._retryable_probes.add(node_id)
-            self.probe_errors[node_id] = (
-                "Router отверг ключ доступа. Проверьте ATLAS_TOKEN." if isinstance(failed, httpx.HTTPStatusError) and failed.response.status_code in (401, 403)
-                else "Не удалось связаться с Router. Проверьте адрес, TLS и доступность с машины Gate." if isinstance(failed, httpx.HTTPError)
-                else "Router не подтвердил NODE_ID или протокол с дисковым журналом. Проверьте NODE_ID и NODE_DB.")
-            self.snapshots.pop(node_id, None)
+            if isinstance(failed, httpx.TransportError) or isinstance(failed, GateError) and failed.code == 'node_unavailable':
+                cause = _http_cause(failed) if isinstance(failed, httpx.TransportError) else "ConnectorUnavailable"
+                self._record_probe_failure(node_id, 'transport_unavailable', cause,
+                    "Gate не получил ответ при проверке доступности Router.", retryable=True)
+            elif isinstance(failed, httpx.HTTPStatusError):
+                status = failed.response.status_code
+                message = ("Router отверг ключ доступа. Проверьте ATLAS_TOKEN." if status in (401, 403)
+                           else "Проверка доступности Router вернула ошибку HTTP.")
+                self._record_probe_failure(node_id, 'probe_http_error', f"HTTP{status}", message,
+                                           retryable=status in (502, 503, 504))
+            else:
+                self._record_probe_failure(node_id, 'identity_unconfirmed', 'InvalidNodeMetadata',
+                    "Router не подтвердил NODE_ID или протокол с дисковым журналом. Проверьте NODE_ID и NODE_DB.")
             return None
 
     async def refresh(self):
@@ -203,10 +257,19 @@ class Nodes:
         info = self.snapshots.get(node_id)
         if not info or time.monotonic() - info["observed"] > 5:
             info = await self.probe(node_id)
+            if not node.enabled or self.revoked(node_id):
+                raise GateFreshNodeError('Router не подключён', node_id=node_id, method=method,
+                                         path=path, reason='node_unavailable')
         if info is None:
-            raise GateFreshNodeError('идентичность Router не подтверждена', node_id=node_id,
+            failure = self._probe_failures.get(node_id)
+            # Stored pre-dispatch command receipts have a byte-stable legacy message.
+            message = 'идентичность Router не подтверждена'
+            if method == 'GET':
+                message = self.probe_errors.get(node_id, message)
+            raise GateFreshNodeError(message, node_id=node_id,
                                      method=method, path=path, reason='identity_unconfirmed',
-                                     retryable=self.probe_retryable(node_id))
+                                     retryable=self.probe_retryable(node_id),
+                                     diagnostics=failure.diagnostics() if failure else None)
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
         question_probe = method == 'GET' and path.endswith('/sdk-tools') and dict(params or {}).get('questionAnswers') == '1'
@@ -236,10 +299,16 @@ class Nodes:
             response = await self.clients[node_id].request(method, path, content=content,
                 params=params, headers=headers, **options)
         except httpx.HTTPError as failed:
-            log.warning("Router transport failed: node=%s phase=request method=%s cause=%s",
-                        node_id, method, type(failed).__name__)
+            correlation_id = uuid4().hex
+            cause = _http_cause(failed)
+            if method == 'GET' and self.snapshots.get(node_id) is info:
+                self.snapshots.pop(node_id)
+            log.warning("Router transport failed: node=%s phase=request method=%s cause=%s correlationId=%s",
+                        node_id, method, cause, correlation_id)
             raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable",
-                            "ответ Router не получен; повтор на другом узле запрещён", node_id=node_id) from failed
+                            "ответ Router не получен; повтор на другом узле запрещён", node_id=node_id,
+                            reason='transport_unavailable', phase='request', cause=cause,
+                            correlationId=correlation_id) from failed
         if response.status_code == 429 and "capacity_exceeded" not in response.text:
             self.observe_event(node_id, {"type": "rate_limit", "observationId": request_id or str(time.time_ns())})
         if response.status_code == 409 and "command_outcome_unknown" in response.text:

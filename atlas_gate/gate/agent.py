@@ -181,7 +181,8 @@ async def _follow_event_page(state, binding, turn, device, after, wait=1000, *, 
                     isinstance(failed, GateFreshNodeError) and not failed.retryable):
                 raise
             failure = failed
-            reason = failed.code
+            reason = failed.extra.get('reason', failed.code)
+            correlation_id = failed.extra.get('correlationId', '-')
         else:
             if response.status_code not in (502, 503, 504):
                 return response, doc
@@ -189,9 +190,10 @@ async def _follow_event_page(state, binding, turn, device, after, wait=1000, *, 
                 return response, doc
             failure = (response, doc)
             reason = f"HTTP {response.status_code}"
+            correlation_id = '-'
         if delay == 0.25:
-            log.warning("Чтение событий Router прервано: node=%s turn=%s after=%s reason=%s",
-                        binding["node_id"], turn, after, reason)
+            log.warning("Чтение событий Router прервано: node=%s session=%s turn=%s after=%s reason=%s correlationId=%s",
+                        binding["node_id"], binding.get("id"), turn, after, reason, correlation_id)
         if retry_window is not None:
             if deadline is None:
                 deadline = loop.time() + retry_window
