@@ -1,0 +1,19 @@
+[Unit]
+Description=Select a verified loopback transport to the same Router
+After=network.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+EnvironmentFile=/etc/atlas/router-standby/runtime.env
+EnvironmentFile=/var/lib/atlas-router-standby/verified-boots.env
+ExecStartPre=/usr/sbin/haproxy -c -f /usr/local/lib/atlas-router-standby/haproxy.cfg
+ExecStart=/usr/sbin/haproxy -db -f /usr/local/lib/atlas-router-standby/haproxy.cfg
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

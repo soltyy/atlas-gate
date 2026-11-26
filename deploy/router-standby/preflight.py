@@ -1,10 +1,13 @@
 """Сверка прямого и резервного SSH-портов перед допуском резерва."""
 
+import argparse
 import http.client
 import json
 import os
+from pathlib import Path
 import re
 import sys
+import tempfile
 
 MAX_NODE_BYTES = 32 * 1024
 
@@ -64,10 +67,54 @@ def verify(env):
     return boots
 
 
-if __name__ == "__main__":
+def save_pins(path, contents):
+    # The enrol unit owns this directory. The live selector only reads its pins.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", newline="\n",
+                                     dir=path.parent, delete=False) as pending:
+        pending_path = Path(pending.name)
+        try:
+            pending.write(contents)
+            pending.flush()
+            os.fsync(pending.fileno())
+        except BaseException:
+            pending.close()
+            pending_path.unlink(missing_ok=True)
+            raise
     try:
-        verified = verify(os.environ)
-    except (KeyError, ValueError) as error:
+        os.replace(pending_path, path)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        pending_path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--write-pins", type=Path,
+                        help="атомарно записать проверенные boot ID для следующего старта HAProxy")
+    parser.add_argument("--check-selector", action="store_true",
+                        help="прочитать /v1/node через селекторы и сравнить с сохранёнными boot ID")
+    args = parser.parse_args()
+    if args.write_pins and args.check_selector:
+        parser.error("выберите запись boot ID или проверку селектора")
+    try:
+        if args.check_selector:
+            for name in ("CODEX", "CLAUDE"):
+                boot = node_boot(int(os.environ[f"{name}_LISTEN_PORT"]),
+                                 os.environ[f"{name}_NODE_ID"], os.environ[f"{name}_CHECK_TOKEN"])
+                if boot != os.environ[f"{name}_BOOT_ID"]:
+                    raise ValueError(f"{name}: селектор вернул другой bootId")
+                print(f"{name} selector: HTTP 200, identity OK")
+        else:
+            verified = verify(os.environ)
+            pins = "".join(f"{name}_BOOT_ID={boot}\n" for name, boot in verified.items())
+            if args.write_pins:
+                save_pins(args.write_pins, pins)
+            else:
+                sys.stdout.write(pins)
+    except (KeyError, OSError, http.client.HTTPException, ValueError) as error:
         sys.exit(f"Сверка не пройдена: {error}")
-    for router_name, boot_id in verified.items():
-        print(f"{router_name}_BOOT_ID={boot_id}")

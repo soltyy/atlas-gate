@@ -157,8 +157,8 @@ def wait_for(description, proc, predicate):
 
 
 def check_preflight(script, env, nodes, routes):
-    def verify():
-        return subprocess.run([sys.executable, str(script)], env=env,
+    def verify(*args):
+        return subprocess.run([sys.executable, str(script), *args], env=env,
                               capture_output=True, text=True, timeout=20)
 
     standby = routes["codex"]["standby"]
@@ -182,6 +182,18 @@ def check_preflight(script, env, nodes, routes):
     pins = dict(line.split("=", 1) for line in result.stdout.splitlines())
     assert pins == {name.upper() + "_BOOT_ID": node.boot_id for name, node in nodes.items()}
     env.update(pins)
+    with tempfile.TemporaryDirectory() as state:
+        pin_file = Path(state) / "verified-boots.env"
+        verify("--write-pins", pin_file).check_returncode()
+        previous = pin_file.read_bytes()
+        assert previous.decode("ascii") == result.stdout
+        assert pin_file.stat().st_mode & 0o077 == 0
+        standby.identity = None
+        try:
+            assert verify("--write-pins", pin_file).returncode != 0
+            assert pin_file.read_bytes() == previous
+        finally:
+            standby.identity = original
     print("PASS preflight: pins both real test boots; rejects a wrong node and mismatched boots")
 
 
@@ -294,6 +306,53 @@ def stop_process(proc):
             proc.wait()
 
 
+@contextlib.contextmanager
+def selector(cmd, config, env):
+    with tempfile.TemporaryFile(mode="w+b") as err:
+        proc = subprocess.Popen([*cmd, "-db"], cwd=config.parent, env=env,
+                                stdout=err, stderr=err)
+        try:
+            yield proc
+        except BaseException:
+            stop_process(proc)
+            err.seek(0)
+            print(err.read().decode(errors="replace")[-3500:])
+            raise
+        finally:
+            stop_process(proc)
+
+
+def cold_start(cmd, config, script, env, ports, nodes, routes):
+    # A bound but non-listening port refuses actual TCP connects. Restart the
+    # configured binary each time, simulating loss of either SSH service.
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        for absent, remaining in (("DIRECT", "standby"), ("STANDBY", "direct")):
+            degraded = dict(env)
+            for name in nodes:
+                degraded[f"{name.upper()}_{absent}_PORT"] = str(closed.getsockname()[1])
+            with selector(cmd, config, degraded) as proc:
+                for name, node in nodes.items():
+                    wait_for(f"restart {name} on {remaining}", proc,
+                             lambda: request(ports[name], node, "/canary/route")[:2]
+                             == (200, remaining))
+                subprocess.run([sys.executable, str(script), "--check-selector"],
+                               env=degraded, check=True, timeout=20)
+                if absent == "DIRECT":
+                    standby = routes["codex"]["standby"]
+                    original = standby.identity
+                    wrong = (original[0], "unverified-boot")
+                    standby.identity = wrong
+                    try:
+                        wait_for("new boot examined", proc, lambda: standby.health_probes[wrong] >= 2)
+                        reads = standby.business_reads
+                        assert request(ports["codex"], nodes["codex"], "/canary/route")[0] != 200
+                        assert standby.business_reads == reads
+                    finally:
+                        standby.identity = original
+            print(f"PASS selector restart with {absent.lower()} unreachable for both Routers")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--haproxy", required=True)
@@ -340,17 +399,14 @@ def main():
             s.close()
         cmd = [args.haproxy, "-f", str(config)]
         subprocess.run([*cmd, "-c"], check=True, cwd=config.parent, env=env)
-        err = stack.enter_context(tempfile.TemporaryFile(mode="w+b"))
-        proc = subprocess.Popen([*cmd, "-db"], cwd=config.parent, env=env,
-                                stdout=err, stderr=err)
-        stack.callback(stop_process, proc)
-        try:
+        cold_start(cmd, config, script, env, ports, nodes, routes)
+        # Fixtures below count only reads/health observations in the lost-ACK case.
+        for paths in routes.values():
+            for route in paths.values():
+                route.business_reads = 0
+                route.checked.clear()
+        with selector(cmd, config, env) as proc:
             exercise(proc, ports, nodes, routes)
-        except BaseException:
-            stop_process(proc)
-            err.seek(0)
-            print(err.read().decode(errors="replace")[-3500:])
-            raise
 
 
 if __name__ == "__main__":

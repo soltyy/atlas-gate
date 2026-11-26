@@ -1,0 +1,28 @@
+Host atlas-standby-fi
+    HostName 185.9.26.113
+    HostKeyAlias atlas-standby-fi
+
+Host atlas-standby-router
+    HostName 185.224.208.221
+    HostKeyAlias atlas-standby-router
+    ProxyJump atlas-standby-fi
+    LocalForward 127.0.0.1:28765 127.0.0.1:8765
+    LocalForward 127.0.0.1:28768 127.0.0.1:8768
+
+Host *
+    User atlas-router-link
+    IdentityFile /etc/atlas/router-standby/standby_ed25519
+    IdentitiesOnly yes
+    IdentityAgent none
+    ForwardAgent no
+    BatchMode yes
+    StrictHostKeyChecking yes
+    HostKeyAlgorithms ssh-ed25519
+    UserKnownHostsFile /etc/atlas/router-standby/known_hosts
+    GlobalKnownHostsFile /dev/null
+    UpdateHostKeys no
+    ControlMaster no
+    ControlPath none
+    ExitOnForwardFailure yes
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
