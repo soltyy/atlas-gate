@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
+import tempfile
 import time
 import uuid
 import zipfile
@@ -271,11 +273,68 @@ def link(target):
     p.symlink_to(target);os.replace(p,ROOT/'gate')
 
 
+STANDBY_PORTS = {'vdska-codex': (8765, 38765), 'vdska-claude': (8768, 38768)}
+
+
+def standby_nodes(original):
+    nodes = json.loads(original)
+    changed = set()
+    for node_config in nodes:
+        name = node_config['node_id']
+        if name not in STANDBY_PORTS:
+            continue
+        direct, selector = STANDBY_PORTS[name]
+        if (name in changed or node_config.get('transport', 'direct') != 'direct'
+                or node_config['url'] != f'http://127.0.0.1:{direct}'):
+            raise RuntimeError(f'Unexpected current configuration for {name}')
+        node_config['url'] = f'http://127.0.0.1:{selector}'
+        changed.add(name)
+    if changed != STANDBY_PORTS.keys():
+        raise RuntimeError('Expected both existing direct nodes')
+    return (json.dumps(nodes, ensure_ascii=False, indent=2) + '\n').encode()
+
+
+def replace_nodes(path, expected, updated):
+    # Only called with Gate stopped and the deployment lock held. Preserve
+    # updates made through the node admin API before the admission fence.
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or path.read_bytes() != expected:
+        raise RuntimeError('Node configuration changed; refusing cutover')
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.nodes-cutover-')
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            os.fchown(out.fileno(), info.st_uid, info.st_gid)
+            os.fchmod(out.fileno(), stat.S_IMODE(info.st_mode))
+            out.write(updated)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def check_selector(before):
+    with httpx.Client(trust_env=False, timeout=15) as client:
+        for kind in ('router', 'router-claude'):
+            reference = before[kind]
+            port = STANDBY_PORTS[reference['nodeId']][1]
+            headers = {'X-Atlas-Token': dotenv_values('/etc/atlas/' + kind + '.env')['ATLAS_TOKEN']}
+            response = client.get(f'http://127.0.0.1:{port}/v1/node', headers=headers)
+            response.raise_for_status()
+            checked = response.json()
+            if not reference.get('bootId') or any(checked.get(k) != reference.get(k)
+                    for k in ('nodeId', 'bootId', 'protocolVersion')):
+                raise RuntimeError('Selector did not return the original Router identity')
+
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--candidate',type=Path)
     p.add_argument('--wheel',type=Path);p.add_argument('--sha256')
     p.add_argument('--tests-proof',type=Path);p.add_argument('--refresh-api-contract',action='store_true')
-    p.add_argument('--reset-runtime-contracts',action='store_true');a=p.parse_args()
+    p.add_argument('--reset-runtime-contracts',action='store_true')
+    p.add_argument('--router-standby',action='store_true');a=p.parse_args()
+    if a.router_standby and (a.reset_runtime_contracts or a.refresh_api_contract):
+        p.error('--router-standby requires release activation')
     if os.geteuid()!=0:raise PermissionError('deployment and startup refresh require root')
     activation=(a.candidate,a.wheel,a.sha256,a.tests_proof)
     if a.reset_runtime_contracts:
@@ -305,6 +364,14 @@ def main():
         sync_api_contract()
         sync_steer_contract()
         before=states()
+        if a.router_standby:
+            settings=dotenv_values('/etc/atlas/gate.env')
+            nodes_path=Path(settings['ATLAS_GATE_NODES_FILE'])
+            if nodes_path != DATABASE.parent/'nodes.json' or nodes_path.is_symlink():
+                raise RuntimeError('Unexpected node registry path')
+            original_nodes=nodes_path.read_bytes()
+            selector_nodes=standby_nodes(original_nodes)
+            check_selector(before)
         if any(not d['ready'] or d['draining'] for d in before.values()):
             raise RuntimeError('Unready Router or another drain owner; no activation')
         # Busy SDK work may finish behind phase-1 admission fencing. Checking
@@ -325,6 +392,7 @@ def main():
         token=str(uuid.uuid4());assert not FLAG.exists()
         marker(ADMISSION_FLAG,token)
         drained=[];stopped=False;service_ready=True
+        nodes_changed=False
         try:
             # Phase 1 blocks NEW admission only. Already accepted SDK work can
             # still deliver tool_result/Stop/receipts while old HTTP streams drain.
@@ -350,6 +418,11 @@ def main():
             run(['systemctl','stop','atlas-gate'])
             with sqlite3.connect('file:'+str(DATABASE)+'?mode=ro',uri=True) as src,sqlite3.connect(backup/'gate.db') as dst:src.backup(dst)
             (backup/'gate.db').chmod(0o600)
+            if a.router_standby:
+                check_selector(before)
+                (backup/'nodes.json').write_bytes(original_nodes)
+                replace_nodes(nodes_path, original_nodes, selector_nodes)
+                nodes_changed=True
             link(a.candidate);run(['systemctl','start','atlas-gate']);ready(version)
             if not sync_api_contract(version):
                 raise RuntimeError('Candidate did not confirm managed API attempt contract1')
@@ -357,10 +430,14 @@ def main():
                 raise RuntimeError('Candidate did not confirm exact steering contract1')
             service_ready=True
             after=states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
+            if a.router_standby:
+                check_selector(after)
         except BaseException:
             if stopped:
                 service_ready=False
                 run(['systemctl','stop','atlas-gate'])
+                if nodes_changed:
+                    replace_nodes(nodes_path, selector_nodes, original_nodes)
                 if (ROOT/'gate').resolve()!=old:link(old)
                 service_ready=False
                 clear_contracts()

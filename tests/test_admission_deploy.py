@@ -52,6 +52,15 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,star
     for name,value in dict(ROOT=root,FLAG=tmp_path/'maintenance',ADMISSION_FLAG=tmp_path/'admission',API_FLAG=tmp_path/'api-v1',SITE=site,LOCK=tmp_path/'lock',BACKUPS=backups,DATABASE=database).items():monkeypatch.setattr(m,name,value)
     monkeypatch.setattr(m.os,'geteuid',lambda:0,raising=False)
     monkeypatch.setattr(sys,'argv',['guard','--candidate',str(candidate),'--wheel',str(wheel),'--sha256',sha,'--tests-proof',str(tests)])
+    standby = failure in (None, 'startup', 'rollback', 'stop_ack', 'drain_ack')
+    if standby:
+        nodes_path = database.parent/'nodes.json'
+        previous = json.dumps([{'node_id': name, 'url': f'http://127.0.0.1:{ports[0]}',
+                                'orgs': ['unchanged']} for name, ports in m.STANDBY_PORTS.items()]).encode()
+        nodes_path.write_bytes(previous)
+        monkeypatch.setattr(m, 'dotenv_values', lambda path: {'ATLAS_GATE_NODES_FILE': str(nodes_path)})
+        monkeypatch.setattr(m, 'check_selector', lambda states: None)
+        sys.argv.append('--router-standby')
     events=[];draining=set();failed=False;settled=False
     def states():return {k:{'ready':True,'draining':k in draining,
         'bootId':k+('-changed' if failure=='legacy_rollback' and (root/'gate').resolve()==candidate else ''),
@@ -127,6 +136,8 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,star
         assert (root/'gate').resolve()==(candidate if failure=='undrain_ack' else old)
     else:
         m.main();assert (root/'gate').resolve()==candidate
+    if standby:
+        assert nodes_path.read_bytes() == (previous if failure else m.standby_nodes(previous))
     if failure in ('rollback','undrain_ack'):
         assert m.FLAG.exists() and m.ADMISSION_FLAG.exists()
         assert draining==({'router','router-claude'} if failure=='rollback' else {'router-claude'})

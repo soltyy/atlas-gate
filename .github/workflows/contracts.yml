@@ -12,6 +12,22 @@ concurrency:
   group: gate-contracts-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  standby:
+    name: Isolated SSH path selector
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install distribution HAProxy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends haproxy
+      - name: Exercise failover in a loopback-only network namespace
+        run: |
+          sudo unshare --net -- bash -eu -c '
+            ip link set lo up
+            exec runuser -u "$1" -- /usr/bin/python3 tests/ops/router_standby_canary.py \
+              --haproxy /usr/sbin/haproxy --config deploy/router-standby/haproxy.cfg
+          ' standby "$(id -un)"
   linux:
     name: Gate core (Linux)
     runs-on: ubuntu-24.04
