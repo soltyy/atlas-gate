@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from typing import NamedTuple
 import uuid
 import zipfile
 import httpx
@@ -31,11 +32,15 @@ def run(args, **kwargs):
     return subprocess.run(list(map(str,args)),check=True,**kwargs)
 
 
-def node(kind, drain=None):
-    e=dotenv_values('/etc/atlas/'+kind+'.env');port=8765 if kind=='router' else 8768
-    with httpx.Client(trust_env=False,timeout=75) as c:
+def node(kind, drain=None, *, port=None, expected=None):
+    e=dotenv_values('/etc/atlas/'+kind+'.env')
+    if port is None:port=8765 if kind=='router' else 8768
+    headers={'X-Atlas-Token':e['ATLAS_TOKEN']}
+    if expected is not None:
+        headers.update({'X-Atlas-Node':expected['nodeId'], 'X-Atlas-Boot':expected['bootId']})
+    with httpx.Client(trust_env=False,timeout=15 if expected is not None else 75) as c:
         response=c.request('GET' if drain is None else 'POST',f'http://127.0.0.1:{port}/v1/node'+('' if drain is None else '/drain'),
-            headers={'X-Atlas-Token':e['ATLAS_TOKEN']},json=None if drain is None else {'enabled':drain})
+            headers=headers,json=None if drain is None else {'enabled':drain})
         response.raise_for_status();return response.json()
 
 
@@ -251,10 +256,12 @@ def marker(path, token):
     with os.fdopen(fd,'w') as f:f.write(token)
 
 
-def wait_idle():
+def wait_idle(reader=None):
     while True:
+        # Losing all verified paths aborts the switch and releases our drains.
+        observed = reader() if reader else None
         try:
-            assert_idle(states());assert_gate_idle();return
+            assert_idle(observed if reader else states());assert_gate_idle();return
         except RuntimeError:
             time.sleep(1)
 
@@ -273,7 +280,19 @@ def link(target):
     p.symlink_to(target);os.replace(p,ROOT/'gate')
 
 
-STANDBY_PORTS = {'vdska-codex': (8765, 38765), 'vdska-claude': (8768, 38768)}
+class StandbyTarget(NamedTuple):
+    node_id: str
+    pin: str
+    direct: int
+    selector: int
+    via_fi: int
+
+
+STANDBY_TARGETS = {
+    'router': StandbyTarget('vdska-codex', 'CODEX_BOOT_ID', 8765, 38765, 28765),
+    'router-claude': StandbyTarget('vdska-claude', 'CLAUDE_BOOT_ID', 8768, 38768, 28768),
+}
+STANDBY_PORTS = {t.node_id: (t.direct, t.selector) for t in STANDBY_TARGETS.values()}
 
 
 def standby_nodes(original):
@@ -313,18 +332,80 @@ def replace_nodes(path, expected, updated):
         Path(temporary).unlink(missing_ok=True)
 
 
-def check_selector(before):
-    with httpx.Client(trust_env=False, timeout=15) as client:
-        for kind in ('router', 'router-claude'):
-            reference = before[kind]
-            port = STANDBY_PORTS[reference['nodeId']][1]
-            headers = {'X-Atlas-Token': dotenv_values('/etc/atlas/' + kind + '.env')['ATLAS_TOKEN']}
-            response = client.get(f'http://127.0.0.1:{port}/v1/node', headers=headers)
-            response.raise_for_status()
-            checked = response.json()
-            if not reference.get('bootId') or any(checked.get(k) != reference.get(k)
-                    for k in ('nodeId', 'bootId', 'protocolVersion')):
-                raise RuntimeError('Selector did not return the original Router identity')
+def selector_boots():
+    """Read only the two public boot pins of the running HAProxy, including after re-enrol."""
+    pid = run(['systemctl', 'show', 'atlas-router-selector.service', '-p', 'MainPID', '--value'],
+              text=True, capture_output=True).stdout.strip()
+    if not pid.isdigit() or int(pid) <= 1:
+        raise RuntimeError('Router selector is not running')
+    wanted = {t.pin.encode('ascii'): kind for kind, t in STANDBY_TARGETS.items()}
+    pins = {}
+    for entry in (Path('/proc') / pid / 'environ').read_bytes().split(b'\0'):
+        key, _, value = entry.partition(b'=')
+        if key in wanted:
+            pins[wanted[key]] = value.decode('ascii')
+    return pid, pins
+
+
+def verified_state(kind, reference, port):
+    target = STANDBY_TARGETS[kind]
+    if (reference.get('nodeId') != target.node_id or not reference.get('bootId')
+            or type(reference.get('protocolVersion')) is not int or reference['protocolVersion'] != 1):
+        raise RuntimeError(f'Unexpected {kind} reference identity')
+    result = node(kind, port=port, expected=reference)
+    if (not isinstance(result, dict) or result.get('nodeId') != target.node_id
+            or result.get('bootId') != reference['bootId'] or type(result.get('protocolVersion')) is not int
+            or result['protocolVersion'] != 1 or type(result.get('draining')) is not bool):
+        raise RuntimeError(f'{kind} on port {port} did not confirm the original Router runtime')
+    return result
+
+
+def check_selector(before, *, require_direct=True):
+    process, pins = selector_boots()
+    for kind, target in STANDBY_TARGETS.items():
+        if pins.get(kind) != before[kind].get('bootId'):
+            raise RuntimeError(f'Active selector has a different {kind} boot pin')
+        ports = (target.direct, target.via_fi, target.selector) if require_direct else (target.via_fi, target.selector)
+        for port in ports:
+            verified_state(kind, before[kind], port)
+    if selector_boots() != (process, pins):
+        raise RuntimeError('Active selector changed while verifying paths')
+
+
+def standby_control(kind, reference, drain=None):
+    """Observe through any verified path. Reconcile a lost drain ACK before another write."""
+    t = STANDBY_TARGETS[kind]
+    ports = (t.direct, t.selector, t.via_fi)
+    attempted_write = False
+    for port in ports:
+        try:
+            state = verified_state(kind, reference, port)
+            if drain is None or state['draining'] is drain:
+                return state
+            attempted_write = True
+            node(kind, drain, port=port, expected=reference)
+            confirmed = verified_state(kind, reference, port)
+            if confirmed['draining'] is drain:
+                return confirmed
+        except (httpx.HTTPError, RuntimeError, ValueError):
+            continue  # Every alternative begins with an identity-pinned GET.
+    if attempted_write:
+        # The last write may have taken effect even if its final observation failed.
+        actual = standby_control(kind, reference)
+        if actual['draining'] is drain:
+            return actual
+    raise RuntimeError(f'Could not confirm {kind} runtime or drain state over any verified path')
+
+
+def restore_drains(drained, control):
+    remaining = []
+    for kind in drained:
+        try:
+            control(kind, False)
+        except (httpx.HTTPError, RuntimeError, ValueError, OSError):
+            remaining.append(kind)
+    if remaining:
+        raise RuntimeError('Could not confirm drain release: ' + ', '.join(remaining))
 
 
 def main():
@@ -364,6 +445,8 @@ def main():
         sync_api_contract()
         sync_steer_contract()
         before=states()
+        control=node
+        read_states=states
         if a.router_standby:
             settings=dotenv_values('/etc/atlas/gate.env')
             nodes_path=Path(settings['ATLAS_GATE_NODES_FILE'])
@@ -372,6 +455,15 @@ def main():
             original_nodes=nodes_path.read_bytes()
             selector_nodes=standby_nodes(original_nodes)
             check_selector(before)
+            def control(kind, drain=None):
+                return standby_control(kind, before[kind], drain)
+            def read_states():
+                return {kind: control(kind) for kind in before}
+            def drained_states():
+                current = read_states()
+                if not all(entry['draining'] for entry in current.values()):
+                    raise RuntimeError('Router drain changed before cutover')
+                return current
         if any(not d['ready'] or d['draining'] for d in before.values()):
             raise RuntimeError('Unready Router or another drain owner; no activation')
         # Busy SDK work may finish behind phase-1 admission fencing. Checking
@@ -401,9 +493,10 @@ def main():
                 assert response.status_code==503 and response.json()['error']['code']=='gate_maintenance'
             for k in before:
                 drained.append(k)  # persist/control intent before potentially lost ACK
-                node(k,True)
+                control(k,True)
             drain_ingress()
-            wait_idle()
+            if a.router_standby:wait_idle(drained_states)
+            else:wait_idle()
             # Phase 2 cuts ingress only after producers have settled. Retiring
             # workers also finish any read/context request admitted during phase1.
             marker(FLAG,token)
@@ -412,14 +505,14 @@ def main():
                 assert response.status_code==503 and response.json()['error']['code']=='gate_maintenance'
                 assert response.headers.get('Retry-After') and 'X-Atlas-Command-State' not in response.headers
             drain_ingress()
-            assert_idle(states());assert_gate_idle()
+            assert_idle(drained_states() if a.router_standby else states());assert_gate_idle()
             stopped=True;service_ready=False
             clear_contracts()
             run(['systemctl','stop','atlas-gate'])
             with sqlite3.connect('file:'+str(DATABASE)+'?mode=ro',uri=True) as src,sqlite3.connect(backup/'gate.db') as dst:src.backup(dst)
             (backup/'gate.db').chmod(0o600)
             if a.router_standby:
-                check_selector(before)
+                check_selector(before, require_direct=False)
                 (backup/'nodes.json').write_bytes(original_nodes)
                 replace_nodes(nodes_path, original_nodes, selector_nodes)
                 nodes_changed=True
@@ -429,9 +522,9 @@ def main():
             if not sync_steer_contract(version):
                 raise RuntimeError('Candidate did not confirm exact steering contract1')
             service_ready=True
-            after=states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
+            after=read_states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
             if a.router_standby:
-                check_selector(after)
+                check_selector(after, require_direct=False)
         except BaseException:
             if stopped:
                 service_ready=False
@@ -446,20 +539,32 @@ def main():
             raise
         finally:
             if service_ready:
-                for k in drained:node(k,False)
-                for flag in (FLAG,ADMISSION_FLAG):
-                    if flag.exists():
-                        assert flag.read_text()==token,'Maintenance ownership changed; do not clear another rollout'
-                        flag.unlink()
+                def release_ingress():
+                    for flag in (FLAG,ADMISSION_FLAG):
+                        if flag.exists():
+                            assert flag.read_text()==token,'Maintenance ownership changed; do not clear another rollout'
+                            flag.unlink()
+                if a.router_standby:
+                    # Once Gate is ready, a failed standby undrain is reported
+                    # per node. Our global ingress fence must not block healthy peers.
+                    try:restore_drains(drained, control)
+                    finally:release_ingress()
+                else:
+                    for k in drained:node(k,False)
+                    release_ingress()
             else:
                 print(json.dumps({'status':'recovery_required','maintenanceRetained':True,'backup':str(backup)}),flush=True)
-        final=states();assert all(d['ready'] and not d['draining'] for d in final.values())
+        final=read_states();assert all(d['ready'] and not d['draining'] for d in final.values())
         proof={'status':'passed','version':version,'old':str(old),'new':str(a.candidate),'wheelSha256':a.sha256,
                'qualification':qualification,'backup':str(backup),'ingressMaintenanceVerified':True,
                'routerBootsUnchanged':all(final[k]['bootId']==before[k]['bootId'] for k in before),
                'maintenanceCleared':not FLAG.exists() and not ADMISSION_FLAG.exists(),
                'twoPhaseIngressDrain':True,'detachedApiDrain':True,'managedApiIngressAllowed':API_FLAG.exists(),
                'steerIngressAllowed':STEER_FLAG.exists()}
+        if a.router_standby:
+            proof['routerStandby'] = {kind: {'nodeId': s['nodeId'], 'bootId': s['bootId'],
+                                             'selectorPort': STANDBY_TARGETS[kind].selector}
+                                      for kind, s in final.items()}
         (backup/'deployment.json').write_text(json.dumps(proof,indent=2));(backup/'deployment.json').chmod(0o600)
         print(json.dumps(proof),flush=True)
 
