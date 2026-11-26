@@ -1,0 +1,19 @@
+[Unit]
+Description=Separate SSH path from Gate to its Router nodes via Finland
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=atlas-router-link
+ExecStart=/usr/bin/ssh -NT -F /etc/atlas/router-standby/ssh_config atlas-standby-router
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

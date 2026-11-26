@@ -1,0 +1,15 @@
+[Unit]
+Description=Verify the identities and boots of both Router nodes through both paths
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/atlas/router-standby/runtime.env
+ExecStart=/usr/bin/python3 -I /usr/local/lib/atlas-router-standby/preflight.py --write-pins /var/lib/atlas-router-standby/verified-boots.env
+DynamicUser=yes
+StateDirectory=atlas-router-standby
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

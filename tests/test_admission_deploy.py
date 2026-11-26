@@ -32,11 +32,76 @@ def guard_module(monkeypatch,tmp_path):
     return module
 
 
-@pytest.mark.parametrize('failure', [None,'busy','qualification','maintenance','startup','rollback',
-                                     'drain_ack','stop_ack','contract','undrain_ack','legacy_rollback'])
+def standby_reference():
+    return {kind: {'nodeId': node, 'protocolVersion': 1, 'bootId': 'boot-' + node,
+                   'draining': False, 'ready': True}
+            for kind, node in [('router', 'vdska-codex'), ('router-claude', 'vdska-claude')]}
+
+
+@pytest.mark.parametrize('fault', ['wrong-direct-id', 'stale-running-pin', 'wrong-fi-boot', 'unreachable-fi'])
+def test_standby_cutover_verifies_distinct_nodes_live_pins_and_each_raw_path(guard_module, monkeypatch, fault):
+    m = guard_module
+    before = standby_reference()
+    pins = {k: v['bootId'] for k, v in before.items()}
+    if fault == 'stale-running-pin':
+        pins['router'] = 'old-boot'
+    monkeypatch.setattr(m, 'selector_boots', lambda: ('42', pins))
+    if fault == 'wrong-direct-id':
+        before['router-claude'] = before['router']
+
+    def endpoint(kind, drain=None, *, port, expected):
+        if kind == 'router' and port == 28765:
+            if fault == 'wrong-fi-boot':
+                return dict(before[kind], bootId='different')
+            if fault == 'unreachable-fi':
+                raise httpx.ConnectError('offline')
+        return before[kind]
+    monkeypatch.setattr(m, 'node', endpoint)
+    with pytest.raises((RuntimeError, httpx.HTTPError)):
+        m.check_selector(before)
+
+
+def test_standby_drain_lost_ack_reads_original_runtime_on_another_path(guard_module, monkeypatch):
+    m = guard_module
+    reference = standby_reference()['router']
+    calls = []
+    enabled = True
+
+    def endpoint(kind, drain=None, *, port, expected):
+        nonlocal enabled
+        calls.append((port, drain))
+        assert expected == reference
+        if port == 8765:
+            raise httpx.ConnectError('direct offline')
+        if drain is not None:
+            enabled = drain
+            raise httpx.ReadError('ACK lost after setting requested state')
+        return dict(reference, draining=enabled)
+    monkeypatch.setattr(m, 'node', endpoint)
+    assert m.standby_control('router', reference, drain=False)['draining'] is False
+    assert calls == [(8765, None), (38765, None), (38765, False), (28765, None)]
+
+
+def test_standby_undrain_attempts_every_owned_node_and_reports_unconfirmed(guard_module):
+    attempted = []
+
+    def control(kind, desired):
+        assert desired is False
+        attempted.append(kind)
+        if kind == 'router':
+            raise RuntimeError('all paths down')
+    with pytest.raises(RuntimeError, match='router'):
+        guard_module.restore_drains(['router', 'router-claude'], control)
+    assert attempted == ['router', 'router-claude']
+
+
+@pytest.mark.parametrize(('failure', 'standby'),
+    [(f, False) for f in (None,'busy','qualification','maintenance','startup','rollback','drain_ack',
+                          'stop_ack','contract','undrain_ack','legacy_rollback')]
+    + [(f, True) for f in (None,'startup','rollback','stop_ack','drain_ack','direct_cut','undrain_unknown')])
 @pytest.mark.parametrize('starts_busy', [False, True])
 @pytest.mark.skipif(os.name=='nt',reason='Linux systemd/symlink deployment guard')
-def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,starts_busy,guard_module):
+def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,standby,starts_busy,guard_module):
     m=guard_module
     root=tmp_path/'atlas';releases=root/'releases';releases.mkdir(parents=True)
     old=releases/'gate-old';old.mkdir();candidate=releases/'gate-new';candidate.mkdir()
@@ -52,17 +117,34 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,star
     for name,value in dict(ROOT=root,FLAG=tmp_path/'maintenance',ADMISSION_FLAG=tmp_path/'admission',API_FLAG=tmp_path/'api-v1',SITE=site,LOCK=tmp_path/'lock',BACKUPS=backups,DATABASE=database).items():monkeypatch.setattr(m,name,value)
     monkeypatch.setattr(m.os,'geteuid',lambda:0,raising=False)
     monkeypatch.setattr(sys,'argv',['guard','--candidate',str(candidate),'--wheel',str(wheel),'--sha256',sha,'--tests-proof',str(tests)])
+    if standby:
+        nodes_path = database.parent/'nodes.json'
+        previous = json.dumps([{'node_id': name, 'url': f'http://127.0.0.1:{ports[0]}',
+                                'orgs': ['unchanged']} for name, ports in m.STANDBY_PORTS.items()]).encode()
+        nodes_path.write_bytes(previous)
+        monkeypatch.setattr(m, 'dotenv_values', lambda path: {'ATLAS_GATE_NODES_FILE': str(nodes_path)})
+        monkeypatch.setattr(m, 'check_selector', lambda states, **kw: None)
+        sys.argv.append('--router-standby')
     events=[];draining=set();failed=False;settled=False
-    def states():return {k:{'ready':True,'draining':k in draining,
+    unreachable=set()
+    def states():return {k:{'nodeId':m.STANDBY_TARGETS[k].node_id,'protocolVersion':1,'ready':True,'draining':k in draining,
         'bootId':k+('-changed' if failure=='legacy_rollback' and (root/'gate').resolve()==candidate else ''),
         'activeTurns':int(failure=='busy' or starts_busy and not settled),'activeSubagents':0,'reservedUnits':0} for k in ('router','router-claude')}
-    def node(kind,drain=None):
+    def node(kind,drain=None, **kw):
         nonlocal failed
+        if failure == 'direct_cut' and (root/'gate').resolve() == candidate and kw.get('port') == m.STANDBY_TARGETS[kind].direct:
+            raise httpx.ConnectError('direct link cut during activation')
+        if failure == 'undrain_unknown' and kind == 'router' and drain is False:
+            unreachable.add(kind)
+        if kind in unreachable:
+            raise httpx.ConnectError('no verified path available for release')
+        if drain is None:return states()[kind]
         if drain:draining.add(kind)
         else:draining.discard(kind)
         events.append(('drain',kind,drain))
         if not failed and (failure=='drain_ack' and drain or failure=='undrain_ack' and drain is False):
             failed=True;raise RuntimeError('lost drain ACK after applying control')
+        return states()[kind]
     def run(args,**kw):
         nonlocal failed
         args=list(map(str,args));events.append(tuple(args))
@@ -115,23 +197,30 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,star
         return not (failure=='contract' and expected_version=='0.4.17')
     monkeypatch.setattr(m,'sync_api_contract',sync_contract)
     monkeypatch.setattr(m,'drain_ingress',lambda:events.append(('ingress-drain',m.FLAG.exists())))
-    def wait_idle():
+    def wait_idle(reader=None):
         nonlocal settled
         assert m.ADMISSION_FLAG.exists() and not m.FLAG.exists()
         events.append(('wait-idle',False))
         settled=True  # existing SDK work finishes only behind the admission fence
     monkeypatch.setattr(m,'wait_idle',wait_idle)
     monkeypatch.setattr(m.httpx,'Client',Client)
-    if failure:
+    recovered = standby and failure in ('drain_ack', 'direct_cut')
+    kept_candidate = recovered or failure in (None, 'undrain_ack', 'undrain_unknown')
+    if failure and not recovered:
         with pytest.raises((RuntimeError,AssertionError)):m.main()
-        assert (root/'gate').resolve()==(candidate if failure=='undrain_ack' else old)
+        assert (root/'gate').resolve()==(candidate if kept_candidate else old)
     else:
         m.main();assert (root/'gate').resolve()==candidate
+    if standby:
+        assert nodes_path.read_bytes() == (m.standby_nodes(previous) if kept_candidate else previous)
     if failure in ('rollback','undrain_ack'):
         assert m.FLAG.exists() and m.ADMISSION_FLAG.exists()
         assert draining==({'router','router-claude'} if failure=='rollback' else {'router-claude'})
+    elif failure == 'undrain_unknown':
+        assert not m.FLAG.exists() and not m.ADMISSION_FLAG.exists()
+        assert draining == {'router'}
     else:assert not m.FLAG.exists() and not m.ADMISSION_FLAG.exists() and not draining
-    if failure in ('busy','qualification','maintenance','drain_ack'):
+    if failure in ('busy','qualification','maintenance') or failure == 'drain_ack' and not recovered:
         assert not any(e[:1]==('systemctl',) for e in events)
     if failure in ('startup','stop_ack','contract'):assert ('ready','0.4.16') in events
     if failure=='legacy_rollback':

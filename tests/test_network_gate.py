@@ -14,13 +14,14 @@ from atlas_gate.settings import Settings
 
 
 @contextlib.asynccontextmanager
-async def serve(app, **options):
+async def serve(app, *, port=0, **options):
     from sse_starlette.sse import AppStatus
     AppStatus.should_exit = False
     options.setdefault("timeout_graceful_shutdown", 5)
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+    if not port:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", **options))
     task = asyncio.create_task(server.serve())
     try:
