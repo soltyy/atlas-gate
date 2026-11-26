@@ -301,8 +301,8 @@ class Nodes:
         except httpx.HTTPError as failed:
             correlation_id = uuid4().hex
             cause = _http_cause(failed)
-            if method == 'GET' and self.snapshots.get(node_id) is info:
-                self.snapshots.pop(node_id)
+            # A lost reply cannot change the identity established by /v1/node.
+            # In particular, preserve a newly observed boot for steer fencing.
             log.warning("Router transport failed: node=%s phase=request method=%s cause=%s correlationId=%s",
                         node_id, method, cause, correlation_id)
             raise GateError(503, "command_outcome_unknown" if method != "GET" else "node_unavailable",
