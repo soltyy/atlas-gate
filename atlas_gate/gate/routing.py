@@ -442,7 +442,6 @@ class Routing:
             bindings = self.store._all("SELECT * FROM router_bindings WHERE id=? AND status IN ('creating','unknown','rejected') AND request_key IS NOT NULL", (binding_id,))
         for binding in bindings:
             try:
-                await self.nodes.probe(binding["node_id"])
                 response = await self.nodes.request(binding["node_id"], "GET", "/v1/commands/create:" + binding["request_key"])
                 if (binding_id and response.status_code == 404
                         and isinstance(missing := response.json(), dict)

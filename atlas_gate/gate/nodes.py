@@ -11,7 +11,7 @@ import time
 import ssl
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit, quote
+from urllib.parse import urlsplit, quote, unquote
 from typing import Literal
 from uuid import uuid4
 import httpx
@@ -248,14 +248,51 @@ class Nodes:
             if n.enabled and org in n.orgs and route in n.routes
             and (pinned_node is None or n.node_id == pinned_node)))
 
+    async def _journal_identity(self, node_id, expected_boot=None):
+        """Read-only Router identity. Never publishes SDK readiness or changes boot pins."""
+        headers = {"X-Atlas-Node": node_id}
+        if expected_boot:
+            headers["X-Atlas-Boot"] = expected_boot
+        try:
+            response = await self.clients[node_id].request("GET", "/v1/node/identity", headers=headers)
+            if response.status_code == 404 and response.json() == {"detail": "Not Found"}:
+                # A pre-0.8.37 direct Router has only the original identity contract.
+                info = await self.probe(node_id)
+                boot = info["bootId"] if info else None
+            else:
+                response.raise_for_status()
+                info = response.json()
+                if (not isinstance(info, dict) or set(info) != {"nodeId", "bootId", "protocolVersion"}
+                        or info["nodeId"] != node_id or type(info["protocolVersion"]) is not int
+                        or info["protocolVersion"] != 1):
+                    raise ValueError("invalid journal identity")
+                boot = info["bootId"]
+            if (not isinstance(boot, str) or not boot or not boot.isascii()
+                    or not all(c.isalnum() or c in "_-" for c in boot) or len(boot) > 128
+                    or expected_boot is not None and boot != expected_boot):
+                raise ValueError("unconfirmed journal boot")
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            raise GateError(503, "node_unavailable", "Router не подтвердил идентичность при чтении квитанции",
+                            node_id=node_id) from error
+        if not self.config[node_id].enabled or self.revoked(node_id):
+            raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
+        return boot
+
     async def request(self, node_id: str, method: str, path: str, *, content=b"", params=None,
                       expected_boot=None, request_id=None, tool_result_turn=None):
         node = self.config.get(node_id)
         if node is None or not node.enabled or self.revoked(node_id):
             raise GateFreshNodeError('Router не подключён', node_id=node_id, method=method,
                                      path=path, reason='node_unavailable')
+        # The durable command journal is independent of SDK discovery. Connector
+        # transports keep their own incoming-poll and capability verification.
+        journal_path = path.split("/")
+        journal = (node.transport == "direct" and method == "GET" and len(journal_path) == 4
+                   and journal_path[:3] == ["", "v1", "commands"] and bool(journal_path[3]))
         info = self.snapshots.get(node_id)
-        if not info or time.monotonic() - info["observed"] > 5:
+        if journal:
+            info = {"bootId": await self._journal_identity(node_id, expected_boot)}
+        elif not info or time.monotonic() - info["observed"] > 5:
             info = await self.probe(node_id)
             if not node.enabled or self.revoked(node_id):
                 raise GateFreshNodeError('Router не подключён', node_id=node_id, method=method,
@@ -272,6 +309,8 @@ class Nodes:
                                      diagnostics=failure.diagnostics() if failure else None)
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
+        if journal:
+            headers["X-Atlas-Journal-Read"] = "1"
         question_probe = method == 'GET' and path.endswith('/sdk-tools') and dict(params or {}).get('questionAnswers') == '1'
         if method == 'POST' and path.endswith('/question-answer') or question_probe:
             if not expected_boot:
@@ -309,6 +348,30 @@ class Nodes:
                             "ответ Router не получен; повтор на другом узле запрещён", node_id=node_id,
                             reason='transport_unavailable', phase='request', cause=cause,
                             correlationId=correlation_id) from failed
+        if journal:
+            if not node.enabled or self.revoked(node_id):
+                raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
+            if response.status_code in (200, 404):
+                # Only the responding journal can attribute its own result. Two
+                # identity probes could both use A while the receipt came from B.
+                proof = tuple(response.headers.get(k) for k in
+                              ("X-Atlas-Journal-Read", "X-Atlas-Node", "X-Atlas-Boot"))
+                attributed = proof == ("1", node_id, info["bootId"])
+                try:
+                    saved = response.json()
+                except ValueError:
+                    saved = None
+                if response.status_code == 404:
+                    valid = attributed and saved == {"detail": "command_not_found"}
+                else:
+                    # Older Routers can still return an immutable result for the
+                    # exact command, including after a legitimate restart.
+                    legacy = expected_boot is None and proof == (None, None, None)
+                    valid = ((attributed or legacy) and isinstance(saved, dict)
+                             and saved.get("requestId") == unquote(journal_path[3]))
+                if not valid:
+                    raise GateError(503, "command_outcome_unknown", "Router не подтвердил источник квитанции",
+                                    node_id=node_id)
         if response.status_code == 429 and "capacity_exceeded" not in response.text:
             self.observe_event(node_id, {"type": "rate_limit", "observationId": request_id or str(time.time_ns())})
         if response.status_code == 409 and "command_outcome_unknown" in response.text:
