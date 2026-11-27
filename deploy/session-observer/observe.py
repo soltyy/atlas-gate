@@ -55,7 +55,7 @@ def filters(role, external):
         yield "ssh_close", dev, "ip and tcp and port 22 and (" + " or ".join("host " + p for p in peers) + ") and " + flags
 
 
-def packets(stream):
+def packets(stream, ready):
     header = stream.read(24)
     if len(header) != 24 or header[:4] not in (b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4"):
         raise ValueError("unrecognised capture format")
@@ -63,6 +63,7 @@ def packets(stream):
     snap, link = struct.unpack_from(endian + "II", header, 16)
     if snap != SNAPLEN or link != 1:
         raise ValueError("unexpected capture size or link type")
+    ready()
     while record := stream.read(16):
         sec, us, length, _ = struct.unpack(endian + "IIII", record)
         if length > SNAPLEN:
@@ -97,7 +98,7 @@ def run(role, directory):
     processes = []
     def reader(kind, dev, proc):
         try:
-            for packet in packets(proc.stdout):
+            for packet in packets(proc.stdout, lambda: events.put(('reader_ready', dev, kind))):
                 events.put((kind, dev, packet))
         except (ValueError, OSError, struct.error) as exc:
             logging.error("capture %s: %s", kind, type(exc).__name__)
@@ -129,10 +130,16 @@ def run(role, directory):
                        seq=seq, ack=ack, create_us=start[0])
                 return True
             return False
+        ready = set()
         while not ended.is_set():
             try:
                 kind, dev, p = events.get(timeout=1)
             except queue.Empty:
+                continue
+            if kind == 'reader_ready':
+                ready.add((dev, p))
+                if len(ready) == len(processes):
+                    record(event='observer_ready', role=role, utc_us=time.time_ns()//1000)
                 continue
             ts,src,sp,dst,dp,seq,ack,flags = p
             if kind == "create":

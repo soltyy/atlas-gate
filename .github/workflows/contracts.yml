@@ -20,7 +20,7 @@ jobs:
       - name: Install distribution HAProxy
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends haproxy
+          sudo apt-get install -y --no-install-recommends haproxy tcpdump
       - name: Exercise failover in a loopback-only network namespace
         run: |
           sudo unshare --net -- bash -eu -c '
@@ -28,6 +28,8 @@ jobs:
             exec runuser -u "$1" -- /usr/bin/python3 tests/ops/router_standby_canary.py \
               --haproxy /usr/sbin/haproxy --config deploy/router-standby/haproxy.cfg
           ' standby "$(id -un)"
+      - name: Exercise metadata-only observation in an isolated network namespace
+        run: sudo unshare --net -- /usr/bin/python3 -I deploy/session-observer/test_namespace.py
   linux:
     name: Gate core (Linux)
     runs-on: ubuntu-24.04

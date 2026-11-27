@@ -40,7 +40,7 @@ def exercise(role, folder, script):
     worker = threading.Thread(target=srv.serve_forever, daemon=True)
     worker.start()
     try:
-        wait_for(lambda: len(Path("/proc/net/packet").read_text().splitlines()) >= 5)
+        wait_for(lambda: any(row["event"] == "observer_ready" for row in rows()))
         for route in ("/v1/sessions/ignore/files", "/v1/sessions"):
             client = http.client.HTTPConnection("127.0.0.1", 8765)
             client.request("POST", route, body=b"TEST_SECRET_MUST_NEVER_BE_STORED",
