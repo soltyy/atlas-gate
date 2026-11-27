@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -43,7 +43,10 @@ class Route(ThreadingHTTPServer):
         self.node = node
         self.name = name
         self.identity = (node.node_id, node.boot_id)
-        self.catalog_bytes = 7000
+        self.catalog_bytes = 0
+        self.plans = deque()
+        self.probe_times = []
+        self.sdk_probes = 0
         self.business_reads = 0
         self.checked = threading.Event()
         self.health_probes = Counter()
@@ -60,8 +63,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Canary-Path", self.server.name)
-        self.end_headers()
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            self.end_headers()
             self.wfile.write(body)
 
     def do_GET(self):
@@ -71,13 +74,26 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-Atlas-Token") != node.token:
             return self.reply(401, {})
         if target.path == "/v1/node":
+            route.sdk_probes += 1
+            return self.reply(500, {})
+        if target.path == "/v1/node/identity":
             identity = route.identity
+            route.probe_times.append(time.monotonic())
             route.health_probes[identity] += 1
+            if route.plans:
+                entered, release, status, value = route.plans.popleft()
+                entered.set()
+                if release:
+                    assert release.wait(15), "test did not release its health check"
+                return self.reply(status, value)
+
             route.checked.set()
             if identity is None:
                 return self.reply(503, {})
-            return self.reply(200, {"nodeId": identity[0], "bootId": identity[1],
-                                    "protocolVersion": 1, "catalog": "x" * route.catalog_bytes})
+            value = {"nodeId": identity[0], "bootId": identity[1], "protocolVersion": 1}
+            if route.catalog_bytes:
+                value["catalog"] = "x" * route.catalog_bytes
+            return self.reply(200, value)
         # Even a mismatched/unavailable test route answers ordinary requests.
         # A 503 observed by the client must come from the selector itself.
         route.business_reads += 1
@@ -176,7 +192,7 @@ def check_preflight(script, env, nodes, routes):
         result = verify()
         assert result.returncode != 0 and not result.stdout.strip()
     finally:
-        standby.catalog_bytes = 7000
+        standby.catalog_bytes = 0
     result = verify()
     result.check_returncode()
     pins = dict(line.split("=", 1) for line in result.stdout.splitlines())
@@ -235,7 +251,7 @@ def exercise(proc, ports, nodes, routes):
     standby.catalog_bytes = 33000
     wait_for("oversized node document rejected", proc, rejected)
     assert get("claude")[:2] == (200, "direct")
-    standby.catalog_bytes = 7000
+    standby.catalog_bytes = 0
     active("codex", "standby")
     print("PASS oversized health response rejected; standby recovers with a valid response")
 
@@ -259,7 +275,7 @@ def exercise(proc, ports, nodes, routes):
     # old process. Losing direct now must not reconnect to that stale process.
     new_boot = secrets.token_hex(16)
     direct.identity = (codex.node_id, new_boot)
-    active("codex", "direct")
+    wait_for("replacement direct is fenced immediately", proc, rejected)
     direct.identity = None
     wait_for("new direct boot retires stale backup", proc, rejected)
     wrong_direct = (nodes["claude"].node_id, codex.boot_id)
@@ -272,8 +288,10 @@ def exercise(proc, ports, nodes, routes):
              lambda: standby.health_probes[(codex.node_id, new_boot)] >= 2)
     assert rejected(), "unverified replacement boot admitted"
     direct.identity = (codex.node_id, new_boot)
+    wait_for("unverified direct remains fenced", proc, rejected)
+    direct.identity = (codex.node_id, codex.boot_id)
     active("codex", "direct")
-    print("PASS changed direct boot: stale standby rejected, healthy new direct restored")
+    print("PASS changed direct boot: blocks both the replacement and the retired standby")
 
     claude = nodes["claude"]
     routes["claude"]["direct"].identity = None
@@ -320,6 +338,81 @@ def selector(cmd, config, env):
             raise
         finally:
             stop_process(proc)
+
+
+def fixture_reply(route, status=200, value=None, release=None):
+    entered = threading.Event()
+    if value is None:
+        value = {"bootId": route.node.boot_id, "protocolVersion": 1, "nodeId": route.node.node_id}
+    route.plans.append((entered, release, status, value))
+    return entered
+
+
+def paired_timeouts(cmd, config, env, ports, nodes, routes):
+    settings = dict(env, ROUTER_PATH_CHECK_INTERVAL="60s", ROUTER_PATH_CHECK_TIMEOUT="400ms")
+    withheld = threading.Event()
+    both_started = []
+    before = {}
+    for name, paths in routes.items():
+        slow = "direct" if name == "codex" else "standby"
+        for path, route in paths.items():
+            before[name, path] = len(route.probe_times)
+            fixture_reply(route, release=withheld if path == slow else None)
+            both_started.append(fixture_reply(route, release=withheld))
+    try:
+        with selector(cmd, config, settings) as proc:
+            wait_for("both paired retries start before either can return", proc,
+                     lambda: all(e.is_set() for e in both_started))
+            # Hold the entire second pair past its deadline. No third retry is allowed.
+            time.sleep(1)
+            for name, paths in routes.items():
+                for path, route in paths.items():
+                    assert len(route.probe_times) == before[name, path] + 2
+                    assert route.probe_times[-1] - route.probe_times[-2] < 5
+                assert request(ports[name], nodes[name], "/canary/route")[0] != 200
+    finally:
+        withheld.set()
+    print("PASS real timeout on each Router starts one simultaneous direct/FI recheck; persistent outage is bounded")
+
+
+def conflicting_observations(cmd, config, env, ports, nodes, routes, retry_failed):
+    settings = dict(env, ROUTER_PATH_CHECK_INTERVAL="2s", ROUTER_PATH_CHECK_TIMEOUT="6s")
+    old = threading.Event()
+    retry = threading.Event()
+    try:
+        with selector(cmd, config, settings) as proc:
+            for name, node in nodes.items():
+                wait_for(name + " initially verified", proc,
+                         lambda: request(ports[name], node, "/canary/route")[:2] == (200, "direct"))
+            retry_started = []
+            for name, paths in routes.items():
+                # First direct result is still in flight when FI forces its paired recheck.
+                if name == "codex":
+                    fixture_reply(paths["direct"], status=409, release=old)
+                else:
+                    fixture_reply(paths["direct"], value={"nodeId": nodes[name].node_id,
+                                  "bootId": "foreign", "protocolVersion": 1}, release=old)
+                fixture_reply(paths["standby"], status=503)
+                retry_started.append(fixture_reply(paths["direct"], status=503 if retry_failed else 200,
+                                                    release=None if retry_failed else retry))
+                retry_started.append(fixture_reply(paths["standby"]))
+            wait_for("paired retries are in flight", proc, lambda: all(e.is_set() for e in retry_started))
+            if retry_failed:
+                for name, node in nodes.items():
+                    wait_for(name + " on verified FI after retry timeout", proc,
+                             lambda: request(ports[name], node, "/canary/route")[:2] == (200, "standby"))
+            old.set()
+            for name, node in nodes.items():
+                wait_for(name + " late foreign identity fences new connections", proc,
+                         lambda: request(ports[name], node, "/canary/route")[0] != 200)
+                before = [route.business_reads for route in routes[name].values()]
+                assert request(ports[name], node, "/canary/route")[0] != 200
+                assert before == [route.business_reads for route in routes[name].values()]
+    finally:
+        old.set()
+        retry.set()
+    print("PASS delayed foreign identity fences both paths after the retry " +
+          ("failed" if retry_failed else "started"))
 
 
 def cold_start(cmd, config, script, env, ports, nodes, routes):
@@ -369,6 +462,7 @@ def main():
     with contextlib.ExitStack() as stack:
         env = os.environ.copy()
         env["ROUTER_PATH_CHECK_INTERVAL"] = "1s"
+        env["ROUTER_PATH_WATCHER"] = str(config.with_name("path_checks.lua"))
         nodes, ports, routes = {}, {}, {}
         # Reserve all frontend ports at once so the two kernel allocations differ.
         front_sockets = []
@@ -399,6 +493,9 @@ def main():
             s.close()
         cmd = [args.haproxy, "-f", str(config)]
         subprocess.run([*cmd, "-c"], check=True, cwd=config.parent, env=env)
+        paired_timeouts(cmd, config, env, ports, nodes, routes)
+        for retry_failed in (False, True):
+            conflicting_observations(cmd, config, env, ports, nodes, routes, retry_failed)
         cold_start(cmd, config, script, env, ports, nodes, routes)
         # Fixtures below count only reads/health observations in the lost-ACK case.
         for paths in routes.values():
@@ -407,6 +504,7 @@ def main():
                 route.checked.clear()
         with selector(cmd, config, env) as proc:
             exercise(proc, ports, nodes, routes)
+        assert all(route.sdk_probes == 0 for paths in routes.values() for route in paths.values())
 
 
 if __name__ == "__main__":

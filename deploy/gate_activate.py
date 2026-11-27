@@ -386,12 +386,66 @@ def check_staged_pins(before, *, require_idle=False):
                 assert_idle({kind: state})
 
 
-def refresh_standby_pins(before):
+SELECTOR_DIR = Path('/usr/local/lib/atlas-router-standby')
+SELECTOR_FILES = ('haproxy.cfg', 'path_checks.lua', 'preflight.py')
+
+
+def selector_files(directory, *, allow_missing=False):
+    if directory.resolve() != directory or not directory.is_dir():
+        raise RuntimeError('Unexpected selector bundle directory')
+    files = {}
+    for name in SELECTOR_FILES:
+        source = directory / name
+        if source.is_symlink() or (source.exists() and not source.is_file()):
+            raise RuntimeError('Unexpected selector file: ' + name)
+        files[name] = None if allow_missing and not source.exists() else source.read_bytes()
+    return files
+
+
+def write_selector_files(directory, files):
+    for name in SELECTOR_FILES:
+        target = directory / name
+        if target.is_symlink():
+            raise RuntimeError('Unexpected selector symlink: ' + name)
+        if files[name] is None:
+            target.unlink(missing_ok=True)
+            continue
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as output:
+            try:
+                output.write(files[name])
+                output.flush()
+                os.fchmod(output.fileno(), 0o644)
+                os.replace(output.name, target)
+            finally:
+                Path(output.name).unlink(missing_ok=True)
+
+
+def qualify_selector_bundle(directory, expected_hashes, before):
+    files = selector_files(directory)
+    hashes = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+    if expected_hashes != hashes:
+        raise RuntimeError('Selector bundle differs from the qualified artifacts')
+    # Execute only the exact bytes whose hashes were checked, even if staging moves.
+    with tempfile.TemporaryDirectory() as snapshot:
+        root = Path(snapshot)
+        write_selector_files(root, files)
+        env = dict(os.environ, **dotenv_values('/etc/atlas/router-standby/runtime.env'))
+        env.update(dotenv_values('/var/lib/atlas-router-standby/verified-boots.env'))
+        env['ROUTER_PATH_WATCHER'] = str(root / 'path_checks.lua')
+        run(['/usr/sbin/haproxy', '-c', '-f', root / 'haproxy.cfg'], env=env, capture_output=True)
+        result = run(['/usr/bin/python3', root / 'preflight.py'], env=env, capture_output=True, text=True)
+        pins = dict(line.split('=', 1) for line in result.stdout.splitlines())
+        if pins != {target.pin: before[kind]['bootId'] for kind, target in STANDBY_TARGETS.items()}:
+            raise RuntimeError('Lightweight identity disagrees with current Router pins')
+    return files
+
+
+def refresh_standby_pins(before, install=None):
     """The caller owns the admission fences and has stopped the Gate service."""
     check_staged_pins(before, require_idle=True)
     _, live_pins = selector_boots()
     expected = {kind: state['bootId'] for kind, state in before.items()}
-    if live_pins != expected:
+    if install or live_pins != expected:
         gate = run(['systemctl', 'show', 'atlas-gate', '-p', 'ActiveState', '--value'],
                    text=True, capture_output=True)
         if gate.stdout.strip() != 'inactive':
@@ -400,6 +454,8 @@ def refresh_standby_pins(before):
                       text=True, capture_output=True)
         if clients.stdout.strip():
             raise RuntimeError('Selector still has client connections; restart refused')
+        if install:
+            install()
         run(['systemctl', 'restart', 'atlas-router-selector.service'])
     # HAProxy accepts TCP before its initial health checks publish the two backends.
     # This deadline bounds the infrastructure check while ingress is fenced.
@@ -466,7 +522,11 @@ def main():
     p.add_argument('--reset-runtime-contracts',action='store_true')
     transport=p.add_mutually_exclusive_group()
     transport.add_argument('--router-standby',action='store_true')
-    transport.add_argument('--refresh-standby-pins',action='store_true');a=p.parse_args()
+    transport.add_argument('--refresh-standby-pins',action='store_true')
+    p.add_argument('--selector-bundle',type=Path)
+    a=p.parse_args()
+    if a.selector_bundle and not a.refresh_standby_pins:
+        p.error('--selector-bundle requires --refresh-standby-pins')
     use_standby=a.router_standby or a.refresh_standby_pins
     if use_standby and (a.reset_runtime_contracts or a.refresh_api_contract):
         p.error('standby options require release activation')
@@ -499,6 +559,7 @@ def main():
         sync_api_contract()
         sync_steer_contract()
         before=states()
+        bundle = qualify_selector_bundle(a.selector_bundle, tests.get('selectorBundleSha256'), before) if a.selector_bundle else None
         control=node
         read_states=states
         if use_standby:
@@ -543,6 +604,7 @@ def main():
         marker(ADMISSION_FLAG,token)
         drained=[];stopped=False;service_ready=True
         nodes_changed=False
+        previous_selector = None
         try:
             # Phase 1 blocks NEW admission only. Already accepted SDK work can
             # still deliver tool_result/Stop/receipts while old HTTP streams drain.
@@ -572,7 +634,18 @@ def main():
             if a.refresh_standby_pins:
                 if nodes_path.is_symlink() or nodes_path.read_bytes() != original_nodes:
                     raise RuntimeError('Node registry changed before selector restart')
-                refresh_standby_pins(before)
+                if bundle:
+                    def install():
+                        nonlocal previous_selector
+                        previous = selector_files(SELECTOR_DIR, allow_missing=True)
+                        snap = backup / 'selector-before'
+                        snap.mkdir(mode=0o700)
+                        write_selector_files(snap, previous)
+                        previous_selector = previous
+                        write_selector_files(SELECTOR_DIR, bundle)
+                    refresh_standby_pins(before, install)
+                else:
+                    refresh_standby_pins(before)
             if a.router_standby:
                 check_selector(before, require_direct=False)
                 (backup/'nodes.json').write_bytes(original_nodes)
@@ -591,6 +664,10 @@ def main():
             if stopped:
                 service_ready=False
                 run(['systemctl','stop','atlas-gate'])
+                if previous_selector is not None:
+                    write_selector_files(SELECTOR_DIR, previous_selector)
+                    run(['systemctl', 'restart', 'atlas-router-selector.service'])
+                    refresh_standby_pins(before)
                 if nodes_changed:
                     replace_nodes(nodes_path, selector_nodes, original_nodes)
                 if (ROOT/'gate').resolve()!=old:link(old)
@@ -623,6 +700,8 @@ def main():
                'maintenanceCleared':not FLAG.exists() and not ADMISSION_FLAG.exists(),
                'twoPhaseIngressDrain':True,'detachedApiDrain':True,'managedApiIngressAllowed':API_FLAG.exists(),
                'steerIngressAllowed':STEER_FLAG.exists()}
+        if bundle:
+            proof['selectorBundleSha256'] = tests['selectorBundleSha256']
         if use_standby:
             proof['routerStandby'] = {kind: {'nodeId': s['nodeId'], 'bootId': s['bootId'],
                                              'selectorPort': STANDBY_TARGETS[kind].selector}
