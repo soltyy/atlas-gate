@@ -11,6 +11,31 @@ end
 local interval = milliseconds(os.getenv("ROUTER_PATH_CHECK_INTERVAL") or "30s")
 local timeout = milliseconds(os.getenv("ROUTER_PATH_CHECK_TIMEOUT") or "5s")
 
+-- The v1 wire contract has exactly three safe ASCII scalars. Reject unknown,
+-- duplicate, escaped or malformed fields instead of partially matching a JSON body.
+local function identity(router, body)
+    if type(body) ~= "string" or #body > 2048 then return "untrusted" end
+    local rest = body:match("^%s*{%s*(.-)%s*}%s*$")
+    local fields = {}
+    for index = 1, 3 do
+        if not rest then return "untrusted" end
+        local key, value
+        key, rest = rest:match('^"(%a+)"%s*:%s*(.*)$')
+        if not key or fields[key] then return "untrusted" end
+        if key == "protocolVersion" then
+            value, rest = rest:match("^(1)%s*(.*)$")
+        elseif key == "nodeId" or key == "bootId" then
+            value, rest = rest:match('^"([%w_-]+)"%s*(.*)$')
+        end
+        if not value then return "untrusted" end
+        fields[key] = value
+        if index < 3 then rest = rest:match("^,%s*(.*)$") end
+    end
+    if rest ~= "" then return "untrusted" end
+    if fields.nodeId ~= router.id or fields.bootId ~= router.boot then return "mismatch" end
+    return "verified"
+end
+
 local function fetch_identity(router, path)
     local response = core.httpclient():get{
         url = "http://127.0.0.1:" .. path.port .. "/v1/node/identity",
@@ -18,11 +43,8 @@ local function fetch_identity(router, path)
                    ["X-Atlas-Boot"] = {router.boot}},
         timeout = timeout,
     }
-    if response.status == 200 then
-        local body = response.body
-        if type(body) == "string" and #body <= 2048 then return "response", body end
-        return "untrusted"
-    end
+    if response.status == 200 then return identity(router, response.body) end
+    if response.status == 409 then return "mismatch" end
     if response.status == 0 or response.status == 502 or response.status == 503 or response.status == 504 then
         return "unavailable"
     end
@@ -30,18 +52,16 @@ local function fetch_identity(router, path)
 end
 
 local function check(router, path, generation)
-    local ok, outcome, body = pcall(fetch_identity, router, path)
+    local ok, outcome = pcall(fetch_identity, router, path)
     if not ok then outcome = "unavailable" end
-    if generation == router.generation then
-        -- An invalid/unauthorized response retires prior identity evidence.
-        -- An HTTP transport failure carries no new evidence about the remote boot.
-        path.current = nil
-        if outcome == "response" then
-            path.current = body
-            path.seen = body
-        elseif outcome == "untrusted" then
-            path.seen = "{}"
-        end
+    -- A response from the first pair can arrive during the retry. Apply its
+    -- negative evidence immediately unless a newer response on this path won.
+    -- Only the live generation may restore a route.
+    if generation >= path.applied and (generation == router.generation or outcome ~= "verified") then
+        path.applied = generation
+        path.ready = outcome == "verified"
+        if outcome == "mismatch" then path.foreign = true end
+        if path.ready then path.foreign = false end
         if path.outcome ~= outcome then
             core.Info("identity check " .. router.name .. "/" .. path.name .. ": " .. outcome)
             path.outcome = outcome
@@ -82,7 +102,7 @@ for _, name in ipairs({"codex", "claude"}) do
                     boot=assert(os.getenv(prefix .. "BOOT_ID")), token=assert(os.getenv(prefix .. "CHECK_TOKEN")),
                     paths={}, results=core.queue(), generation=0}
     for _, direction in ipairs({"direct", "standby"}) do
-        local path = {name=direction, port=assert(os.getenv(prefix .. direction:upper() .. "_PORT"))}
+        local path = {name=direction, applied=0, port=assert(os.getenv(prefix .. direction:upper() .. "_PORT"))}
         router[direction] = path
         table.insert(router.paths, path)
     end
@@ -90,8 +110,8 @@ for _, name in ipairs({"codex", "claude"}) do
     core.register_task(monitor, router)
 end
 
--- HAProxy evaluates identity JSON with its native parser when assigning a new
--- connection. A rejected direct identity also fences the previously enrolled FI.
-core.register_fetches("path_identity", function(_, router, path, field)
-    return routers[router][path][field]
+-- Called only when a NEW connection is assigned. Existing streams stay put.
+core.register_fetches("path_ready", function(_, name, path)
+    local router = routers[name]
+    return router[path].ready == true and (path == "direct" or not router.direct.foreign)
 end)

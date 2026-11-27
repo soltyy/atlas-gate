@@ -86,8 +86,10 @@ class Handler(BaseHTTPRequestHandler):
             route.checked.set()
             if identity is None:
                 return self.reply(503, {})
-            return self.reply(200, {"nodeId": identity[0], "bootId": identity[1],
-                                    "protocolVersion": 1, "catalog": "x" * route.catalog_bytes})
+            value = {"nodeId": identity[0], "bootId": identity[1], "protocolVersion": 1}
+            if route.catalog_bytes:
+                value["catalog"] = "x" * route.catalog_bytes
+            return self.reply(200, value)
         # Even a mismatched/unavailable test route answers ordinary requests.
         # A 503 observed by the client must come from the selector itself.
         route.business_reads += 1
