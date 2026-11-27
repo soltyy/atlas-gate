@@ -248,7 +248,7 @@ class Nodes:
             if n.enabled and org in n.orgs and route in n.routes
             and (pinned_node is None or n.node_id == pinned_node)))
 
-    async def _journal_identity(self, node_id, path, expected_boot=None):
+    async def _journal_identity(self, node_id, expected_boot=None):
         """Read-only Router identity. Never publishes SDK readiness or changes boot pins."""
         headers = {"X-Atlas-Node": node_id}
         if expected_boot:
@@ -272,13 +272,10 @@ class Nodes:
                     or expected_boot is not None and boot != expected_boot):
                 raise ValueError("unconfirmed journal boot")
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
-            raise GateFreshNodeError("Router не подтвердил идентичность при чтении квитанции",
-                    node_id=node_id, method="GET", path=path, reason="identity_unconfirmed",
-                    retryable=isinstance(error, httpx.TransportError) or
-                              isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (502,503,504)) from error
+            raise GateError(503, "node_unavailable", "Router не подтвердил идентичность при чтении квитанции",
+                            node_id=node_id) from error
         if not self.config[node_id].enabled or self.revoked(node_id):
-            raise GateFreshNodeError("Router не подключён", node_id=node_id, method="GET",
-                                     path=path, reason="node_unavailable")
+            raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
         return boot
 
     async def request(self, node_id: str, method: str, path: str, *, content=b"", params=None,
@@ -289,11 +286,12 @@ class Nodes:
                                      path=path, reason='node_unavailable')
         # The durable command journal is independent of SDK discovery. Connector
         # transports keep their own incoming-poll and capability verification.
-        journal = (node.transport == "direct" and method == "GET" and path.startswith("/v1/commands/")
-                   and bool(path[len("/v1/commands/"):]) and "/" not in path[len("/v1/commands/"):])
+        journal_path = path.split("/")
+        journal = (node.transport == "direct" and method == "GET" and len(journal_path) == 4
+                   and journal_path[:3] == ["", "v1", "commands"] and bool(journal_path[3]))
         info = self.snapshots.get(node_id)
         if journal:
-            info = {"bootId": await self._journal_identity(node_id, path, expected_boot)}
+            info = {"bootId": await self._journal_identity(node_id, expected_boot)}
         elif not info or time.monotonic() - info["observed"] > 5:
             info = await self.probe(node_id)
             if not node.enabled or self.revoked(node_id):
@@ -350,12 +348,11 @@ class Nodes:
                             correlationId=correlation_id) from failed
         if journal:
             if not node.enabled or self.revoked(node_id):
-                raise GateFreshNodeError("Router не подключён", node_id=node_id, method=method,
-                                         path=path, reason="node_unavailable")
+                raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
             if response.status_code == 404 or expected_boot is not None:
                 # Router permits journal reads across boot. A missing receipt or
                 # explicitly boot-bound read must survive a second identity check.
-                await self._journal_identity(node_id, path, info["bootId"])
+                await self._journal_identity(node_id, info["bootId"])
         if response.status_code == 429 and "capacity_exceeded" not in response.text:
             self.observe_event(node_id, {"type": "rate_limit", "observationId": request_id or str(time.time_ns())})
         if response.status_code == 409 and "command_outcome_unknown" in response.text:
