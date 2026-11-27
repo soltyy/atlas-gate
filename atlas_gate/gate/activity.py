@@ -1,4 +1,7 @@
 """Admission/drain observation includes detached API producers and incoming SDK I/O."""
+from .create_trace import trace_ingress
+
+
 class GateActivity:
     def __init__(self, app):
         self.app = app
@@ -15,6 +18,9 @@ class GateActivity:
         owner = scope['app']
         owner.state.active_gate_requests = getattr(owner.state, 'active_gate_requests', 0) + 1
         try:
-            await self.app(scope, receive, send)
+            if method == "POST" and path == "/harness/agent/sessions":
+                await trace_ingress(self.app, scope, receive, send)
+            else:
+                await self.app(scope, receive, send)
         finally:
             owner.state.active_gate_requests -= 1
