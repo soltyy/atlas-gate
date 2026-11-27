@@ -1,0 +1,22 @@
+[Unit]
+Description=TCP close and session-create metadata on Atlas %i
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/lib/atlas-session-observer/observe.py %i
+DynamicUser=yes
+StateDirectory=atlas-session-observer-%i
+StateDirectoryMode=0700
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK AF_PACKET AF_INET6
+UMask=0077
+MemoryMax=96M
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
