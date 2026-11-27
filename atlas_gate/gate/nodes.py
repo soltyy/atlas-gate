@@ -18,6 +18,7 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, Field, model_validator
 from .errors import GateError, GateFreshNodeError
+from .create_trace import CreateWireTrace, ingress_id
 
 
 log = logging.getLogger("atlas_gate")
@@ -359,12 +360,26 @@ class Nodes:
             headers["Idempotency-Key"] = request_id
         if tool_result_turn is not None:
             params = {"toolResultTurn": tool_result_turn}
+        trace = CreateWireTrace() if node.transport == "direct" and (method, path) == ("POST", "/v1/sessions") else None
         try:
             options = {"timeout": httpx.Timeout(connect=5, read=None, write=70, pool=5)} if path.endswith("/compact") and self.config[node_id].transport != 'connector' else {}
+            if trace:
+                headers["X-Atlas-Trace-Id"] = trace.id
+                options["extensions"] = {"trace": trace.on_event}
+                log.info("session_create wire_start attempt=%s traceId=%s node=%s",
+                         ingress_id.get(), trace.id, node_id)
             response = await client.request(method, path, content=content,
                 params=params, headers=headers, **options)
+            if trace:
+                trace.finish(response=response)
+        except asyncio.CancelledError as cancelled:
+            if trace:
+                trace.finish(error=cancelled)
+            raise
         except httpx.HTTPError as failed:
-            correlation_id = uuid4().hex
+            if trace:
+                trace.finish(error=failed)
+            correlation_id = trace.id if trace else uuid4().hex
             cause = _http_cause(failed)
             # A lost reply cannot change the identity established by /v1/node.
             # In particular, preserve a newly observed boot for steer fencing.

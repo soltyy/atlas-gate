@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 import hashlib
+from .create_trace import trace_binding
 from .errors import GateError
 from ..sdk_tools import SdkTools, supports, enabled, defaults, permitted
 from .reasoning import select_request, validate_node, confirm
@@ -250,6 +251,7 @@ class Routing:
         key = hashlib.sha256((device.device_id + ":" + (request_id or str(uuid.uuid4()))).encode()).hexdigest()
         fingerprint = hashlib.sha256(json.dumps({"route": route, "model": model, "payload": payload}, sort_keys=True).encode()).hexdigest()
         old = self.store._one("SELECT * FROM router_bindings WHERE request_key=?", (key,))
+        trace_binding(key, old)
         if old:
             return await self.retry_creation(old, device, route, model, payload, fingerprint, sdk_policy)
         scope = json.dumps(payload['sessionScope'], sort_keys=True) if payload.get('sessionScope') else None
