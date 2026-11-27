@@ -24,7 +24,8 @@ def node_boot(port, expected_id, token):
         if len(data) > MAX_NODE_BYTES:
             raise ValueError("слишком большой ответ /v1/node/identity")
         node = json.loads(data)
-        if (not isinstance(node, dict) or node.get("nodeId") != expected_id
+        if (not isinstance(node, dict) or node.keys() != {"nodeId", "bootId", "protocolVersion"}
+                or node.get("nodeId") != expected_id
                 or type(node.get("protocolVersion")) is not int or node["protocolVersion"] != 1):
             raise ValueError("не совпали nodeId или protocolVersion")
         boot = node.get("bootId")

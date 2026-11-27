@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -44,7 +44,7 @@ class Route(ThreadingHTTPServer):
         self.name = name
         self.identity = (node.node_id, node.boot_id)
         self.catalog_bytes = 0
-        self.delay_next = 0.0
+        self.plans = deque()
         self.probe_times = []
         self.sdk_probes = 0
         self.business_reads = 0
@@ -63,8 +63,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Canary-Path", self.server.name)
-        self.end_headers()
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            self.end_headers()
             self.wfile.write(body)
 
     def do_GET(self):
@@ -80,9 +80,13 @@ class Handler(BaseHTTPRequestHandler):
             identity = route.identity
             route.probe_times.append(time.monotonic())
             route.health_probes[identity] += 1
-            delay, route.delay_next = route.delay_next, 0
-            if delay:
-                time.sleep(delay)
+            if route.plans:
+                entered, release, status, value = route.plans.popleft()
+                entered.set()
+                if release:
+                    assert release.wait(15), "test did not release its health check"
+                return self.reply(status, value)
+
             route.checked.set()
             if identity is None:
                 return self.reply(503, {})
@@ -336,6 +340,81 @@ def selector(cmd, config, env):
             stop_process(proc)
 
 
+def fixture_reply(route, status=200, value=None, release=None):
+    entered = threading.Event()
+    if value is None:
+        value = {"bootId": route.node.boot_id, "protocolVersion": 1, "nodeId": route.node.node_id}
+    route.plans.append((entered, release, status, value))
+    return entered
+
+
+def paired_timeouts(cmd, config, env, ports, nodes, routes):
+    settings = dict(env, ROUTER_PATH_CHECK_INTERVAL="60s", ROUTER_PATH_CHECK_TIMEOUT="400ms")
+    withheld = threading.Event()
+    both_started = []
+    before = {}
+    for name, paths in routes.items():
+        slow = "direct" if name == "codex" else "standby"
+        for path, route in paths.items():
+            before[name, path] = len(route.probe_times)
+            fixture_reply(route, release=withheld if path == slow else None)
+            both_started.append(fixture_reply(route, release=withheld))
+    try:
+        with selector(cmd, config, settings) as proc:
+            wait_for("both paired retries start before either can return", proc,
+                     lambda: all(e.is_set() for e in both_started))
+            # Hold the entire second pair past its deadline. No third retry is allowed.
+            time.sleep(1)
+            for name, paths in routes.items():
+                for path, route in paths.items():
+                    assert len(route.probe_times) == before[name, path] + 2
+                    assert route.probe_times[-1] - route.probe_times[-2] < 5
+                assert request(ports[name], nodes[name], "/canary/route")[0] != 200
+    finally:
+        withheld.set()
+    print("PASS real timeout on each Router starts one simultaneous direct/FI recheck; persistent outage is bounded")
+
+
+def conflicting_observations(cmd, config, env, ports, nodes, routes, retry_failed):
+    settings = dict(env, ROUTER_PATH_CHECK_INTERVAL="2s", ROUTER_PATH_CHECK_TIMEOUT="6s")
+    old = threading.Event()
+    retry = threading.Event()
+    try:
+        with selector(cmd, config, settings) as proc:
+            for name, node in nodes.items():
+                wait_for(name + " initially verified", proc,
+                         lambda: request(ports[name], node, "/canary/route")[:2] == (200, "direct"))
+            retry_started = []
+            for name, paths in routes.items():
+                # First direct result is still in flight when FI forces its paired recheck.
+                if name == "codex":
+                    fixture_reply(paths["direct"], status=409, release=old)
+                else:
+                    fixture_reply(paths["direct"], value={"nodeId": nodes[name].node_id,
+                                  "bootId": "foreign", "protocolVersion": 1}, release=old)
+                fixture_reply(paths["standby"], status=503)
+                retry_started.append(fixture_reply(paths["direct"], status=503 if retry_failed else 200,
+                                                    release=None if retry_failed else retry))
+                retry_started.append(fixture_reply(paths["standby"]))
+            wait_for("paired retries are in flight", proc, lambda: all(e.is_set() for e in retry_started))
+            if retry_failed:
+                for name, node in nodes.items():
+                    wait_for(name + " on verified FI after retry timeout", proc,
+                             lambda: request(ports[name], node, "/canary/route")[:2] == (200, "standby"))
+            old.set()
+            for name, node in nodes.items():
+                wait_for(name + " late foreign identity fences new connections", proc,
+                         lambda: request(ports[name], node, "/canary/route")[0] != 200)
+                before = [route.business_reads for route in routes[name].values()]
+                assert request(ports[name], node, "/canary/route")[0] != 200
+                assert before == [route.business_reads for route in routes[name].values()]
+    finally:
+        old.set()
+        retry.set()
+    print("PASS delayed foreign identity fences both paths after the retry " +
+          ("failed" if retry_failed else "started"))
+
+
 def cold_start(cmd, config, script, env, ports, nodes, routes):
     # A bound but non-listening port refuses actual TCP connects. Restart the
     # configured binary each time, simulating loss of either SSH service.
@@ -414,6 +493,9 @@ def main():
             s.close()
         cmd = [args.haproxy, "-f", str(config)]
         subprocess.run([*cmd, "-c"], check=True, cwd=config.parent, env=env)
+        paired_timeouts(cmd, config, env, ports, nodes, routes)
+        for retry_failed in (False, True):
+            conflicting_observations(cmd, config, env, ports, nodes, routes, retry_failed)
         cold_start(cmd, config, script, env, ports, nodes, routes)
         # Fixtures below count only reads/health observations in the lost-ACK case.
         for paths in routes.values():
@@ -422,6 +504,7 @@ def main():
                 route.checked.clear()
         with selector(cmd, config, env) as proc:
             exercise(proc, ports, nodes, routes)
+        assert all(route.sdk_probes == 0 for paths in routes.values() for route in paths.values())
 
 
 if __name__ == "__main__":

@@ -54,14 +54,18 @@ end
 local function check(router, path, generation)
     local ok, outcome = pcall(fetch_identity, router, path)
     if not ok then outcome = "unavailable" end
-    -- A response from the first pair can arrive during the retry. Apply its
-    -- negative evidence immediately unless a newer response on this path won.
-    -- Only the live generation may restore a route.
+    -- Only identity evidence can retire or re-admit a boot. A newer transport
+    -- failure cannot hide a late 409 from the original pair.
+    if outcome == "mismatch" and generation >= path.evidence then
+        path.foreign = true
+        path.evidence = generation
+    elseif outcome == "verified" and generation == router.generation then
+        path.foreign = false
+        path.evidence = generation
+    end
     if generation >= path.applied and (generation == router.generation or outcome ~= "verified") then
         path.applied = generation
         path.ready = outcome == "verified"
-        if outcome == "mismatch" then path.foreign = true end
-        if path.ready then path.foreign = false end
         if path.outcome ~= outcome then
             core.Info("identity check " .. router.name .. "/" .. path.name .. ": " .. outcome)
             path.outcome = outcome
@@ -102,7 +106,7 @@ for _, name in ipairs({"codex", "claude"}) do
                     boot=assert(os.getenv(prefix .. "BOOT_ID")), token=assert(os.getenv(prefix .. "CHECK_TOKEN")),
                     paths={}, results=core.queue(), generation=0}
     for _, direction in ipairs({"direct", "standby"}) do
-        local path = {name=direction, applied=0, port=assert(os.getenv(prefix .. direction:upper() .. "_PORT"))}
+        local path = {name=direction, applied=0, evidence=0, port=assert(os.getenv(prefix .. direction:upper() .. "_PORT"))}
         router[direction] = path
         table.insert(router.paths, path)
     end
@@ -113,5 +117,5 @@ end
 -- Called only when a NEW connection is assigned. Existing streams stay put.
 core.register_fetches("path_ready", function(_, name, path)
     local router = routers[name]
-    return router[path].ready == true and (path == "direct" or not router.direct.foreign)
+    return router[path].ready == true and not router[path].foreign and not router.direct.foreign
 end)

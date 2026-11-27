@@ -139,7 +139,7 @@ def test_refresh_updates_only_a_quiescent_selector(guard_module, monkeypatch, fa
     [(f, False) for f in (None,'busy','qualification','maintenance','startup','rollback','drain_ack',
                           'stop_ack','contract','undrain_ack','legacy_rollback')]
     + [(f, True) for f in (None,'startup','rollback','stop_ack','drain_ack','direct_cut','undrain_unknown')]
-    + [(f, 'refresh') for f in (None, 'selector_busy', 'startup')])
+    + [(f, mode) for mode in ('refresh','bundle') for f in (None, 'selector_busy', 'startup')])
 @pytest.mark.parametrize('starts_busy', [False, True])
 @pytest.mark.skipif(os.name=='nt',reason='Linux systemd/symlink deployment guard')
 def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,standby,starts_busy,guard_module):
@@ -160,23 +160,42 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,stan
     monkeypatch.setattr(sys,'argv',['guard','--candidate',str(candidate),'--wheel',str(wheel),'--sha256',sha,'--tests-proof',str(tests)])
     if standby:
         nodes_path = database.parent/'nodes.json'
-        previous = json.dumps([{'node_id': name, 'url': f'http://127.0.0.1:{ports[1] if standby == "refresh" else ports[0]}',
+        previous = json.dumps([{'node_id': name, 'url': f'http://127.0.0.1:{ports[1] if standby in ("refresh", "bundle") else ports[0]}',
                                 'orgs': ['unchanged']} for name, ports in m.STANDBY_PORTS.items()]).encode()
         nodes_path.write_bytes(previous)
         monkeypatch.setattr(m, 'dotenv_values', lambda path: {'ATLAS_GATE_NODES_FILE': str(nodes_path)})
         monkeypatch.setattr(m, 'check_selector', lambda states, **kw: None)
-        if standby == 'refresh':
-            def refresh(before):
+        if standby in ('refresh', 'bundle'):
+            if standby == 'bundle':
+                stage = tmp_path / 'bundle'
+                stage.mkdir()
+                current = tmp_path / 'installed'
+                current.mkdir()
+                monkeypatch.setattr(m, 'SELECTOR_DIR', current)
+                upgraded = {name: ('new-' + name).encode() for name in m.SELECTOR_FILES}
+                old_selector = {name: b'previous' if name != 'path_checks.lua' else None for name in m.SELECTOR_FILES}
+                m.write_selector_files(stage, upgraded)
+                m.write_selector_files(current, old_selector)
+                hashes = {name: hashlib.sha256(data).hexdigest() for name, data in upgraded.items()}
+                tests.write_text(json.dumps({'status':'passed','wheelSha256':sha,'selectorBundleSha256':hashes}))
+                sys.argv.extend(['--selector-bundle', str(stage)])
+            def refresh(before, install=None):
+                if standby == 'bundle' and install is None:
+                    assert m.selector_files(current, allow_missing=True) == old_selector
+                    return
                 assert events[-1] == ('systemctl','stop','atlas-gate')
                 assert m.FLAG.read_text() == m.ADMISSION_FLAG.read_text()
                 assert draining == {'router','router-claude'}
                 assert (root/'gate').resolve() == old
                 if failure == 'selector_busy':
                     raise RuntimeError('remaining external connection')
+                if install:
+                    install()
+                    assert m.selector_files(current) == upgraded
                 events.append(('refreshed',))
             monkeypatch.setattr(m, 'check_staged_pins', lambda before, **kw: None)
             monkeypatch.setattr(m, 'refresh_standby_pins',refresh)
-        sys.argv.append('--refresh-standby-pins' if standby == 'refresh' else '--router-standby')
+        sys.argv.append('--refresh-standby-pins' if standby in ('refresh', 'bundle') else '--router-standby')
     events=[];draining=set();failed=False;settled=False
     unreachable=set()
     def states():return {k:{'nodeId':m.STANDBY_TARGETS[k].node_id,'protocolVersion':1,'ready':True,'draining':k in draining,
@@ -202,6 +221,8 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,stan
         args=list(map(str,args));events.append(tuple(args))
         if args==['systemctl','stop','atlas-gate']:
             assert not any(s['activeTurns'] for s in states().values()), 'Stop before SDK quiescence'
+        if args[0] == '/usr/bin/python3' and args[1].endswith('/preflight.py'):
+            return SimpleNamespace(stdout='CODEX_BOOT_ID=router\nCLAUDE_BOOT_ID=router-claude\n')
         if 'atlas_gate.admission_check' in args:
             if failure=='qualification':raise RuntimeError('failed qualification')
             return SimpleNamespace(stdout=json.dumps({'status':'passed','version':'0.4.17'}))
@@ -264,8 +285,10 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,stan
     else:
         m.main();assert (root/'gate').resolve()==candidate
     if standby:
-        assert nodes_path.read_bytes() == (m.standby_nodes(previous) if kept_candidate and standby != 'refresh' else previous)
-        if standby == 'refresh' and not failure:
+        assert nodes_path.read_bytes() == (m.standby_nodes(previous) if kept_candidate and standby not in ('refresh', 'bundle') else previous)
+        if standby == 'bundle':
+            assert m.selector_files(current, allow_missing=True) == (upgraded if kept_candidate else old_selector)
+        if standby in ('refresh', 'bundle') and not failure:
             assert ('refreshed',) in events
     if failure in ('rollback','undrain_ack'):
         assert m.FLAG.exists() and m.ADMISSION_FLAG.exists()
