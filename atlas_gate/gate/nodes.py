@@ -254,7 +254,7 @@ class Nodes:
         if expected_boot:
             headers["X-Atlas-Boot"] = expected_boot
         try:
-            response = await self.clients[node_id].get("/v1/node/identity", headers=headers)
+            response = await self.clients[node_id].request("GET", "/v1/node/identity", headers=headers)
             if response.status_code == 404 and response.json() == {"detail": "Not Found"}:
                 # A pre-0.8.37 direct Router has only the original identity contract.
                 info = await self.probe(node_id)
