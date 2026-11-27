@@ -372,6 +372,57 @@ def check_selector(before, *, require_direct=True):
         raise RuntimeError('Active selector changed while verifying paths')
 
 
+def check_staged_pins(before, *, require_idle=False):
+    staged = dotenv_values('/var/lib/atlas-router-standby/verified-boots.env')
+    expected = {t.pin: before[kind]['bootId'] for kind, t in STANDBY_TARGETS.items()}
+    if staged != expected:
+        raise RuntimeError('Enrol both direct and FI paths for the current Router boots before activation')
+    for kind, target in STANDBY_TARGETS.items():
+        for port in (target.direct, target.via_fi):
+            state = verified_state(kind, before[kind], port)
+            if require_idle:
+                if not state['draining']:
+                    raise RuntimeError(f'{kind} drain lost before selector restart')
+                assert_idle({kind: state})
+
+
+def refresh_standby_pins(before):
+    """The caller owns the admission fences and has stopped the Gate service."""
+    check_staged_pins(before, require_idle=True)
+    _, live_pins = selector_boots()
+    expected = {kind: state['bootId'] for kind, state in before.items()}
+    if live_pins != expected:
+        gate = run(['systemctl', 'show', 'atlas-gate', '-p', 'ActiveState', '--value'],
+                   text=True, capture_output=True)
+        if gate.stdout.strip() != 'inactive':
+            raise RuntimeError('Gate still running; selector restart refused')
+        clients = run(['ss', '-Hnt', 'state', 'established', '( sport = :38765 or sport = :38768 )'],
+                      text=True, capture_output=True)
+        if clients.stdout.strip():
+            raise RuntimeError('Selector still has client connections; restart refused')
+        run(['systemctl', 'restart', 'atlas-router-selector.service'])
+    # HAProxy accepts TCP before its initial health checks publish the two backends.
+    # This deadline bounds the infrastructure check while ingress is fenced.
+    deadline = time.monotonic() + 45
+    while True:
+        try:
+            check_selector(before, require_direct=False)
+            return
+        except httpx.TransportError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.5)
+
+
+def check_selector_registry(original):
+    entries = json.loads(original)
+    expected = {t.node_id: f'http://127.0.0.1:{t.selector}' for t in STANDBY_TARGETS.values()}
+    actual = {entry['node_id']: entry['url'] for entry in entries
+              if entry.get('transport', 'direct') == 'direct' and entry.get('enabled', True)}
+    if len(entries) != len(expected) or actual != expected:
+        raise RuntimeError('Pin refresh requires the existing two selector endpoints')
+
+
 def standby_control(kind, reference, drain=None):
     """Observe through any verified path. Reconcile a lost drain ACK before another write."""
     t = STANDBY_TARGETS[kind]
@@ -413,9 +464,12 @@ def main():
     p.add_argument('--wheel',type=Path);p.add_argument('--sha256')
     p.add_argument('--tests-proof',type=Path);p.add_argument('--refresh-api-contract',action='store_true')
     p.add_argument('--reset-runtime-contracts',action='store_true')
-    p.add_argument('--router-standby',action='store_true');a=p.parse_args()
-    if a.router_standby and (a.reset_runtime_contracts or a.refresh_api_contract):
-        p.error('--router-standby requires release activation')
+    transport=p.add_mutually_exclusive_group()
+    transport.add_argument('--router-standby',action='store_true')
+    transport.add_argument('--refresh-standby-pins',action='store_true');a=p.parse_args()
+    use_standby=a.router_standby or a.refresh_standby_pins
+    if use_standby and (a.reset_runtime_contracts or a.refresh_api_contract):
+        p.error('standby options require release activation')
     if os.geteuid()!=0:raise PermissionError('deployment and startup refresh require root')
     activation=(a.candidate,a.wheel,a.sha256,a.tests_proof)
     if a.reset_runtime_contracts:
@@ -447,14 +501,18 @@ def main():
         before=states()
         control=node
         read_states=states
-        if a.router_standby:
+        if use_standby:
             settings=dotenv_values('/etc/atlas/gate.env')
             nodes_path=Path(settings['ATLAS_GATE_NODES_FILE'])
             if nodes_path != DATABASE.parent/'nodes.json' or nodes_path.is_symlink():
                 raise RuntimeError('Unexpected node registry path')
             original_nodes=nodes_path.read_bytes()
-            selector_nodes=standby_nodes(original_nodes)
-            check_selector(before)
+            if a.refresh_standby_pins:
+                check_selector_registry(original_nodes)
+                check_staged_pins(before)
+            else:
+                selector_nodes=standby_nodes(original_nodes)
+                check_selector(before)
             def control(kind, drain=None):
                 return standby_control(kind, before[kind], drain)
             def read_states():
@@ -495,7 +553,7 @@ def main():
                 drained.append(k)  # persist/control intent before potentially lost ACK
                 control(k,True)
             drain_ingress()
-            if a.router_standby:wait_idle(drained_states)
+            if use_standby:wait_idle(drained_states)
             else:wait_idle()
             # Phase 2 cuts ingress only after producers have settled. Retiring
             # workers also finish any read/context request admitted during phase1.
@@ -505,12 +563,16 @@ def main():
                 assert response.status_code==503 and response.json()['error']['code']=='gate_maintenance'
                 assert response.headers.get('Retry-After') and 'X-Atlas-Command-State' not in response.headers
             drain_ingress()
-            assert_idle(drained_states() if a.router_standby else states());assert_gate_idle()
+            assert_idle(drained_states() if use_standby else states());assert_gate_idle()
             stopped=True;service_ready=False
             clear_contracts()
             run(['systemctl','stop','atlas-gate'])
             with sqlite3.connect('file:'+str(DATABASE)+'?mode=ro',uri=True) as src,sqlite3.connect(backup/'gate.db') as dst:src.backup(dst)
             (backup/'gate.db').chmod(0o600)
+            if a.refresh_standby_pins:
+                if nodes_path.is_symlink() or nodes_path.read_bytes() != original_nodes:
+                    raise RuntimeError('Node registry changed before selector restart')
+                refresh_standby_pins(before)
             if a.router_standby:
                 check_selector(before, require_direct=False)
                 (backup/'nodes.json').write_bytes(original_nodes)
@@ -523,7 +585,7 @@ def main():
                 raise RuntimeError('Candidate did not confirm exact steering contract1')
             service_ready=True
             after=read_states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
-            if a.router_standby:
+            if use_standby:
                 check_selector(after, require_direct=False)
         except BaseException:
             if stopped:
@@ -544,7 +606,7 @@ def main():
                         if flag.exists():
                             assert flag.read_text()==token,'Maintenance ownership changed; do not clear another rollout'
                             flag.unlink()
-                if a.router_standby:
+                if use_standby:
                     # Once Gate is ready, a failed standby undrain is reported
                     # per node. Our global ingress fence must not block healthy peers.
                     try:restore_drains(drained, control)
@@ -561,7 +623,7 @@ def main():
                'maintenanceCleared':not FLAG.exists() and not ADMISSION_FLAG.exists(),
                'twoPhaseIngressDrain':True,'detachedApiDrain':True,'managedApiIngressAllowed':API_FLAG.exists(),
                'steerIngressAllowed':STEER_FLAG.exists()}
-        if a.router_standby:
+        if use_standby:
             proof['routerStandby'] = {kind: {'nodeId': s['nodeId'], 'bootId': s['bootId'],
                                              'selectorPort': STANDBY_TARGETS[kind].selector}
                                       for kind, s in final.items()}

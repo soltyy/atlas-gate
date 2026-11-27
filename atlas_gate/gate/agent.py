@@ -20,7 +20,7 @@ from ..sdk_tools import SdkTools, permitted
 from .state import Device
 from .attachments import node_attachments, validate_prompt, validate_tool_result
 from .reasoning import model_policy, validate_new_prompt
-from .operations import body_sha256, tool_result_not_sent
+from .operations import body_sha256, legacy_tools_not_sent, tool_result_not_sent
 from .token_usage import accountable_terminal
 
 log = logging.getLogger("atlas_gate")
@@ -351,7 +351,7 @@ async def _bound_attachments(state, binding):
 async def _control_receipt(state, op):
     current = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
     pending_steer = current.get('steer') and json.loads(current['steer'])['state'] in ('accepted', 'unknown')
-    if tool_result_not_sent(current):
+    if tool_result_not_sent(current) or legacy_tools_not_sent(current):
         # Project an old local refusal as pending while looking for Router's receipt.
         current["state"] = "unknown"
     if current["state"] != "complete" or pending_steer:
@@ -604,6 +604,13 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
 
     async with state.operations.delivery_lock(op["id"]):
         op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
+        if legacy_tools_not_sent(op):
+            # begin() has matched the owner, session, key and request fingerprint.
+            # Enter normal receipt recovery before issuing any Router mutation.
+            state.store._exec("UPDATE router_operations SET state='unknown',status=NULL,response=NULL "
+                              "WHERE id=? AND state='complete' AND status=503 AND response=?",
+                              (op["id"], op["response"]))
+            op = state.store._one("SELECT * FROM router_operations WHERE id=?", (op["id"],))
         not_sent = tool_result_not_sent(op)
         fresh = fresh and op["state"] == "prepared"
         if op["state"] == "complete" and not not_sent:
@@ -645,7 +652,7 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
                             and proof.get("commandState") == "missing"):
                         raise _tool_result_pending(op)
             extra = {"tool_result_turn": tool_result_turn} if tool_result_turn is not None else {}
-            if op['path'].endswith('/prompt'):
+            if op['path'].endswith('/prompt') or (not fresh and op['path'].endswith('/tools')):
                 source = state.store._one('SELECT status FROM router_bindings WHERE id=?', (op['session_id'],))
                 if not source or source['status'] != 'ready':
                     raise _tool_result_pending(op)
@@ -656,12 +663,15 @@ async def _deliver_operation(state, binding, op, fresh, raw, params, *, tool_res
             if fresh and isinstance(failed, GateFreshNodeError):
                 # Nodes проверил identity/доступность ДО отправки. Это известный
                 # отказ доставки, в отличие от потерянного ответа принятой команды.
-                response = httpx.Response(503, json={'error':{
-                    'code':failed.code, 'message':failed.message, 'deliveryState':'not_sent'}})
+                detail = {'code': failed.code, 'message': failed.message, 'deliveryState': 'not_sent'}
+                tools = op['method'] == 'POST' and op['path'].endswith('/tools')
+                if tools:
+                    detail['retryable'] = failed.retryable
+                response = httpx.Response(503, json={'error': detail})
                 if op.get('steer'):
                     state.operations.observe_steer(op['id'], {**json.loads(op['steer']), 'state': 'not_applied'})
                 state.operations.complete(op['id'], response, pre_dispatch=(binding, failed))
-                if op['method'] == 'POST' and op['path'].endswith('/tool_result'):
+                if (tools and failed.retryable) or (op['method'] == 'POST' and op['path'].endswith('/tool_result')):
                     raise _tool_result_pending(op) from failed
                 return response
             state.operations.unknown(op["id"])

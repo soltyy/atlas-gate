@@ -26,6 +26,19 @@ def tool_result_not_sent(op):
         return False
 
 
+def legacy_tools_not_sent(op):
+    """0.4.45 saved a Gate pre-dispatch /tools refusal as a final receipt."""
+    if (op['method'] != 'POST' or not op['path'].endswith('/tools')
+            or op['state'] != 'complete' or op['status'] != 503):
+        return False
+    try:
+        return json.loads(op['response']) == {'error': {
+            'code': 'node_unavailable', 'deliveryState': 'not_sent',
+            'message': 'идентичность Router не подтверждена'}}
+    except (ValueError, TypeError):
+        return False
+
+
 class Operations:
     def __init__(self, store):
         self.store = store
@@ -349,7 +362,8 @@ class Operations:
                             or failed.path != old['path'] or binding['id'] != old['session_id']
                             or binding['device_id'] != old['device_id'] or response.status_code != 503):
                         raise ValueError('invalid pre-dispatch provenance')
-                    if old['method'] == 'POST' and old['path'].endswith('/tool_result'):
+                    if old['method'] == 'POST' and (old['path'].endswith('/tool_result')
+                            or (old['path'].endswith('/tools') and failed.retryable)):
                         # The client still owns the saved result. Keep its original key and
                         # digest open for exact recovery, even if this Gate restarts.
                         db.execute("UPDATE router_operations SET state='unknown',status=?,response=? WHERE id=?",
