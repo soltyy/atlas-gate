@@ -436,7 +436,6 @@ class Operations:
         for row in rows:
             try:
                 # Новое boot допускается только при чтении журнала, не исполнении старой команды.
-                await nodes.probe(row["node_id"])
                 response = await nodes.request(row["node_id"], "GET", "/v1/commands/" + row["id"])
                 if response.status_code != 200:
                     continue
