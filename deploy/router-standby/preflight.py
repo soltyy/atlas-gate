@@ -9,20 +9,20 @@ import re
 import sys
 import tempfile
 
-MAX_NODE_BYTES = 32 * 1024
+MAX_NODE_BYTES = 2048
 
 
 def node_boot(port, expected_id, token):
     # Ограничение относится только к диагностическому GET на loopback.
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        conn.request("GET", "/v1/node", headers={"X-Atlas-Token": token})
+        conn.request("GET", "/v1/node/identity", headers={"X-Atlas-Token": token})
         response = conn.getresponse()
         if response.status != 200:
             raise ValueError(f"HTTP {response.status}")
         data = response.read(MAX_NODE_BYTES + 1)
         if len(data) > MAX_NODE_BYTES:
-            raise ValueError("слишком большой ответ /v1/node")
+            raise ValueError("слишком большой ответ /v1/node/identity")
         node = json.loads(data)
         if (not isinstance(node, dict) or node.get("nodeId") != expected_id
                 or type(node.get("protocolVersion")) is not int or node["protocolVersion"] != 1):
@@ -97,7 +97,7 @@ if __name__ == "__main__":
     parser.add_argument("--write-pins", type=Path,
                         help="атомарно записать проверенные boot ID для следующего старта HAProxy")
     parser.add_argument("--check-selector", action="store_true",
-                        help="прочитать /v1/node через селекторы и сравнить с сохранёнными boot ID")
+                        help="прочитать /v1/node/identity через селекторы и сравнить с сохранёнными boot ID")
     args = parser.parse_args()
     if args.write_pins and args.check_selector:
         parser.error("выберите запись boot ID или проверку селектора")

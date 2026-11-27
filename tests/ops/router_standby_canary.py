@@ -43,7 +43,10 @@ class Route(ThreadingHTTPServer):
         self.node = node
         self.name = name
         self.identity = (node.node_id, node.boot_id)
-        self.catalog_bytes = 7000
+        self.catalog_bytes = 0
+        self.delay_next = 0.0
+        self.probe_times = []
+        self.sdk_probes = 0
         self.business_reads = 0
         self.checked = threading.Event()
         self.health_probes = Counter()
@@ -71,8 +74,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-Atlas-Token") != node.token:
             return self.reply(401, {})
         if target.path == "/v1/node":
+            route.sdk_probes += 1
+            return self.reply(500, {})
+        if target.path == "/v1/node/identity":
             identity = route.identity
+            route.probe_times.append(time.monotonic())
             route.health_probes[identity] += 1
+            delay, route.delay_next = route.delay_next, 0
+            if delay:
+                time.sleep(delay)
             route.checked.set()
             if identity is None:
                 return self.reply(503, {})
@@ -176,7 +186,7 @@ def check_preflight(script, env, nodes, routes):
         result = verify()
         assert result.returncode != 0 and not result.stdout.strip()
     finally:
-        standby.catalog_bytes = 7000
+        standby.catalog_bytes = 0
     result = verify()
     result.check_returncode()
     pins = dict(line.split("=", 1) for line in result.stdout.splitlines())
@@ -235,7 +245,7 @@ def exercise(proc, ports, nodes, routes):
     standby.catalog_bytes = 33000
     wait_for("oversized node document rejected", proc, rejected)
     assert get("claude")[:2] == (200, "direct")
-    standby.catalog_bytes = 7000
+    standby.catalog_bytes = 0
     active("codex", "standby")
     print("PASS oversized health response rejected; standby recovers with a valid response")
 
@@ -259,7 +269,7 @@ def exercise(proc, ports, nodes, routes):
     # old process. Losing direct now must not reconnect to that stale process.
     new_boot = secrets.token_hex(16)
     direct.identity = (codex.node_id, new_boot)
-    active("codex", "direct")
+    wait_for("replacement direct is fenced immediately", proc, rejected)
     direct.identity = None
     wait_for("new direct boot retires stale backup", proc, rejected)
     wrong_direct = (nodes["claude"].node_id, codex.boot_id)
@@ -272,8 +282,10 @@ def exercise(proc, ports, nodes, routes):
              lambda: standby.health_probes[(codex.node_id, new_boot)] >= 2)
     assert rejected(), "unverified replacement boot admitted"
     direct.identity = (codex.node_id, new_boot)
+    wait_for("unverified direct remains fenced", proc, rejected)
+    direct.identity = (codex.node_id, codex.boot_id)
     active("codex", "direct")
-    print("PASS changed direct boot: stale standby rejected, healthy new direct restored")
+    print("PASS changed direct boot: blocks both the replacement and the retired standby")
 
     claude = nodes["claude"]
     routes["claude"]["direct"].identity = None
@@ -369,6 +381,7 @@ def main():
     with contextlib.ExitStack() as stack:
         env = os.environ.copy()
         env["ROUTER_PATH_CHECK_INTERVAL"] = "1s"
+        env["ROUTER_PATH_WATCHER"] = str(config.with_name("path_checks.lua"))
         nodes, ports, routes = {}, {}, {}
         # Reserve all frontend ports at once so the two kernel allocations differ.
         front_sockets = []
