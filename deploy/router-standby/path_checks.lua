@@ -100,13 +100,12 @@ local function monitor(router)
     end
 end
 
-for _, name in ipairs({"codex", "claude"}) do
-    local prefix = name:upper() .. "_"
-    local router = {name=name, id=assert(os.getenv(prefix .. "NODE_ID")),
+local function add_lane(name, prefix, ports, authority)
+    local router = {name=name, authority=authority, id=assert(os.getenv(prefix .. "NODE_ID")),
                     boot=assert(os.getenv(prefix .. "BOOT_ID")), token=assert(os.getenv(prefix .. "CHECK_TOKEN")),
                     paths={}, results=core.queue(), generation=0}
     for _, direction in ipairs({"direct", "standby"}) do
-        local path = {name=direction, applied=0, evidence=0, port=assert(os.getenv(prefix .. direction:upper() .. "_PORT"))}
+        local path = {name=direction, applied=0, evidence=0, port=assert(os.getenv(ports .. direction:upper() .. "_PORT"))}
         router[direction] = path
         table.insert(router.paths, path)
     end
@@ -114,8 +113,17 @@ for _, name in ipairs({"codex", "claude"}) do
     core.register_task(monitor, router)
 end
 
+for _, name in ipairs({"codex", "claude"}) do
+    local prefix = name:upper() .. "_"
+    add_lane(name, prefix, prefix, name)
+    if os.getenv("ATLAS_FILE_LANES") == "1" then
+        add_lane(name .. "_files", prefix, prefix .. "FILE_", name)
+    end
+end
+
 -- Called only when a NEW connection is assigned. Existing streams stay put.
 core.register_fetches("path_ready", function(_, name, path)
     local router = routers[name]
     return router[path].ready == true and not router[path].foreign and not router.direct.foreign
+        and not routers[router.authority].direct.foreign
 end)

@@ -1,0 +1,15 @@
+Host atlas-files-fi
+    HostName 185.9.26.113
+    HostKeyAlias atlas-standby-fi
+
+Host atlas-files-router
+    HostName 185.224.208.221
+    HostKeyAlias atlas-standby-router
+    ProxyJump atlas-files-fi
+    LocalForward 127.0.0.1:27665 127.0.0.1:8765
+    LocalForward 127.0.0.1:27668 127.0.0.1:8768
+
+Host *
+    ControlMaster no
+    ControlPath none
+    Include /etc/atlas/router-standby/ssh_config

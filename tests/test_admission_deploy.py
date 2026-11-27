@@ -647,3 +647,23 @@ async def test_direct_maintenance_blocks_admission_without_fabricating_receipt(n
 
 
 from .test_network_gate import network
+
+
+@pytest.mark.parametrize("previous", [None, "", "current", "foreign"])
+def test_enabling_file_transport_preserves_control_and_rejects_conflicting_address(guard_module, previous):
+    m = guard_module
+    ports = {"router": 31665, "router-claude": 31668}
+    registry = []
+    for kind, target in m.STANDBY_TARGETS.items():
+        entry = {"node_id": target.node_id, "url": f"http://127.0.0.1:{target.selector}", "token": "fixture"}
+        if previous is not None:
+            entry["file_url"] = f"http://127.0.0.1:{ports[kind]}" if previous == "current" else previous
+        registry.append(entry)
+    original = json.dumps(registry).encode()
+    if previous == "foreign":
+        with pytest.raises(RuntimeError, match="different file transport"):
+            m.file_lane_nodes(original, ports)
+        return
+    migrated = json.loads(m.file_lane_nodes(original, ports))
+    for kind, before, after in zip(m.STANDBY_TARGETS, registry, migrated):
+        assert after == dict(before, file_url=f"http://127.0.0.1:{ports[kind]}")

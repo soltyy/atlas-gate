@@ -313,6 +313,43 @@ def standby_nodes(original):
     return (json.dumps(nodes, ensure_ascii=False, indent=2) + '\n').encode()
 
 
+FILE_LANE_ENV = Path('/etc/atlas/router-standby/file-lanes.env')
+
+
+def file_lane_ports():
+    env = dotenv_values(FILE_LANE_ENV)
+    if env.get('ATLAS_FILE_LANES') != '1':
+        raise RuntimeError('File transport is not enabled on the selector')
+    return {kind: int(env[target.pin.replace('BOOT_ID', 'FILE_LISTEN_PORT')])
+            for kind, target in STANDBY_TARGETS.items()}
+
+
+def file_lane_nodes(original, ports):
+    check_selector_registry(original)
+    entries = json.loads(original)
+    for entry in entries:
+        kind = next(kind for kind, t in STANDBY_TARGETS.items() if t.node_id == entry['node_id'])
+        url = f'http://127.0.0.1:{ports[kind]}'
+        if entry.get('file_url') not in (None, '', url):
+            raise RuntimeError('Refusing to overwrite a different file transport')
+        entry['file_url'] = url
+    return (json.dumps(entries, ensure_ascii=False, indent=2) + '\n').encode()
+
+
+def check_file_selectors(before, ports):
+    for kind, port in ports.items():
+        target = STANDBY_TARGETS[kind]
+        token = dotenv_values('/etc/atlas/' + kind + '.env')['ATLAS_TOKEN']
+        expected = {'nodeId': target.node_id, 'bootId': before[kind]['bootId'], 'protocolVersion': 1}
+        with httpx.Client(trust_env=False) as client:
+            response = client.get(f'http://127.0.0.1:{port}/v1/node/identity',
+                                  headers={'X-Atlas-Token': token, 'X-Atlas-Node': target.node_id,
+                                           'X-Atlas-Boot': expected['bootId']})
+        response.raise_for_status()
+        if response.json() != expected:
+            raise RuntimeError(f'{kind} file selector returned a different identity')
+
+
 def replace_nodes(path, expected, updated):
     # Only called with Gate stopped and the deployment lock held. Preserve
     # updates made through the node admin API before the admission fence.
@@ -431,6 +468,8 @@ def qualify_selector_bundle(directory, expected_hashes, before):
         write_selector_files(root, files)
         env = dict(os.environ, **dotenv_values('/etc/atlas/router-standby/runtime.env'))
         env.update(dotenv_values('/var/lib/atlas-router-standby/verified-boots.env'))
+        if FILE_LANE_ENV.is_file():
+            env.update(dotenv_values(FILE_LANE_ENV))
         env['ROUTER_PATH_WATCHER'] = str(root / 'path_checks.lua')
         run(['/usr/sbin/haproxy', '-c', '-f', root / 'haproxy.cfg'], env=env, capture_output=True)
         result = run(['/usr/bin/python3', root / 'preflight.py'], env=env, capture_output=True, text=True)
@@ -440,7 +479,7 @@ def qualify_selector_bundle(directory, expected_hashes, before):
     return files
 
 
-def refresh_standby_pins(before, install=None):
+def refresh_standby_pins(before, install=None, *, file_ports=None):
     """The caller owns the admission fences and has stopped the Gate service."""
     check_staged_pins(before, require_idle=True)
     _, live_pins = selector_boots()
@@ -450,7 +489,11 @@ def refresh_standby_pins(before, install=None):
                    text=True, capture_output=True)
         if gate.stdout.strip() != 'inactive':
             raise RuntimeError('Gate still running; selector restart refused')
-        clients = run(['ss', '-Hnt', 'state', 'established', '( sport = :38765 or sport = :38768 )'],
+        ports = [t.selector for t in STANDBY_TARGETS.values()]
+        if FILE_LANE_ENV.is_file() and dotenv_values(FILE_LANE_ENV).get('ATLAS_FILE_LANES') == '1':
+            ports.extend(file_lane_ports().values())
+        sockets = '( ' + ' or '.join(f'sport = :{p}' for p in ports) + ' )'
+        clients = run(['ss', '-Hnt', 'state', 'established', sockets],
                       text=True, capture_output=True)
         if clients.stdout.strip():
             raise RuntimeError('Selector still has client connections; restart refused')
@@ -463,6 +506,8 @@ def refresh_standby_pins(before, install=None):
     while True:
         try:
             check_selector(before, require_direct=False)
+            if file_ports:
+                check_file_selectors(before, file_ports)
             return
         except httpx.TransportError:
             if time.monotonic() >= deadline:
@@ -524,7 +569,10 @@ def main():
     transport.add_argument('--router-standby',action='store_true')
     transport.add_argument('--refresh-standby-pins',action='store_true')
     p.add_argument('--selector-bundle',type=Path)
+    p.add_argument('--file-lanes',action='store_true')
     a=p.parse_args()
+    if a.file_lanes and not (a.selector_bundle and a.refresh_standby_pins):
+        p.error('--file-lanes requires --selector-bundle and --refresh-standby-pins')
     if a.selector_bundle and not a.refresh_standby_pins:
         p.error('--selector-bundle requires --refresh-standby-pins')
     use_standby=a.router_standby or a.refresh_standby_pins
@@ -562,6 +610,8 @@ def main():
         bundle = qualify_selector_bundle(a.selector_bundle, tests.get('selectorBundleSha256'), before) if a.selector_bundle else None
         control=node
         read_states=states
+        file_ports=None
+        previous_file_ports=None
         if use_standby:
             settings=dotenv_values('/etc/atlas/gate.env')
             nodes_path=Path(settings['ATLAS_GATE_NODES_FILE'])
@@ -570,6 +620,11 @@ def main():
             original_nodes=nodes_path.read_bytes()
             if a.refresh_standby_pins:
                 check_selector_registry(original_nodes)
+                if any(e.get('file_url') for e in json.loads(original_nodes)):
+                    previous_file_ports=file_lane_ports()
+                if a.file_lanes or previous_file_ports:
+                    file_ports=file_lane_ports()
+                    selector_nodes=file_lane_nodes(original_nodes, file_ports)
                 check_staged_pins(before)
             else:
                 selector_nodes=standby_nodes(original_nodes)
@@ -643,10 +698,15 @@ def main():
                         write_selector_files(snap, previous)
                         previous_selector = previous
                         write_selector_files(SELECTOR_DIR, bundle)
-                    refresh_standby_pins(before, install)
+                    if file_ports:
+                        refresh_standby_pins(before, install, file_ports=file_ports)
+                    else:
+                        refresh_standby_pins(before, install)
+                elif file_ports:
+                    refresh_standby_pins(before, file_ports=file_ports)
                 else:
                     refresh_standby_pins(before)
-            if a.router_standby:
+            if a.router_standby or a.file_lanes:
                 check_selector(before, require_direct=False)
                 (backup/'nodes.json').write_bytes(original_nodes)
                 replace_nodes(nodes_path, original_nodes, selector_nodes)
@@ -660,6 +720,8 @@ def main():
             after=read_states();assert all(after[k]['bootId']==before[k]['bootId'] for k in before)
             if use_standby:
                 check_selector(after, require_direct=False)
+            if file_ports:
+                check_file_selectors(before, file_ports)
         except BaseException:
             if stopped:
                 service_ready=False
@@ -667,7 +729,10 @@ def main():
                 if previous_selector is not None:
                     write_selector_files(SELECTOR_DIR, previous_selector)
                     run(['systemctl', 'restart', 'atlas-router-selector.service'])
-                    refresh_standby_pins(before)
+                    if previous_file_ports:
+                        refresh_standby_pins(before, file_ports=previous_file_ports)
+                    else:
+                        refresh_standby_pins(before)
                 if nodes_changed:
                     replace_nodes(nodes_path, selector_nodes, original_nodes)
                 if (ROOT/'gate').resolve()!=old:link(old)
@@ -702,6 +767,8 @@ def main():
                'steerIngressAllowed':STEER_FLAG.exists()}
         if bundle:
             proof['selectorBundleSha256'] = tests['selectorBundleSha256']
+        if file_ports:
+            proof['fileSelectors'] = file_ports
         if use_standby:
             proof['routerStandby'] = {kind: {'nodeId': s['nodeId'], 'bootId': s['bootId'],
                                              'selectorPort': STANDBY_TARGETS[kind].selector}
