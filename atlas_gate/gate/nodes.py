@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import ssl
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ class ProbeFailure:
 class Node(BaseModel):
     node_id: str = Field(min_length=1)
     url: str = ""
+    file_url: str = ""
     token_env: str = ""
     transport: Literal["direct", "connector"] = "direct"
     orgs: list[str]
@@ -61,10 +63,20 @@ class Node(BaseModel):
     @model_validator(mode="after")
     def endpoint(self):
         if self.transport == "connector":
-            if self.url or self.token_env or self.cert_file or self.key_file:
+            if self.url or self.file_url or self.token_env or self.cert_file or self.key_file:
                 raise ValueError("connector не использует входящий endpoint/секрет Router")
             return self
-        url = urlsplit(self.url)
+        if bool(self.cert_file) != bool(self.key_file):
+            raise ValueError("для mTLS нужны cert_file и key_file вместе")
+        self._validate_origin(self.url)
+        if self.file_url:
+            self._validate_origin(self.file_url)
+            if httpx.URL(self.file_url).copy_with(path="/") == httpx.URL(self.url).copy_with(path="/"):
+                raise ValueError("file_url должен указывать на отдельный endpoint загрузок")
+        return self
+
+    def _validate_origin(self, origin):
+        url = urlsplit(origin)
         if not url.hostname or (url.port is not None and not 1 <= url.port <= 65535):
             raise ValueError("нужны корректные hostname и port")
         try:
@@ -75,11 +87,8 @@ class Node(BaseModel):
             raise ValueError("endpoint должен быть origin без credentials/path/query")
         if url.scheme != "https" and not (url.scheme == "http" and loopback):
             raise ValueError("Router требует HTTPS; HTTP допустим только для loopback")
-        if bool(self.cert_file) != bool(self.key_file):
-            raise ValueError("для mTLS нужны cert_file и key_file вместе")
         if self.cert_file and url.scheme != "https":
             raise ValueError("mTLS требует HTTPS")
-        return self
 
 
 class Nodes:
@@ -96,6 +105,7 @@ class Nodes:
             groups[n.account_group] = n.account_turn_capacity
         self.config = {n.node_id: n for n in nodes}
         self.clients = {}
+        self.file_clients = {}
         for n in nodes:
             if n.transport == 'connector':
                 if channel is None:
@@ -110,10 +120,12 @@ class Nodes:
             if n.cert_file:
                 context.load_cert_chain(n.cert_file, n.key_file)
             # Retire idle sockets before Router's 5 s keep-alive, allowing time for tunnel latency.
-            self.clients[n.node_id] = httpx.AsyncClient(base_url=n.url.rstrip("/"),
-                headers={"X-Atlas-Token": token}, follow_redirects=False, trust_env=False,
-                verify=context, timeout=httpx.Timeout(70, connect=5),
-                limits=httpx.Limits(keepalive_expiry=3.0))
+            for url, pool in ((n.url, self.clients), (n.file_url, self.file_clients)):
+                if url:
+                    pool[n.node_id] = httpx.AsyncClient(base_url=url.rstrip("/"),
+                        headers={"X-Atlas-Token": token}, follow_redirects=False, trust_env=False,
+                        verify=context, timeout=httpx.Timeout(70, connect=5),
+                        limits=httpx.Limits(keepalive_expiry=3.0))
         self._probes: dict[str, asyncio.Task] = {}
         self.snapshots: dict[str, dict] = {}
         self.probe_errors: dict[str, str] = {}
@@ -136,7 +148,7 @@ class Nodes:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        await asyncio.gather(*(c.aclose() for c in self.clients.values()))
+        await asyncio.gather(*(c.aclose() for c in (*self.clients.values(), *self.file_clients.values())))
 
     async def probe(self, node_id: str) -> dict | None:
         # Concurrent observers need the same fresh identity, not N serial SDK
@@ -248,14 +260,14 @@ class Nodes:
             if n.enabled and org in n.orgs and route in n.routes
             and (pinned_node is None or n.node_id == pinned_node)))
 
-    async def _journal_identity(self, node_id, expected_boot=None):
+    async def _transport_identity(self, client, node_id, expected_boot, *, legacy_probe=False):
         """Read-only Router identity. Never publishes SDK readiness or changes boot pins."""
         headers = {"X-Atlas-Node": node_id}
         if expected_boot:
             headers["X-Atlas-Boot"] = expected_boot
         try:
-            response = await self.clients[node_id].request("GET", "/v1/node/identity", headers=headers)
-            if response.status_code == 404 and response.json() == {"detail": "Not Found"}:
+            response = await client.request("GET", "/v1/node/identity", headers=headers)
+            if legacy_probe and response.status_code == 404 and response.json() == {"detail": "Not Found"}:
                 # A pre-0.8.37 direct Router has only the original identity contract.
                 info = await self.probe(node_id)
                 boot = info["bootId"] if info else None
@@ -272,7 +284,7 @@ class Nodes:
                     or expected_boot is not None and boot != expected_boot):
                 raise ValueError("unconfirmed journal boot")
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
-            raise GateError(503, "node_unavailable", "Router не подтвердил идентичность при чтении квитанции",
+            raise GateError(503, "node_unavailable", "Router не подтвердил идентичность на выбранном канале",
                             node_id=node_id) from error
         if not self.config[node_id].enabled or self.revoked(node_id):
             raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
@@ -289,9 +301,11 @@ class Nodes:
         journal_path = path.split("/")
         journal = (node.transport == "direct" and method == "GET" and len(journal_path) == 4
                    and journal_path[:3] == ["", "v1", "commands"] and bool(journal_path[3]))
+        client = self.clients[node_id]
         info = self.snapshots.get(node_id)
         if journal:
-            info = {"bootId": await self._journal_identity(node_id, expected_boot)}
+            boot = await self._transport_identity(client, node_id, expected_boot, legacy_probe=True)
+            info = {"bootId": boot}
         elif not info or time.monotonic() - info["observed"] > 5:
             info = await self.probe(node_id)
             if not node.enabled or self.revoked(node_id):
@@ -307,6 +321,18 @@ class Nodes:
                                      method=method, path=path, reason='identity_unconfirmed',
                                      retryable=self.probe_retryable(node_id),
                                      diagnostics=failure.diagnostics() if failure else None)
+        if node.file_url and method == "POST" and re.fullmatch(
+                r"/v1/sessions/[^/]+/(?:documents|files|files/adaptive/[^/]+)", path):
+            if not expected_boot or info["bootId"] != expected_boot:
+                raise GateFreshNodeError("Основной канал не подтвердил boot привязанной сессии", node_id=node_id,
+                                         method=method, path=path, reason="identity_unconfirmed")
+            client = self.file_clients[node_id]
+            try:
+                # A control probe cannot attest the separately configured file transport.
+                await self._transport_identity(client, node_id, expected_boot)
+            except GateError as failed:
+                raise GateFreshNodeError(failed.message, node_id=node_id, method=method, path=path,
+                                         reason="identity_unconfirmed") from failed
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
         if journal:
@@ -335,7 +361,7 @@ class Nodes:
             params = {"toolResultTurn": tool_result_turn}
         try:
             options = {"timeout": httpx.Timeout(connect=5, read=None, write=70, pool=5)} if path.endswith("/compact") and self.config[node_id].transport != 'connector' else {}
-            response = await self.clients[node_id].request(method, path, content=content,
+            response = await client.request(method, path, content=content,
                 params=params, headers=headers, **options)
         except httpx.HTTPError as failed:
             correlation_id = uuid4().hex

@@ -41,7 +41,7 @@ async def serve(app, *, port=0, **options):
 
 
 @pytest.fixture
-async def network(tmp_path, monkeypatch):
+async def network(tmp_path, monkeypatch, request):
     root = os.environ.get("ATLAS_TEST_ROUTER_ROOT")
     if not root:
         pytest.skip("ATLAS_TEST_ROUTER_ROOT: path to Router checkout with /v1/node")
@@ -59,6 +59,9 @@ async def network(tmp_path, monkeypatch):
             apps.append(app)
             url = await stack.enter_async_context(serve(app))
             nodes.append({"node_id": name, "url": url, "token_env": "NODE_TOKEN", "orgs": ["test-org"], "routes": ["claude-sub"], "account_group": name})
+            if getattr(request, "param", None) == "file_url":
+                # Independent TCP listener, same running Router instance and journal.
+                nodes[-1]["file_url"] = await stack.enter_async_context(serve(app, lifespan="off"))
         monkeypatch.setenv("NODE_TOKEN", "test-router")
         file = tmp_path / "nodes.json"
         file.write_text(json.dumps(nodes))
