@@ -176,12 +176,14 @@ async def inventory(client, refs, version=1):
         "clientStoreEpoch": "client-store", "checkpointInventoryVersion": version, "sources": refs}, "inventory-" + str(version))
 
 
-async def case(client, inv, ref, operations, key="case", checkpoint=3):
+async def case(client, inv, ref, operations, key="case", checkpoint=3, *, transport_goal=None):
     body = {"version": 1, "inventoryId": inv["inventoryId"], "sourceRef": ref["sourceRef"], "conversationId": "chat", "branchId": "branch",
             "sourceRunId": ref["sourceRunId"], "sourceCheckpointVersion": checkpoint,
             "source": {"gateRoot": "http://gate", "sessionId": ref["sessionId"], "historyAlias": "alias-" + ref["sessionId"], "routeId": "sub", "model": "model"},
             "operations": operations, "observation": {"lastAppliedSeq": 0},
             "permissions": {"allowedRecovery": ["read_receipt", "apply_saved_ack", "resolve_source_checkpoint", "resume_transport"], "businessReplayAllowed": False}}
+    if transport_goal is not None:
+        body["transportGoal"] = transport_goal
     return await post(client, "/harness/recovery/cases", body, key), body
 
 
@@ -359,6 +361,30 @@ async def test_new_checkpoint_advances_unknown_effect_without_dropping_the_old_c
         assert (await client.get(path)).json()["next"]["businessDispatchAllowed"] is True
         admit(state, session)
     assert not any(method == "POST" and url.endswith(("/prompt", "/tool_result")) for method, url, _ in nodes.calls)
+
+
+async def test_receipt_only_case_reads_archived_compact_without_runtime_or_transport(recovery_http, monkeypatch):
+    client, state, nodes = recovery_http
+    ref, _ = source(state, nodes, terminal=False)
+    binding = state.store._one("SELECT * FROM router_bindings WHERE id='old'")
+    body = {"instructions": "test"}
+    key = "saved-compact"
+    op, _ = state.operations.begin(owner(state), binding, "POST", "/v1/sessions/local-old/compact",
+                                   body, request_id=key)
+    state.operations.unknown(op["id"])
+    command = {"kind": "compact", "requestId": key, "bodySha256": body_sha256(body)}
+    inv = await inventory(client, [ref])
+    async def unexpected(*args):
+        raise AssertionError("Archived command observation must not contact the runtime")
+    monkeypatch.setattr(state.routing, "recover_boot", unexpected)
+    snapshot, _ = await case(client, inv, ref, [command], transport_goal="none")
+    assert snapshot["operations"][0]["outcome"] == "outcome_unknown"
+    nodes.commands[op["id"]] = {"requestId":op["id"], "state":"complete", "status":200,
+                                "response":{"ok":True, "postTokens":100}}
+    settled = (await client.get("/harness/recovery/cases/" + snapshot["recoveryId"])).json()
+    assert settled["operations"][0]["outcome"] == "accepted"
+    assert nodes.calls and all(method == 'GET' and path == '/v1/commands/' + op['id']
+                               for method, path, _ in nodes.calls)
 
 
 async def test_historical_tool_preflight_is_pending_until_router_receipt(recovery_http):

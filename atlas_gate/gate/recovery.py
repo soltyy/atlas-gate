@@ -825,10 +825,19 @@ class Recovery:
         stopped_journals = {}
         all_resolved = bool(manifest["operations"])
         allowed = manifest.get("permissions", {}).get("allowedRecovery", [])
-        try:
-            binding = await self.state.routing.recover_boot(binding)
-        except GateError:
-            pass  # Local complete receipts remain usable while Router is down.
+        runtime_checked = False
+        async def runtime_binding():
+            nonlocal binding, runtime_checked
+            if not runtime_checked:
+                runtime_checked = True
+                try:
+                    binding = await self.state.routing.recover_boot(binding)
+                except GateError:
+                    pass  # Original pins still apply while the Router is unavailable.
+            return binding
+
+        if manifest.get("transportGoal", "ready") != "none":
+            await runtime_binding()
         for operation in manifest["operations"]:
             kind, request_id = operation["kind"], operation["requestId"]
             oid = self.state.operations.key(device, request_id)
@@ -850,7 +859,7 @@ class Recovery:
             payload, action_kind = None, None
             if kind == "tool_effect":
                 outcome["outcome"] = "effect_unknown"
-                payload = await self._accepted_external_tool_result(device, binding, operation, op, stopped_journals)
+                payload = await self._accepted_external_tool_result(device, await runtime_binding(), operation, op, stopped_journals)
                 if payload is not None:
                     outcome["outcome"], action_kind = "accepted", "resolve_source_checkpoint"
             elif op and op["state"] == "complete" and not tool_result_not_sent(op):
@@ -863,7 +872,7 @@ class Recovery:
                 elif kind == "prompt":
                     outcome["outcome"] = "accepted_running" if op["status"] < 400 else "outcome_unknown"
                     try:
-                        payload = await self._terminal(binding, operation["turnId"], manifest.get("observation", {}).get("lastAppliedSeq", 0))
+                        payload = await self._terminal(await runtime_binding(), operation["turnId"], manifest.get("observation", {}).get("lastAppliedSeq", 0))
                     except GateError as failed:
                         payload = None
                         outcome["recoveryError"] = {"code": failed.code, "status": failed.status}
@@ -906,7 +915,7 @@ class Recovery:
                 elif "resolve_source_checkpoint" in allowed or "seal_prompt" in allowed:
                     actions.append({"id": _id(case_id, "seal", operation), "executor": "gate", "kind": "seal_prompt", "operation": operation})
             elif not op and kind == "tool_result":
-                payload = await self._stopped_tool_delivery(device, binding, operation, stopped_journals)
+                payload = await self._stopped_tool_delivery(device, await runtime_binding(), operation, stopped_journals)
                 if payload is not None:
                     outcome["outcome"], action_kind = "rejected", "resolve_source_checkpoint"
             if payload is not None:
@@ -1005,7 +1014,8 @@ class Recovery:
         resolved = all_resolved and bool(client_actions) and all(a["id"] in applied or (a["kind"], a["evidenceSha256"]) in inherited for a in client_actions)
         branch = self.store._one("SELECT * FROM recovery_branches WHERE id=?", (case["branch_id"],))
         native = None
-        if "api_attempt" not in binding and not case["cancelled"] and branch["inventory_id"] == case["inventory_id"]:
+        if ("api_attempt" not in binding and manifest.get("transportGoal", "ready") != "none"
+                and not case["cancelled"] and branch["inventory_id"] == case["inventory_id"]):
             try:
                 native = await self._native_snapshot(case, binding, manifest, branch)
             except (GateError, ValueError):

@@ -71,19 +71,34 @@ async def test_invalid_identity_never_reads_journal_or_falls_back(tmp_path, stat
 
 
 @pytest.mark.asyncio
-async def test_missing_receipt_on_changed_boot_cannot_prove_absence(tmp_path):
+@pytest.mark.parametrize('route,returned_boot,detail,accepted', [
+    ('A', 'A', 'command_not_found', True),
+    ('B', 'B', 'command_not_found', False),
+    ('B', None, 'command_not_found', False),
+    ('A', 'A', 'Not Found', False),
+])
+async def test_receipt_404_requires_proof_from_the_responding_journal(tmp_path, route, returned_boot, detail, accepted):
     nodes = await node_pool(tmp_path)
-    called = []
+    visited = []
     def respond(req):
-        called.append((req.url.path, req.headers.get('X-Atlas-Boot')))
-        if req.url.path == KEY:
-            return httpx.Response(404, json={'detail': 'command_not_found'})
-        return httpx.Response(200, json=identity('changed' if len(called) > 1 else 'original'))
+        # Both identity reads would hit A. Client does not infer which backend
+        # handled the intermediate journal request from those observations.
+        if req.url.path == IDENTITY:
+            visited.append('A identity')
+            return httpx.Response(200, json=identity('A'))
+        visited.append(route + ' journal')
+        assert req.headers['X-Atlas-Boot'] == 'A' and req.headers['X-Atlas-Journal-Read'] == '1'
+        proof = {} if returned_boot is None else {
+            'X-Atlas-Boot': returned_boot, 'X-Atlas-Node': 'codex', 'X-Atlas-Journal-Read': '1'}
+        return httpx.Response(404, headers=proof, json={'detail':detail})
     nodes.clients['codex'] = httpx.AsyncClient(base_url='http://router', transport=httpx.MockTransport(respond))
     try:
-        with pytest.raises(GateError):
-            await nodes.request('codex', 'GET', KEY)
-        assert called == [(IDENTITY, None), (KEY, 'original'), (IDENTITY, 'original')]
+        if accepted:
+            assert (await nodes.request('codex', 'GET', KEY, expected_boot='A')).status_code == 404
+        else:
+            with pytest.raises(GateError):
+                await nodes.request('codex', 'GET', KEY, expected_boot='A')
+        assert visited == ['A identity', route + ' journal']
     finally:
         await nodes.close()
 

@@ -11,7 +11,7 @@ import time
 import ssl
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit, quote
+from urllib.parse import urlsplit, quote, unquote
 from typing import Literal
 from uuid import uuid4
 import httpx
@@ -309,6 +309,8 @@ class Nodes:
                                      diagnostics=failure.diagnostics() if failure else None)
         headers = {"Content-Type": "application/json", "X-Atlas-Node": node_id,
                    "X-Atlas-Boot": expected_boot or info["bootId"]}
+        if journal:
+            headers["X-Atlas-Journal-Read"] = "1"
         question_probe = method == 'GET' and path.endswith('/sdk-tools') and dict(params or {}).get('questionAnswers') == '1'
         if method == 'POST' and path.endswith('/question-answer') or question_probe:
             if not expected_boot:
@@ -349,10 +351,27 @@ class Nodes:
         if journal:
             if not node.enabled or self.revoked(node_id):
                 raise GateError(503, "node_unavailable", "Router не подключён", node_id=node_id)
-            if response.status_code == 404 or expected_boot is not None:
-                # Router permits journal reads across boot. A missing receipt or
-                # explicitly boot-bound read must survive a second identity check.
-                await self._journal_identity(node_id, info["bootId"])
+            if response.status_code in (200, 404):
+                # Only the responding journal can attribute its own result. Two
+                # identity probes could both use A while the receipt came from B.
+                proof = tuple(response.headers.get(k) for k in
+                              ("X-Atlas-Journal-Read", "X-Atlas-Node", "X-Atlas-Boot"))
+                attributed = proof == ("1", node_id, info["bootId"])
+                try:
+                    saved = response.json()
+                except ValueError:
+                    saved = None
+                if response.status_code == 404:
+                    valid = attributed and saved == {"detail": "command_not_found"}
+                else:
+                    # Older Routers can still return an immutable result for the
+                    # exact command, including after a legitimate restart.
+                    legacy = expected_boot is None and proof == (None, None, None)
+                    valid = ((attributed or legacy) and isinstance(saved, dict)
+                             and saved.get("requestId") == unquote(journal_path[3]))
+                if not valid:
+                    raise GateError(503, "command_outcome_unknown", "Router не подтвердил источник квитанции",
+                                    node_id=node_id)
         if response.status_code == 429 and "capacity_exceeded" not in response.text:
             self.observe_event(node_id, {"type": "rate_limit", "observationId": request_id or str(time.time_ns())})
         if response.status_code == 409 and "command_outcome_unknown" in response.text:
