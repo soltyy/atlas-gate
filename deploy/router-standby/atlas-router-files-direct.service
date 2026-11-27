@@ -1,0 +1,19 @@
+[Unit]
+Description=Router file uploads through a separate direct SSH connection
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=atlas-gate-link
+ExecStart=/usr/bin/ssh -NT -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=/etc/atlas/gate-link/known_hosts -o GlobalKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -i /etc/atlas/gate-link/id_ed25519 -L 127.0.0.1:17665:127.0.0.1:8765 -L 127.0.0.1:17668:127.0.0.1:8768 atlas-gate-link@185.224.208.221
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

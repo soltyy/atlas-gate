@@ -42,7 +42,10 @@ def verify(env):
     boots = {}
     for name in ("CODEX", "CLAUDE"):
         ports = {}
-        for role in ("DIRECT", "STANDBY", "LISTEN"):
+        roles = ["DIRECT", "STANDBY", "LISTEN"]
+        if env.get("ATLAS_FILE_LANES") == "1":
+            roles.extend(("FILE_DIRECT", "FILE_STANDBY", "FILE_LISTEN"))
+        for role in roles:
             port = int(env[f"{name}_{role}_PORT"])
             if not 1 <= port <= 65535 or port in used_ports:
                 raise ValueError(f"{name}_{role}_PORT вне диапазона или используется дважды")
@@ -57,7 +60,10 @@ def verify(env):
             raise ValueError(f"некорректный {name}_CHECK_TOKEN")
 
         # Вторая сверка direct обнаруживает перезапуск узла между запросами.
-        for role in ("DIRECT", "STANDBY", "DIRECT"):
+        checks = ["DIRECT", "STANDBY"]
+        if "FILE_DIRECT" in ports:
+            checks.extend(("FILE_DIRECT", "FILE_STANDBY"))
+        for role in (*checks, "DIRECT"):
             try:
                 boot = node_boot(ports[role], expected_id, token)
             except (OSError, http.client.HTTPException, ValueError) as exc:
@@ -105,11 +111,13 @@ if __name__ == "__main__":
     try:
         if args.check_selector:
             for name in ("CODEX", "CLAUDE"):
-                boot = node_boot(int(os.environ[f"{name}_LISTEN_PORT"]),
-                                 os.environ[f"{name}_NODE_ID"], os.environ[f"{name}_CHECK_TOKEN"])
-                if boot != os.environ[f"{name}_BOOT_ID"]:
-                    raise ValueError(f"{name}: селектор вернул другой bootId")
-                print(f"{name} selector: HTTP 200, identity OK")
+                roles = ("LISTEN", "FILE_LISTEN") if os.environ.get("ATLAS_FILE_LANES") == "1" else ("LISTEN",)
+                for role in roles:
+                    boot = node_boot(int(os.environ[f"{name}_{role}_PORT"]),
+                                     os.environ[f"{name}_NODE_ID"], os.environ[f"{name}_CHECK_TOKEN"])
+                    if boot != os.environ[f"{name}_BOOT_ID"]:
+                        raise ValueError(f"{name} {role}: селектор вернул другой bootId")
+                    print(f"{name} {role}: HTTP 200, identity OK")
         else:
             verified = verify(os.environ)
             pins = "".join(f"{name}_BOOT_ID={boot}\n" for name, boot in verified.items())

@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import hashlib
 import http.client
 import json
 import os
@@ -24,6 +25,9 @@ EVENTS = "/v1/sessions/canary/turns/test-turn/events"
 KEY = "tool-result:canary:call-1"
 RECEIPT = "/v1/commands/" + KEY
 BODY = b'{"callId":"call-1","content":"already executed","isError":false}'
+UPLOAD = "/v1/sessions/canary/files"
+UPLOAD_KEY = "canary-file-original"
+UPLOAD_RECEIPT = "/v1/commands/" + UPLOAD_KEY
 
 
 class Node:
@@ -33,6 +37,8 @@ class Node:
         self.token = secrets.token_hex(12)
         self.receipt = None
         self.posts = []
+        self.file_posts = []
+        self.file_receipt = None
         self.events = [{"seq": 1, "type": "tool_call", "callId": "call-1"}]
         self.lock = threading.Lock()
 
@@ -111,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"path": route.name})
         if target.path == RECEIPT:
             return self.reply(200 if node.receipt else 404, node.receipt)
+        if target.path == UPLOAD_RECEIPT:
+            return self.reply(200 if node.file_receipt else 404, node.file_receipt)
         if target.path == EVENTS:
             after = int(parse_qs(target.query)["after"][0])
             events = [e for e in node.events if e["seq"] > after]
@@ -123,10 +131,19 @@ class Handler(BaseHTTPRequestHandler):
         node = route.node
         if self.headers.get("X-Atlas-Token") != node.token:
             return self.reply(401, {})
-        if self.path != RESULT:
+        if self.path not in (RESULT, UPLOAD):
             return self.reply(404, {})
         raw = self.rfile.read(int(self.headers["Content-Length"]))
         key = self.headers.get("Idempotency-Key")
+        if self.path == UPLOAD:
+            if (self.headers.get("X-Atlas-Node"), self.headers.get("X-Atlas-Boot")) != (node.node_id, node.boot_id):
+                return self.reply(409, {})
+            with node.lock:
+                node.file_posts.append((route.name, key, raw))
+                node.file_receipt = {"requestId": key, "nodeId": node.node_id, "bootId": node.boot_id,
+                                     "sha256": hashlib.sha256(raw).hexdigest()}
+            self.close_connection = True   # Drop the ACK only after recording the upload.
+            return
         with node.lock:
             node.posts.append((route.name, key, raw))
             if node.receipt is None:
@@ -141,12 +158,12 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, node.receipt["response"])
 
 
-def request(port, node, path, body=None):
+def request(port, node, path, body=None, *, key=KEY):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     headers = {"X-Atlas-Token": node.token, "X-Atlas-Node": node.node_id,
                "X-Atlas-Boot": node.boot_id}
     if body is not None:
-        headers["Idempotency-Key"] = KEY
+        headers["Idempotency-Key"] = key
         headers["Content-Type"] = "application/json"
     try:
         conn.request("GET" if body is None else "POST", path, body, headers)
@@ -446,6 +463,100 @@ def cold_start(cmd, config, script, env, ports, nodes, routes):
             print(f"PASS selector restart with {absent.lower()} unreachable for both Routers")
 
 
+def make_lane(stack, node, front_sockets, settings, prefix):
+    front = stack.enter_context(socket.socket())
+    front.bind(("127.0.0.1", 0))
+    front_sockets.append(front)
+    port = front.getsockname()[1]
+    settings[prefix + "LISTEN_PORT"] = str(port)
+    routes = {}
+    for path in ("direct", "standby"):
+        route = routes[path] = Route(node, ("file-" if prefix.endswith("FILE_") else "") + path)
+        stack.callback(route.server_close)
+        thread = threading.Thread(target=route.serve_forever, daemon=True)
+        thread.start()
+        stack.callback(thread.join)
+        stack.callback(route.shutdown)
+        settings[prefix + path.upper() + "_PORT"] = str(route.server_port)
+    return port, routes
+
+
+def split_lanes(cmd, config, script, env, nodes, control, files, control_routes, file_routes):
+    settings = dict(env, ATLAS_FILE_LANES="1", ROUTER_PATH_CHECK_INTERVAL="250ms")
+    # Enrol must compare the raw file ports against the same control Router.
+    claude = nodes["claude"]
+    file_standby = file_routes["claude"]["standby"]
+    file_standby.identity = (claude.node_id, "foreign")
+    try:
+        result = subprocess.run([sys.executable, str(script)], env=settings, capture_output=True, timeout=20)
+        assert result.returncode and not result.stdout.strip(), "foreign file standby was enrolled"
+    finally:
+        file_standby.identity = (claude.node_id, claude.boot_id)
+    subprocess.run([sys.executable, str(script)], env=settings, capture_output=True, check=True, timeout=20)
+    subprocess.run([*cmd, "-c"], env=settings, check=True)
+    with selector(cmd, config, settings) as proc:
+        def active(name, ports, expected):
+            wait_for(f"{name} on {expected}", proc,
+                     lambda: request(ports[name], nodes[name], "/canary/route")[:2] == (200, expected))
+
+        def blocked(name, ports):
+            wait_for(f"{name} listener {ports[name]} rejected", proc,
+                     lambda: request(ports[name], nodes[name], "/canary/route")[0] in (None, 502, 503, 504))
+
+        for name, node in nodes.items():
+            active(name, control, "direct")
+            active(name, files, "file-direct")
+        subprocess.run([sys.executable, str(script), "--check-selector"], env=settings, check=True, timeout=20)
+        for name, node in nodes.items():
+            peer = "codex" if name == "claude" else "claude"
+            pinned = (node.node_id, node.boot_id)
+            direct, standby = file_routes[name]["direct"], file_routes[name]["standby"]
+            direct.identity = None
+            active(name, files, "file-standby")
+            active(name, control, "direct")
+            standby.identity = (nodes[peer].node_id, node.boot_id)
+            blocked(name, files)
+            body = b'{"id":"upload","attachments":[]}'
+            assert request(files[name], node, UPLOAD, body, key=UPLOAD_KEY)[0] != 200
+            assert not node.file_posts, "failed file paths forwarded bytes on another lane"
+            active(peer, files, "file-direct")
+            active(peer, control, "direct")
+            active(name, control, "direct")
+
+            standby.identity = pinned
+            active(name, files, "file-standby")
+            direct.identity = (node.node_id, "foreign-boot")
+            blocked(name, files)
+            active(name, control, "direct")
+            direct.identity = pinned
+            active(name, files, "file-direct")
+            ctrl = control_routes[name]["direct"]
+            ctrl.identity = (node.node_id, "foreign-boot")
+            blocked(name, control)
+            blocked(name, files)
+            active(peer, files, "file-direct")
+            ctrl.identity = pinned
+            active(name, control, "direct")
+            active(name, files, "file-direct")
+
+            ack = request(files[name], node, UPLOAD, body, key=UPLOAD_KEY)
+            assert ack[0] is None or ack[0] >= 500
+            assert node.file_posts == [("file-direct", UPLOAD_KEY, body)]
+            direct.identity = None
+            ctrl.identity = None
+            active(name, files, "file-standby")
+            active(name, control, "standby")
+            receipt = request(control[name], node, UPLOAD_RECEIPT)
+            assert receipt == (200, "standby", {"requestId": UPLOAD_KEY, "nodeId": node.node_id,
+                              "bootId": node.boot_id, "sha256": hashlib.sha256(body).hexdigest()})
+            assert node.file_posts == [("file-direct", UPLOAD_KEY, body)]
+            direct.identity = ctrl.identity = pinned
+            active(name, control, "direct")
+            active(name, files, "file-direct")
+    print("PASS four selector inputs: independent file failures, same-node and boot fences, "
+          "one file POST per Router after lost ACK and receipt over control FI")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--haproxy", required=True)
@@ -461,29 +572,20 @@ def main():
     config = args.config.resolve(strict=True)
     with contextlib.ExitStack() as stack:
         env = os.environ.copy()
+        env.pop("ATLAS_FILE_LANES", None)
         env["ROUTER_PATH_CHECK_INTERVAL"] = "1s"
         env["ROUTER_PATH_WATCHER"] = str(config.with_name("path_checks.lua"))
         nodes, ports, routes = {}, {}, {}
-        # Reserve all frontend ports at once so the two kernel allocations differ.
+        file_ports, file_routes = {}, {}
+        # Reserve every frontend until all fixture ports have been allocated.
         front_sockets = []
         for name in ("codex", "claude"):
             node = nodes[name] = Node(name)
-            front = stack.enter_context(socket.socket())
-            front.bind(("127.0.0.1", 0))
-            front_sockets.append(front)
-            ports[name] = front.getsockname()[1]
-            settings = {"LISTEN_PORT": ports[name], "CHECK_TOKEN": node.token,
-                        "NODE_ID": node.node_id}
-            routes[name] = {}
-            for path in ("direct", "standby"):
-                route = routes[name][path] = Route(node, path)
-                stack.callback(route.server_close)
-                thread = threading.Thread(target=route.serve_forever, daemon=True)
-                thread.start()
-                stack.callback(thread.join)
-                stack.callback(route.shutdown)
-                settings[path.upper() + "_PORT"] = route.server_port
-            env.update({name.upper() + "_" + k: str(v) for k, v in settings.items()})
+            prefix = name.upper() + "_"
+            env[prefix + "CHECK_TOKEN"] = node.token
+            env[prefix + "NODE_ID"] = node.node_id
+            ports[name], routes[name] = make_lane(stack, node, front_sockets, env, prefix)
+            file_ports[name], file_routes[name] = make_lane(stack, node, front_sockets, env, prefix + "FILE_")
         script = (args.preflight or config.with_name("preflight.py")).resolve(strict=True)
         check_preflight(script, env, nodes, routes)
         for paths in routes.values():
@@ -492,6 +594,7 @@ def main():
         for s in front_sockets:
             s.close()
         cmd = [args.haproxy, "-f", str(config)]
+        split_lanes(cmd, config, script, env, nodes, ports, file_ports, routes, file_routes)
         subprocess.run([*cmd, "-c"], check=True, cwd=config.parent, env=env)
         paired_timeouts(cmd, config, env, ports, nodes, routes)
         for retry_failed in (False, True):
