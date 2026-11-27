@@ -95,10 +95,51 @@ def test_standby_undrain_attempts_every_owned_node_and_reports_unconfirmed(guard
     assert attempted == ['router', 'router-claude']
 
 
+@pytest.mark.parametrize('fault', [None, 'active-connection', 'gate-active', 'changed-pin', 'wrong-fi'])
+def test_refresh_updates_only_a_quiescent_selector(guard_module, monkeypatch, fault):
+    m = guard_module
+    before = standby_reference()
+    pins = {kind: state['bootId'] for kind, state in before.items()}
+    disk = {target.pin: pins[kind] for kind, target in m.STANDBY_TARGETS.items()}
+    if fault == 'changed-pin':
+        disk['CODEX_BOOT_ID'] = 'unverified'
+    process = [('100', dict.fromkeys(pins, 'old-boot'))]
+    calls = []
+    monkeypatch.setattr(m, 'dotenv_values', lambda path: disk)
+    monkeypatch.setattr(m, 'selector_boots', lambda: process[0])
+    def node(kind, drain=None, *, port, expected):
+        assert drain is None
+        state = dict(before[kind], draining=True, activeTurns=0, activeSubagents=0, reservedUnits=0)
+        if fault == 'wrong-fi' and port == m.STANDBY_TARGETS[kind].via_fi:
+            state['bootId'] = 'different'
+        calls.append(('GET', kind, port))
+        return state
+    def run(argv, **kw):
+        calls.append(tuple(argv))
+        if argv[:2] == ['systemctl', 'show']:
+            return SimpleNamespace(stdout='active' if fault == 'gate-active' else 'inactive')
+        if argv[0] == 'ss':
+            return SimpleNamespace(stdout='remaining client' if fault == 'active-connection' else '')
+        assert argv == ['systemctl', 'restart', 'atlas-router-selector.service']
+        process[0] = ('101', pins)
+    monkeypatch.setattr(m, 'node', node)
+    monkeypatch.setattr(m, 'run', run)
+    if fault:
+        with pytest.raises(RuntimeError):
+            m.refresh_standby_pins(before)
+        assert process[0][0] == '100'
+    else:
+        m.refresh_standby_pins(before)
+        assert process[0] == ('101', pins)
+        for kind, t in m.STANDBY_TARGETS.items():
+            assert all(('GET', kind, port) in calls for port in (t.direct, t.via_fi, t.selector))
+
+
 @pytest.mark.parametrize(('failure', 'standby'),
     [(f, False) for f in (None,'busy','qualification','maintenance','startup','rollback','drain_ack',
                           'stop_ack','contract','undrain_ack','legacy_rollback')]
-    + [(f, True) for f in (None,'startup','rollback','stop_ack','drain_ack','direct_cut','undrain_unknown')])
+    + [(f, True) for f in (None,'startup','rollback','stop_ack','drain_ack','direct_cut','undrain_unknown')]
+    + [(f, 'refresh') for f in (None, 'selector_busy', 'startup')])
 @pytest.mark.parametrize('starts_busy', [False, True])
 @pytest.mark.skipif(os.name=='nt',reason='Linux systemd/symlink deployment guard')
 def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,standby,starts_busy,guard_module):
@@ -119,12 +160,23 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,stan
     monkeypatch.setattr(sys,'argv',['guard','--candidate',str(candidate),'--wheel',str(wheel),'--sha256',sha,'--tests-proof',str(tests)])
     if standby:
         nodes_path = database.parent/'nodes.json'
-        previous = json.dumps([{'node_id': name, 'url': f'http://127.0.0.1:{ports[0]}',
+        previous = json.dumps([{'node_id': name, 'url': f'http://127.0.0.1:{ports[1] if standby == "refresh" else ports[0]}',
                                 'orgs': ['unchanged']} for name, ports in m.STANDBY_PORTS.items()]).encode()
         nodes_path.write_bytes(previous)
         monkeypatch.setattr(m, 'dotenv_values', lambda path: {'ATLAS_GATE_NODES_FILE': str(nodes_path)})
         monkeypatch.setattr(m, 'check_selector', lambda states, **kw: None)
-        sys.argv.append('--router-standby')
+        if standby == 'refresh':
+            def refresh(before):
+                assert events[-1] == ('systemctl','stop','atlas-gate')
+                assert m.FLAG.read_text() == m.ADMISSION_FLAG.read_text()
+                assert draining == {'router','router-claude'}
+                assert (root/'gate').resolve() == old
+                if failure == 'selector_busy':
+                    raise RuntimeError('remaining external connection')
+                events.append(('refreshed',))
+            monkeypatch.setattr(m, 'check_staged_pins', lambda before, **kw: None)
+            monkeypatch.setattr(m, 'refresh_standby_pins',refresh)
+        sys.argv.append('--refresh-standby-pins' if standby == 'refresh' else '--router-standby')
     events=[];draining=set();failed=False;settled=False
     unreachable=set()
     def states():return {k:{'nodeId':m.STANDBY_TARGETS[k].node_id,'protocolVersion':1,'ready':True,'draining':k in draining,
@@ -212,7 +264,9 @@ def test_guard_failure_boundaries_and_rollback(tmp_path,monkeypatch,failure,stan
     else:
         m.main();assert (root/'gate').resolve()==candidate
     if standby:
-        assert nodes_path.read_bytes() == (m.standby_nodes(previous) if kept_candidate else previous)
+        assert nodes_path.read_bytes() == (m.standby_nodes(previous) if kept_candidate and standby != 'refresh' else previous)
+        if standby == 'refresh' and not failure:
+            assert ('refreshed',) in events
     if failure in ('rollback','undrain_ack'):
         assert m.FLAG.exists() and m.ADMISSION_FLAG.exists()
         assert draining==({'router','router-claude'} if failure=='rollback' else {'router-claude'})
